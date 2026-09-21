@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+
+# Tests et outillage
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# Données locales — aucun extrait de relevé ou de journal ne doit être commité,
+# même anonymisé : la ré-identification par montant et date est triviale.
+data/
+*.csv
+*.parquet
+*.xml
+!tests/fixtures/**
+
+.jbeval/
+docs/positionnement.md
+docs/target/*
