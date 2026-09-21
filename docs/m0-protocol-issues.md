@@ -12,8 +12,8 @@
 | PI-1 | GAP | high | RESOLVED (2026-09-19) |
 | PI-2 | INCONSISTENT | blocking | PROVISIONAL (option a) |
 | PI-3 | UNDERSPEC | blocking | PROVISIONAL (0.90) |
-| PI-4 | UNDERSPEC | low | OPEN |
-| PI-5 | AMBIGUOUS | medium | OPEN |
+| PI-4 | UNDERSPEC | low | RESOLVED (2026-09-21) |
+| PI-5 | AMBIGUOUS | medium | RESOLVED (2026-09-21) |
 
 ---
 
@@ -58,17 +58,19 @@ elsewhere. To be frozen in the protocol before the run.
 requirement of category B. Carried by `attribution.RUN_001`; the parameter remains mandatory in
 `Thresholds` (no hidden default). To be frozen in the protocol before the run.
 
-## PI-4: "non-catastrophic ranking" (category B) (OPEN)
+## PI-4: "non-catastrophic ranking" (category B) (RESOLVED)
 
 **Symptom.** B cites a condition with no value. `R >= 80%` and `E >= 90%` already bound it in
 practice.
 
-**Proposed decision.** Remove the clause from the protocol, or quantify it. The code ignores it.
+**Decision (2026-09-21).** The clause is removed from the protocol. The code never used it.
 
-## PI-5: "SD <= 1.5 pt (95% CI)" (OPEN)
+## PI-5: "SD <= 1.5 pt (95% CI)" (RESOLVED)
 
 **Symptom.** Two readings: (i) the between-run standard deviation is at most 1.5 points;
 (ii) the 95% CI of the mean is narrower than 1.5 points. They are not equivalent (the CI narrows
 with n). The code applies (i), on the sample standard deviation, for each decision metric (max).
 
-**Decision required.** Choose the reading; for (ii), specify the CI method.
+**Decision (2026-09-21).** Reading (i). A CI narrows as repetitions are added, so under (ii) a
+system could be made to pass by running more repetitions, which reopens post-hoc adjustment.
+The standard deviation measures repeatability independently of n.

@@ -181,6 +181,8 @@ B: HYBRID
    D < 95%  AND  E >= 90%  AND  R >= 80%
    -> OBI alone is insufficient, but OBI + correlator already give a correct global
       attribution. Co-necessary. A POSITIVE category, not a dumping ground.
+   [amended, PI-4] The source clause "non-catastrophic ranking" is removed: `R >= 80%` and
+   `E >= 90%` already bound it.
 ```
 
 Resolution of the `E < 90%` case (no sixth hole):
@@ -235,8 +237,9 @@ SD_fixed small, SD_variable large    -> stable BUT pattern-sensitive
                                         (a different architectural conclusion, NOT unstable)
 ```
 
-The "(95% CI)" wording of the source criterion is ambiguous; see PI-5. The implementation uses
-the sample standard deviation.
+**[amended, PI-5]** The criterion is the sample standard deviation of each decision metric across
+repetitions; the worst metric decides. It is not a confidence-interval width: a CI narrows as
+repetitions are added, so it could be satisfied by running more of them.
 
 ---
 
