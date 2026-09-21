@@ -19,7 +19,7 @@ not is listed under [Roadmap](#roadmap).
 - **Declared rules, ordered from strictest to most permissive.** They are
   readable, versioned, and defensible to an auditor — not weights learned by a
   model.
-- **One-to-many matching from the interface up.** A bundled payment is not an
+- **One-to-many matching from the interface up.** A bundled entry is not an
   edge case bolted on later: `Match.right_ids` has been a tuple since the first
   line of code.
 - **Typed breaks.** An unmatched record does not vanish — it comes out with an

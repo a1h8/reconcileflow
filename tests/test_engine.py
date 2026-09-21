@@ -89,7 +89,7 @@ def test_amount_outside_tolerance_yields_a_typed_break():
 
 
 def test_one_to_many_aggregation():
-    """The bundled payment: M3 matches one on the left against n on the right."""
+    """The bundled entry: M3 matches one on the left against n on the right."""
     result = reconcile(
         [rec("L1", "100.00", 1)],
         [rec("R1", "60.00", 1), rec("R2", "40.00", 2)],

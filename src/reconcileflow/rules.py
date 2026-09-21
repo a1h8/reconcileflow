@@ -148,7 +148,7 @@ def m2_tolerant(lefts: Sequence[Record], rights: Sequence[Record], tol) -> list[
 
 
 def m3_aggregate(lefts: Sequence[Record], rights: Sequence[Record], tol) -> list[Match]:
-    """One record on the left against *n* on the right (bundled payment).
+    """One record on the left against *n* on the right (bundled entry).
 
     A subset-sum problem with tolerance: NP-hard in the general case. Made
     tractable by two bounds — subset size (``max_aggregate_size``) and block
