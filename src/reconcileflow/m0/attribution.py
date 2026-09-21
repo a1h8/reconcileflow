@@ -1,6 +1,6 @@
 """M0 attribution verdict — the pre-registered decision rules, as code.
 
-Source: ``docs/target/m0-evaluation-run-001.md`` §2-§3. Every threshold below is
+Source: ``docs/m0-evaluation-protocol.md`` sections 2-3. Every threshold below is
 copied from that document; none may be adjusted after a measurement has been
 seen. A different threshold is a new protocol version, not a parameter tweak.
 
