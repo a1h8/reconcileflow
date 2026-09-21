@@ -32,7 +32,7 @@ The verdict is a property of the **pair OBI x application stack** and does not t
   connector in Java/generic-HTTP2.
 - The four fields are recorded as **dataset dimensions**, not metadata: `direct_trace_coverage`
   co-varies with them.
-- Until `target_stack` is resolved on the **real stack of the target `bank-connector`**, the run
+- Until `target_stack` is resolved on the **real stack of the target `outbound-connector`**, the run
   does not start.
 
 ---
@@ -47,7 +47,7 @@ load:
   seed_policy: [fixed, variable]   # see section 3, variance decomposition
 
 latency:
-  fake_bank_profile: C      # heavy tail: p50 40 · p95 300 · p99 850 · max several seconds
+  fake_upstream_profile: C      # heavy tail: p50 40 · p95 300 · p99 850 · max several seconds
 
 protocol:
   from: target_stack        # the real stack, not an assumed generic H2
@@ -299,17 +299,17 @@ healthy 0.08%  ->  incident 0.64%   =  +700% relative / +0.56 pt absolute
 **Scenarios:**
 ```
 S1  release regression     v4.27 only
-S2  external bank failure  v4.26 AND v4.27
+S2  external dependency failure  v4.26 AND v4.27
 S3  node failure           all pods of N7
 S4  isolated noise         1 pod, a few resets
-S5  S1 + S2 CONCURRENT     regression DURING a bank incident   <- causal confusion
+S5  S1 + S2 CONCURRENT     regression DURING an external-dependency incident   <- causal confusion
 ```
 
 **Expected signatures (testing hypotheses H1/H2/H3):**
 ```
                     release   destination   node
 H1 regression         ++          -           -
-H2 bank               -          ++           -
+H2 dependency             -          ++           -
 H3 infrastructure     -           -          ++
 H4 noise              -           -           -
 ```
@@ -325,8 +325,8 @@ estimating 11/12 means the engine cannot measure).
 **Output = factual JSON, NO LLM:**
 ```json
 {
-  "signal": "tcp_reset_rate", "service": "bank-connector", "release": "v4.27",
-  "destination": "bank.external", "baseline": 0.0008, "observed": 0.0064,
+  "signal": "tcp_reset_rate", "service": "outbound-connector", "release": "v4.27",
+  "destination": "dependency.external", "baseline": 0.0008, "observed": 0.0064,
   "affected_pods": 3, "total_pods": 12, "detection_delay_ms": 840
 }
 ```
