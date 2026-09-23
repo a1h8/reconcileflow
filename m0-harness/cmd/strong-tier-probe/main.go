@@ -72,58 +72,109 @@ type Record struct {
 	TimestampNS  uint64 `json:"timestamp_ns"`
 }
 
-func main() {
-	objPath := flag.String("obj", "bpf/probe.o", "compiled BPF object (clang -target bpf bpf/probe.c)")
-	outPath := flag.String("out", "strong-tier.jsonl", "output JSONL path")
-	flag.Parse()
+// closer is the one method run() needs from a link.Kprobe/Kretprobe result
+// (link.Link is a sealed interface — an unexported isLink() method blocks
+// implementing it outside cilium/ebpf — so attachKprobe/attachKretprobe are
+// typed to this narrower interface instead: link.Link satisfies it for free,
+// and a test fake only needs Close(), no sealed method required).
+type closer interface {
+	Close() error
+}
 
-	bootID, err := readBootID()
+// Seams over the cilium/ebpf entry points main()'s wiring calls — each
+// defaults to the real function; tests reassign and t.Cleanup-restore them
+// to run the whole wiring sequence in run() against fakes, no kernel/CAP_BPF
+// required. ebpf.Collection{} is a safe zero value for a faked newCollection
+// to return (Close() ranges over nil Programs/Maps, a no-op) — see the
+// package's own Close() implementation.
+var (
+	removeMemlock      = rlimit.RemoveMemlock
+	loadCollectionSpec = ebpf.LoadCollectionSpec
+	newCollection      = ebpf.NewCollection
+	attachKprobe       = func(sym string, p *ebpf.Program, o *link.KprobeOptions) (closer, error) {
+		return link.Kprobe(sym, p, o)
+	}
+	attachKretprobe = func(sym string, p *ebpf.Program, o *link.KprobeOptions) (closer, error) {
+		return link.Kretprobe(sym, p, o)
+	}
+	newRingbufReader = func(m *ebpf.Map) (ringbufReaderCloser, error) { return ringbuf.NewReader(m) }
+)
+
+// ringbufReader is the one method the event loop needs from *ringbuf.Reader —
+// narrowed to an interface so the loop below is testable with a scripted
+// fake, no kernel ring buffer required.
+type ringbufReader interface {
+	Read() (ringbuf.Record, error)
+}
+
+// ringbufReaderCloser adds Close to ringbufReader — what main()'s wiring
+// needs on top of what runLoop needs, so newRingbufReader can be faked too.
+type ringbufReaderCloser interface {
+	ringbufReader
+	Close() error
+}
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run is main()'s body, returning errors instead of calling log.Fatalf
+// directly — the standard "thin main, testable run" split. Every kernel-
+// facing step goes through the seams above, so this whole sequence (attach
+// order, error wrapping, the drops-map typed-nil guard) is exercisable in a
+// unit test with fakes, not just by attaching a real probe as we've done
+// manually with sudo all session.
+func run() error {
+	cfg := parseFlags(os.Args[1:])
+
+	bootID, err := readBootID(bootIDPath)
 	if err != nil {
-		log.Fatalf("read boot_id: %v", err)
+		return fmt.Errorf("read boot_id: %w", err)
 	}
 
 	// BPF programs and maps are memlock-accounted; on kernels before 5.11 (and
 	// as good practice generally) this must be raised before loading, or the
 	// load fails with EPERM even when run as root.
-	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatalf("remove memlock rlimit: %v", err)
+	if err := removeMemlock(); err != nil {
+		return fmt.Errorf("remove memlock rlimit: %w", err)
 	}
 
-	spec, err := ebpf.LoadCollectionSpec(*objPath)
+	spec, err := loadCollectionSpec(cfg.objPath)
 	if err != nil {
-		log.Fatalf("load collection spec from %s: %v", *objPath, err)
+		return fmt.Errorf("load collection spec from %s: %w", cfg.objPath, err)
 	}
 
-	coll, err := ebpf.NewCollection(spec)
+	coll, err := newCollection(spec)
 	if err != nil {
-		log.Fatalf("load collection into kernel (needs CAP_BPF/root — see STATUS comment): %v", err)
+		return fmt.Errorf("load collection into kernel (needs CAP_BPF/root — see STATUS comment): %w", err)
 	}
 	defer coll.Close()
 
-	kp, err := link.Kprobe("tcp_connect", coll.Programs["on_tcp_connect"], nil)
+	kp, err := attachKprobe("tcp_connect", coll.Programs["on_tcp_connect"], nil)
 	if err != nil {
-		log.Fatalf("attach kprobe tcp_connect: %v", err)
+		return fmt.Errorf("attach kprobe tcp_connect: %w", err)
 	}
 	defer kp.Close()
 
-	krp, err := link.Kretprobe("inet_csk_accept", coll.Programs["on_inet_csk_accept"], nil)
+	krp, err := attachKretprobe("inet_csk_accept", coll.Programs["on_inet_csk_accept"], nil)
 	if err != nil {
-		log.Fatalf("attach kretprobe inet_csk_accept: %v", err)
+		return fmt.Errorf("attach kretprobe inet_csk_accept: %w", err)
 	}
 	defer krp.Close()
 
-	rd, err := ringbuf.NewReader(coll.Maps["events"])
+	rd, err := newRingbufReader(coll.Maps["events"])
 	if err != nil {
-		log.Fatalf("open ring buffer reader: %v", err)
+		return fmt.Errorf("open ring buffer reader: %w", err)
 	}
 	defer rd.Close()
 
-	out, err := os.Create(*outPath)
+	out, enc, err := newOutputEncoder(cfg.outPath)
 	if err != nil {
-		log.Fatalf("create output: %v", err)
+		return fmt.Errorf("create output: %w", err)
 	}
 	defer out.Close()
-	enc := json.NewEncoder(out)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -132,9 +183,22 @@ func main() {
 		rd.Close() // unblocks rd.Read() below with ringbuf.ErrClosed
 	}()
 
-	log.Printf("strong-tier-probe attached (tcp_connect + inet_csk_accept), boot_id=%s, writing to %s", bootID, *outPath)
+	log.Printf("strong-tier-probe attached (tcp_connect + inet_csk_accept), boot_id=%s, writing to %s", bootID, cfg.outPath)
 
-	var ev connEvent
+	var drops dropCounter
+	if m := coll.Maps["drops"]; m != nil {
+		drops = m // typed-nil guard: assign only a genuine map, never a nil *ebpf.Map boxed into the interface
+	}
+	runLoop(rd, drops, enc, bootID)
+	return nil
+}
+
+// runLoop is main()'s event loop: decode each ring buffer sample, log and
+// skip anything malformed, and shut down cleanly (reporting the drop count)
+// once rd is closed. decodeRecord/logDrops are already pure; this is the
+// piece that wires them together, previously only exercisable by attaching
+// a real probe and running traffic — now testable with a fake ringbufReader.
+func runLoop(rd ringbufReader, drops dropCounter, enc *json.Encoder, bootID string) {
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -144,7 +208,9 @@ func main() {
 			// branch below in a tight loop instead of exiting (caught 2026-09-23
 			// when the process had to be killed rather than shutting down clean).
 			if errors.Is(err, ringbuf.ErrClosed) {
-				logDrops(coll.Maps["drops"])
+				if drops != nil {
+					logDrops(drops)
+				}
 				log.Println("shutting down")
 				return
 			}
@@ -152,39 +218,89 @@ func main() {
 			continue
 		}
 
-		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &ev); err != nil {
+		record, err := decodeRecord(rec.RawSample, bootID)
+		if err != nil {
 			log.Printf("decode ring buffer record: %v", err)
 			continue
 		}
-
-		side := "connect"
-		if ev.Side == 2 {
-			side = "accept"
-		}
-
-		_ = enc.Encode(Record{
-			Side:         side,
-			SocketCookie: ev.SocketCookie,
-			NetnsCookie:  ev.NetnsCookie,
-			BootID:       bootID,
-			SAddr:        addrString(ev.Family, ev.SAddr, ev.SAddrV6),
-			DAddr:        addrString(ev.Family, ev.DAddr, ev.DAddrV6),
-			SPort:        ev.SPort,
-			DPort:        ev.DPort,
-			PID:          ev.PID,
-			TimestampNS:  ev.TimestampNS,
-		})
+		_ = enc.Encode(record)
 	}
+}
+
+// bootIDPath is the one real boot_id source. A var, not a const: readBootID
+// itself stays a pure function of its argument (testable against a tmpfile),
+// and run()'s own read-boot_id error path is exercisable by overriding this
+// var to a bad path, the same seam pattern as the vars above.
+var bootIDPath = "/proc/sys/kernel/random/boot_id"
+
+type config struct {
+	objPath string
+	outPath string
+}
+
+// parseFlags is main()'s flag handling, pulled out so it's testable without
+// touching the process-global flag.CommandLine (flag.NewFlagSet gives each
+// call its own set, safe to invoke repeatedly in tests).
+func parseFlags(args []string) config {
+	fs := flag.NewFlagSet("strong-tier-probe", flag.ExitOnError)
+	objPath := fs.String("obj", "bpf/probe.o", "compiled BPF object (clang -target bpf bpf/probe.c)")
+	outPath := fs.String("out", "strong-tier.jsonl", "output JSONL path")
+	_ = fs.Parse(args)
+	return config{objPath: *objPath, outPath: *outPath}
+}
+
+// newOutputEncoder opens the JSONL output file and wraps it in an encoder —
+// split from main() so the file-creation error path and the encoder wiring
+// are testable against a tmpdir, no kernel/CAP_BPF required.
+func newOutputEncoder(path string) (*os.File, *json.Encoder, error) {
+	out, err := os.Create(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, json.NewEncoder(out), nil
+}
+
+// decodeRecord turns one raw ring buffer sample into the JSONL Record —
+// pulled out of the read loop above so it's testable with a plain byte
+// slice, no kernel/CAP_BPF required. This is the only place connEvent's
+// wire layout and Record's JSON shape actually meet.
+func decodeRecord(raw []byte, bootID string) (Record, error) {
+	var ev connEvent
+	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
+		return Record{}, err
+	}
+
+	side := "connect"
+	if ev.Side == 2 {
+		side = "accept"
+	}
+
+	return Record{
+		Side:         side,
+		SocketCookie: ev.SocketCookie,
+		NetnsCookie:  ev.NetnsCookie,
+		BootID:       bootID,
+		SAddr:        addrString(ev.Family, ev.SAddr, ev.SAddrV6),
+		DAddr:        addrString(ev.Family, ev.DAddr, ev.DAddrV6),
+		SPort:        ev.SPort,
+		DPort:        ev.DPort,
+		PID:          ev.PID,
+		TimestampNS:  ev.TimestampNS,
+	}, nil
+}
+
+// dropCounter is the one method logDrops needs from *ebpf.Map — narrowed to
+// an interface so it's testable with a fake, no kernel map required. *ebpf.Map
+// satisfies this already (see its Lookup(key, valueOut any) error method).
+type dropCounter interface {
+	Lookup(key, valueOut interface{}) error
 }
 
 // logDrops reports how many events bpf_ringbuf_reserve() failed to reserve
 // (buffer full) — these never reached userspace at all, so no amount of
 // pairing/join analysis on the JSONL output can see them. A non-zero count
 // means the "100%" pairing numbers only cover what the ring buffer could hold.
-func logDrops(m *ebpf.Map) {
-	if m == nil {
-		return
-	}
+func logDrops(m dropCounter) {
 	var n uint64
 	if err := m.Lookup(uint32(0), &n); err != nil {
 		log.Printf("read drop counter: %v", err)
@@ -193,8 +309,8 @@ func logDrops(m *ebpf.Map) {
 	log.Printf("ring buffer reserve failures (events dropped, never emitted): %d", n)
 }
 
-func readBootID() (string, error) {
-	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+func readBootID(path string) (string, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
