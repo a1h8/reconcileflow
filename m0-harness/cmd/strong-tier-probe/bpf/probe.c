@@ -51,12 +51,16 @@ struct conn_event {
 	__u64 socket_cookie; // raw `struct sock *` value — stable per-socket identity for
 	                     // this kernel's lifetime, not a SO_COOKIE-style monotonic counter
 	__u64 netns_cookie;  // net->ns.inum, read via CO-RE, not the bpf_get_netns_cookie() helper
-	__u32 saddr;
-	__u32 daddr;
+	__u8 saddr_v6[16];   // skc_v6_rcv_saddr — valid when family == AF_INET6
+	__u8 daddr_v6[16];   // skc_v6_daddr — valid when family == AF_INET6
+	__u32 saddr;         // skc_rcv_saddr — valid when family == AF_INET
+	__u32 daddr;         // skc_daddr — valid when family == AF_INET
 	__u16 sport;
 	__u16 dport;
 	__u32 pid;
+	__u16 family;        // skc_family: picks which of the two addr representations above is valid
 	__u8 side;
+	__u8 _pad0[5];       // explicit pad to keep timestamp_ns 8-byte aligned; mirrored by hand in main.go
 	__u64 timestamp_ns;
 };
 
@@ -65,19 +69,37 @@ struct {
 	__uint(max_entries, 1 << 20); // 1 MiB
 } events SEC(".maps");
 
+// Counts bpf_ringbuf_reserve() failures (buffer full) — the "100% pairing"
+// numbers in README.md only cover events that made it into the ring buffer;
+// this map is what lets main.go report how many never did.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} drops SEC(".maps");
+
 static __always_inline void emit(struct sock *sk, enum side side)
 {
 	struct conn_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
-	if (!ev)
+	if (!ev) {
+		__u32 key = 0;
+		__u64 *cnt = bpf_map_lookup_elem(&drops, &key);
+		if (cnt)
+			__sync_fetch_and_add(cnt, 1);
 		return; // buffer full: drop, never block the kernel path
+	}
 
 	ev->socket_cookie = (__u64)(void *)sk;
 	ev->netns_cookie = BPF_CORE_READ(sk, __sk_common.skc_net.net, ns.inum);
+	BPF_CORE_READ_INTO(&ev->saddr_v6, sk, __sk_common.skc_v6_rcv_saddr);
+	BPF_CORE_READ_INTO(&ev->daddr_v6, sk, __sk_common.skc_v6_daddr);
 	ev->saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
 	ev->daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
 	ev->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
 	ev->dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
 	ev->pid = bpf_get_current_pid_tgid() >> 32;
+	ev->family = BPF_CORE_READ(sk, __sk_common.skc_family);
 	ev->side = side;
 	ev->timestamp_ns = bpf_ktime_get_ns();
 

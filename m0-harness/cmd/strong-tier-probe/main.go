@@ -22,9 +22,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -37,20 +39,23 @@ import (
 )
 
 // connEvent mirrors struct conn_event in probe.c byte-for-byte, including the
-// 7-byte pad the C compiler inserts before timestamp_ns to keep it 8-byte
-// aligned. binary.Read does not infer C struct padding on its own — this must
-// stay in lockstep with probe.c by hand, there is no shared source of truth
-// between the two languages here.
+// explicit 5-byte pad before timestamp_ns to keep it 8-byte aligned.
+// binary.Read does not infer C struct padding on its own — this must stay in
+// lockstep with probe.c by hand, there is no shared source of truth between
+// the two languages here.
 type connEvent struct {
 	SocketCookie uint64 // raw `struct sock *` value, not a SO_COOKIE-style counter — see bpf/probe.c STATUS
 	NetnsCookie  uint64 // net->ns.inum via CO-RE, not the bpf_get_netns_cookie() helper
+	SAddrV6      [16]byte
+	DAddrV6      [16]byte
 	SAddr        uint32
 	DAddr        uint32
 	SPort        uint16
 	DPort        uint16
 	PID          uint32
+	Family       uint16 // AF_INET or AF_INET6 — picks which of SAddr/SAddrV6 (and DAddr/DAddrV6) is valid
 	Side         uint8
-	_            [7]byte
+	_            [5]byte
 	TimestampNS  uint64
 }
 
@@ -133,7 +138,13 @@ func main() {
 	for {
 		rec, err := rd.Read()
 		if err != nil {
-			if err == ringbuf.ErrClosed {
+			// rd.Read() wraps the sentinel (fmt.Errorf("ringbuffer: %w", ErrClosed)),
+			// so a direct == against ringbuf.ErrClosed never matches on a real
+			// shutdown — that bug sent every Ctrl+C into the log.Printf/continue
+			// branch below in a tight loop instead of exiting (caught 2026-09-23
+			// when the process had to be killed rather than shutting down clean).
+			if errors.Is(err, ringbuf.ErrClosed) {
+				logDrops(coll.Maps["drops"])
 				log.Println("shutting down")
 				return
 			}
@@ -156,14 +167,30 @@ func main() {
 			SocketCookie: ev.SocketCookie,
 			NetnsCookie:  ev.NetnsCookie,
 			BootID:       bootID,
-			SAddr:        ipv4String(ev.SAddr),
-			DAddr:        ipv4String(ev.DAddr),
+			SAddr:        addrString(ev.Family, ev.SAddr, ev.SAddrV6),
+			DAddr:        addrString(ev.Family, ev.DAddr, ev.DAddrV6),
 			SPort:        ev.SPort,
 			DPort:        ev.DPort,
 			PID:          ev.PID,
 			TimestampNS:  ev.TimestampNS,
 		})
 	}
+}
+
+// logDrops reports how many events bpf_ringbuf_reserve() failed to reserve
+// (buffer full) — these never reached userspace at all, so no amount of
+// pairing/join analysis on the JSONL output can see them. A non-zero count
+// means the "100%" pairing numbers only cover what the ring buffer could hold.
+func logDrops(m *ebpf.Map) {
+	if m == nil {
+		return
+	}
+	var n uint64
+	if err := m.Lookup(uint32(0), &n); err != nil {
+		log.Printf("read drop counter: %v", err)
+		return
+	}
+	log.Printf("ring buffer reserve failures (events dropped, never emitted): %d", n)
 }
 
 func readBootID() (string, error) {
@@ -179,4 +206,18 @@ func ipv4String(be uint32) string {
 	// kernel; read as a raw u32 by BPF_CORE_READ, so byte 0 here is already the
 	// first octet — no additional byte-swap needed, only decomposition.
 	return fmt.Sprintf("%d.%d.%d.%d", byte(be), byte(be>>8), byte(be>>16), byte(be>>24))
+}
+
+// addrString picks the valid address representation by family: skc_daddr/
+// skc_rcv_saddr are IPv4-only fields that the kernel never populates for an
+// AF_INET6 socket (this is what caused the "daddr=0.0.0.0" symptom on this
+// box, where loopback traffic to `localhost` resolves to `::1`) — the real
+// address for those sockets is skc_v6_daddr/skc_v6_rcv_saddr instead.
+func addrString(family uint16, v4 uint32, v6 [16]byte) string {
+	if family == syscall.AF_INET6 {
+		// skc_v6_daddr/skc_v6_rcv_saddr are stored in network byte order,
+		// exactly what net.IP expects — no byte-swap needed here either.
+		return net.IP(v6[:]).String()
+	}
+	return ipv4String(v4)
 }

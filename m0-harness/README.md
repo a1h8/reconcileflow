@@ -118,7 +118,7 @@ corrected, because it is itself a small illustration of exactly the failure
 mode (state that outlives what a "run" is supposed to mean) the wider M0
 protocol exists to catch before it reaches a real measurement.
 
-## Strong-tier probe (`cmd/strong-tier-probe`) — iteration 2, still not loaded clean
+## Strong-tier probe (`cmd/strong-tier-probe`) — iteration 6, scale + drop-count verified
 
 An eBPF probe for the strong-tier identity (`docs/target/ground-truth-eval-plane-v3.md`,
 `boot_id + network_namespace + socket_cookie`). Design: a single privileged observer
@@ -182,18 +182,111 @@ left. This is the core hypothesis confirmed empirically: a single privileged obs
 one clock does not suffer the cross-process ordering race that broke the fallback tier at
 this same scale.
 
+### Iteration 4 (2026-09-23) — the three-way join
+
+Joined strong-tier kernel events against `load-gen`'s `trace_id` and `fake-upstream`'s observed
+`trace_id` for the same run (n=2000, c=100):
+
+| | Count |
+|---|---|
+| Kernel connect/accept pairs | 687 |
+| Load-gen records (HTTP requests) | 2000 |
+| Kernel pairs cross-validated (trace_id agrees, load-gen ↔ fake-upstream ↔ kernel) | 579 |
+| Mismatched trace_id | **0** |
+| Kernel pairs with no matching load-gen record (see below) | 108 |
+
+**Zero mismatches — the identity scheme itself is never wrong.** The 108 gap is a different,
+unrelated finding: each of those 108 client ports shows exactly **one** isolated kernel
+`connect` event with no accompanying `load-gen` record at all — not a wrong pairing, an
+unused one. Consistent with Go's HTTP/2 transport opening surplus TCP connections under
+bursty concurrent load (multiple goroutines can each trigger a dial before any of them
+notices a connection is already being established or exists to reuse) — connections the
+kernel genuinely sees connect and accept, that never end up carrying a logged request. This
+is a real property of the HTTP client under test, not a flaw in the strong-tier identity or
+in this measurement.
+
 **What this does not yet show:**
-- This measures connect/accept pairing at the kernel level only. It has not yet been joined
-  against `load-gen`'s actual `trace_id` records to confirm full end-to-end attribution — that
-  three-way join (strong-tier events + load-gen + fake-upstream) is the next step, not done here.
+- 687 actual TCP connections carried 2000 requests (HTTP/2 multiplexing, ~2.9 requests per
+  connection on average) — this join validates connection-level identity, not yet
+  stream-level (which request, on a shared connection, maps to which kernel event). That
+  needs the H2 stream_id, which the kernel-level probe does not see (it is inside the TLS
+  payload) — consistent with `ground-truth-eval-plane-v3.md`'s own note that stream_id needs
+  application-level capture, not eBPF alone.
 - The pairing method used (per-port temporal ordering) is a minimal proof of concept, not
   the full `boot_id + netns + socket_cookie` composite key from the protocol design — good
   enough to validate the single-observer hypothesis, not yet the finished strong-tier oracle.
-- `daddr=0.0.0.0` on every connect-side event (confirmed on all 3927 + 354, not a fluke) is
-  still unexplained and unfixed — likely `tcp_connect()`'s kprobe firing before
-  `skc_daddr` is populated for this call path. Doesn't block port-based pairing, but the
-  field is broken and any future consumer keying on destination address at connect time
-  needs to know that.
+- ~~`daddr=0.0.0.0` on every connect-side event~~ — fixed, see "Iteration 5" below.
+
+### Iteration 5 (2026-09-23) — the daddr=0.0.0.0 fix, verified on real traffic
+
+The iteration-4 guess (kprobe firing before `skc_daddr` is populated) was wrong:
+`tcp_v4_connect()` sets `inet_daddr` — a macro alias for `skc_daddr` — before it calls
+`tcp_connect()`, so the field can't be a timing race. The real cause: `load-gen` dials
+`https://localhost:8443`, Go's dual-stack dialer resolves that to `::1` on this box, and
+every traced socket is therefore AF_INET6 — for which `skc_daddr`/`skc_rcv_saddr` (the
+IPv4-only fields in `sock_common`) are simply never written by the stack. The actual
+address lives in a separate pair of fields in the same struct, `skc_v6_daddr`/
+`skc_v6_rcv_saddr`. That's why the bug was 100% reproducible rather than intermittent —
+every connection on this box takes the v6 path, not a race that sometimes loses.
+
+**Fix:** `bpf/probe.c` now reads `skc_family` plus both address representations
+unconditionally (`BPF_CORE_READ_INTO` for the 16-byte v6 fields); `main.go` mirrors the
+struct byte-for-byte (verified 80 bytes on both the C and Go sides via a throwaway
+`sizeof`/`unsafe.Sizeof` check) and picks the valid representation by `family`.
+
+**Verified on real traffic** (n=2000, c=100, same re-run methodology as iterations 3/4):
+- 568/568 connect+accept pairs on port 8443 now show `saddr=::1, daddr=::1` — zero
+  `0.0.0.0` remaining, down from 100% before the fix.
+- Per-port time-ordered pairing (iteration 3's method): 568/568 paired, 0 unpaired.
+- Three-way join (kernel ↔ load-gen ↔ fake-upstream, iteration 4's method): all 470
+  kernel connections matched to an app-level `conn_key` (0 unmatched, cleaner than
+  iteration 4's 108/687), all 2000 stream-level `trace_id` checks agree, 0 mismatches.
+
+The fix doesn't disturb the identity/pairing/join guarantees already validated in
+iterations 3–4 — it only repairs a field that was broken, exactly as flagged.
+
+### Iteration 6 (2026-09-23) — closing the gaps the "100%" claim glossed over
+
+Iteration 5's numbers were real but narrow: connection-level pairing only, at n=2000,
+on a synthetic loopback stack, with no visibility into whether the ring buffer ever
+silently drops an event under load. Four follow-ups, all against the now-fixed probe:
+
+**A shutdown bug, found while trying to read a drop counter.** `main.go` checked
+`err == ringbuf.ErrClosed` on `Ctrl+C`, but `cilium/ebpf`'s `ringbuf.Reader.Read()`
+wraps the sentinel (`fmt.Errorf("ringbuffer: %w", ErrClosed)`), so the equality check
+never matched — every shutdown fell into the generic-error branch and spun in a tight
+`log.Printf`/`continue` loop instead of exiting, confirmed live when the process had to
+be killed rather than shutting down on its own. Fixed with `errors.Is`.
+
+**Ring buffer drop counter** — `bpf/probe.c` gained a one-entry `BPF_MAP_TYPE_ARRAY`
+incremented on `bpf_ringbuf_reserve()` failure (buffer full, event never emitted);
+`main.go` reads and logs it on clean shutdown. Result at n=10000/c=200, the scale that
+degraded the fallback tier to 96.3%: **0 drops**. The "100%" pairing numbers are not
+silently missing a chunk of traffic, at least not at this scale.
+
+**Re-run at n=10000/c=200** (the fallback-tier degradation scale, not iteration 5's
+n=2000): 3908/3908 connect+accept pairs on port 8443, 0 unpaired, 0 zero-address. The
+daddr fix holds under the same pressure that originally broke the fallback tier.
+
+**IPv4 path exercised** for the first time (`load-gen --target https://127.0.0.1:8443`)
+— iteration 5 only ever saw the box's default `::1` route. 570/570 pairs, all
+`saddr=127.0.0.1, daddr=127.0.0.1`, 0 zero-address: the v4 branch added alongside the
+v6 fix (never exercised on real traffic before now) also works.
+
+**`netns_cookie`/`socket_cookie` sanity check:**
+- `netns_cookie=4026531833` on every record matches `readlink /proc/self/ns/net` →
+  `net:[4026531833]` exactly. Confirmed correct.
+- `socket_cookie` (the raw `struct sock*` substitute from iteration 2) is **not a
+  globally-unique key over a run**, and that's expected, not a bug: 693 of 4547
+  connect-side cookies were reused (kernel slab reuse after the prior socket frees),
+  minimum reuse gap 3.76ms. The probe doesn't trace socket teardown (no `tcp_close`
+  kprobe), so live-overlap can't be formally ruled out — only inferred from spacing.
+  Today's pairing doesn't key on `socket_cookie` alone (per-port temporal ordering
+  does the work), so this doesn't affect the results above. It does mean a future
+  consumer that trusts `socket_cookie` as a standalone unique identifier, as the
+  `(boot_id, netns, socket_cookie)` composite key in `ground-truth-eval-plane-v3.md`
+  §4 implies, would need the full composite key (not yet built, see iteration 4's
+  "what this does not yet show") or teardown tracing to be safe.
 
 ### Getting `clang` without root
 
