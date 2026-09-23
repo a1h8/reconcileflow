@@ -21,6 +21,42 @@ witness cells before trusting any measurement.
   function. Both binaries must call it, not reformat the key by hand — see
   "Lesson" below for why that matters.
 
+## Architecture overview
+
+Where this harness sits relative to OBI, the correlator, and the rest of the
+target platform (`docs/target/ground-truth-eval-plane-v3.md`):
+
+```mermaid
+flowchart TB
+    subgraph SUT["System Under Test — never sees the Ground Truth"]
+        OBI["OBI (predictor P1)<br/>direct eBPF trace_id<br/>not deployed in this repo yet"]
+        CORR["Correlator (predictor P2)<br/>temporal candidate ranking<br/>deliberately not started —<br/>waiting on OBI's measured coverage"]
+    end
+
+    LG["load-gen<br/>synthetic client, authoritative trace_id"]
+    FU["fake-upstream<br/>synthetic server, HTTP/2 + TLS"]
+    LG -->|traceparent header| FU
+
+    subgraph ORACLE["Independent Oracle — this directory"]
+        FB["Fallback tier<br/>(5-tuple, connection_start, generation)<br/>measured: 96.3% at n=10000/c=200<br/>369 join misses — cross-process port-reuse race"]
+        ST["Strong tier — cmd/strong-tier-probe<br/>kprobe tcp_connect + kretprobe inet_csk_accept<br/>100% pairing at n=10000/c=200 (v4 + v6)<br/>ring-buffer drops instrumented: 0 observed<br/>socket_cookie: allocator-reused, not a global key<br/>full boot_id+netns+socket_cookie key not built yet"]
+        GT[("Ground Truth Store")]
+        FB --> GT
+        ST --> GT
+    end
+
+    LG -. observed by .-> FB
+    FU -. observed by .-> FB
+    LG -. kernel-observed .-> ST
+    FU -. kernel-observed .-> ST
+
+    GT ==judges both, one-way, never fed back==> OBI
+    GT ==judges both, one-way, never fed back==> CORR
+
+    NEXT["Not yet built:<br/>real Gateway → downstream services → connector pipeline<br/>only this synthetic 2-hop stand-in exists today"]
+    SUT -. future scope .-> NEXT
+```
+
 ## Building
 
 `bin/`, generated/vendored BPF inputs, and `*.jsonl` run output are gitignored —
