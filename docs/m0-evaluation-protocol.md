@@ -18,13 +18,19 @@
 
 ```yaml
 target_stack:
-  protocol_flavor:       REQUIRED   # gRPC | generic HTTP/2 | HTTP/1.1
-  runtime:               REQUIRED   # Go | Java | ...
-  client_library:        REQUIRED   # grpc-go | ...
-  obi_propagation_mode:  REQUIRED   # headers | ... | none
+  protocol_flavor:       generic HTTP/2   # RESOLVED 2026-09-23 — see justification below
+  runtime:               Go
+  client_library:        net/http (stdlib, native HTTP/2)
+  obi_propagation_mode:  headers          # W3C traceparent
 
-run_status: BLOCKED_UNTIL_TARGET_STACK_RESOLVED
+run_status: TARGET_STACK_RESOLVED — first vertical-slice results below (§0.2)
 ```
+
+**Justification (2026-09-23), fixed before any measurement — not adjusted after the fact:**
+- **Go**: consistent with the stream-processing choice for the operational-state component (Goka) and with the platform's own reasoning on language choice, which explicitly endorses Go for **a standalone service** — exactly the role of an `outbound-connector`.
+- **Generic HTTP/2, not gRPC**: real external counterparty APIs are almost always REST/HTTPS, never gRPC exposed publicly — gRPC is an internal architecture choice. Consistent with the H2+TLS already modeled elsewhere in this evaluation plane, not a new assumption.
+- **`net/http`**: follows mechanically from Go + HTTP/2, no third-party library to justify.
+- **headers**: standard W3C `traceparent` propagation — the only option that needs no extra application instrumentation for OBI to see it.
 
 The verdict is a property of the **pair OBI x application stack** and does not transfer. So:
 
@@ -32,8 +38,56 @@ The verdict is a property of the **pair OBI x application stack** and does not t
   connector in Java/generic-HTTP2.
 - The four fields are recorded as **dataset dimensions**, not metadata: `direct_trace_coverage`
   co-varies with them.
-- Until `target_stack` is resolved on the **real stack of the target `outbound-connector`**, the run
-  does not start.
+- `target_stack` is resolved (above, 2026-09-23) on the declared real stack of the target
+  `outbound-connector` — the run can proceed per the harness build order in §0.1.
+
+### 0.1 First real result (2026-09-23) — fallback tier only
+
+A minimal harness exists implementing this stack: a controlled-latency HTTP/2 server, a load
+generator that originates `traceparent` (authoritative by construction), and an offline join
+reporting `D_acc` — matched / **expected**, where a join miss counts as a failure rather than
+being excluded from the denominator.
+
+| Cell | Scale | D_acc | Join misses |
+|---|---|---|---|
+| Normal (pooling on) | n=500, c=100 | 1.0000 | 0 |
+| Positive control (no pooling, isolated) | n=500, c=100 | 1.0000 | 0 |
+| Negative control (shuffled trace_id) | n=500, c=100 | 0.0000 | 0 |
+| **Normal, sustained load** | **n=10000, c=200** | **0.9631** | **369** |
+
+**The scale result is the one that matters, not the small-n ones.** All 369 misses share one
+signature: the client-side and server-side processes disagree on the reuse generation of the same
+underlying 5-tuple. Both count 5-tuple recurrences correctly; under sustained concurrency the OS
+recycles ephemeral ports fast enough that two independent processes can observe the recycling in
+a different relative order — there is no atomicity between them. This is the fallback-tier oracle
+(`5tuple, connection_start, generation`, §1 below) failing on its own terms at moderate scale, not
+a harness defect to silence.
+
+**What this does and does not show.** This measures the fallback tier only. The strong tier
+(`boot_id, network_namespace, socket_cookie`) is kernel-assigned and does not suffer this
+cross-process ordering skew. Read 96.3% here as concrete evidence *for* building that strong
+tier before trusting the fallback one past a few hundred concurrent connections, not as grounds
+to declare regime A or C — that call still waits on the three-way join below.
+
+### 0.2 Strong tier — first real measurement (2026-09-23)
+
+A single privileged observer (kprobe on `tcp_connect`, kretprobe on `inet_csk_accept`) was
+built and loaded successfully after fixing a program-type/helper mismatch caught by the real
+kernel verifier. Same scale as the fallback-tier degradation above:
+
+| Scale | Connect events | Paired to an accept |
+|---|---|---|
+| n=1000, c=100 | 354 | 354/354 (100%) |
+| **n=10000, c=200** | **3927** | **3927/3927 (100%)**, incl. 328 same-port collisions resolved by time ordering |
+
+**The core hypothesis is confirmed empirically.** At the exact scale where the fallback tier
+lost 369/10000, a single observer with one clock — no cross-process race — correctly pairs
+100%, including the 328 cases where a client port was reused mid-run, resolved because one
+observer's own timestamps put connect-before-accept in a provable order.
+
+**Not yet shown**: this is kernel-level connect/accept pairing only, not yet cross-checked
+against `load-gen`'s actual `trace_id` records — the three-way join that would confirm full
+end-to-end attribution is the next step, not done here.
 
 ---
 

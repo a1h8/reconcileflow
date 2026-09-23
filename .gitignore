@@ -41,5 +41,5 @@ data/
 !tests/fixtures/**
 
 .jbeval/
-docs/positionnement.md
+docs/target/positionnement.md
 docs/target/*
