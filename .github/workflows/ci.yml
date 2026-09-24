@@ -111,7 +111,10 @@ jobs:
           # pkill by name, not the captured PID: sudo may fork a monitor
           # process rather than exec'ing in place, so $! isn't reliably the
           # signal target — it's still the right thing for `wait` below.
-          sudo pkill -INT -x strong-tier-probe
+          # -f (full command line), not -x: "strong-tier-probe" is 17 chars,
+          # over the 15-char /proc/[pid]/comm limit -x matches against
+          # (confirmed failing here: "zero matches", kernel truncates comm).
+          sudo pkill -INT -f strong-tier-probe
           wait "$probe_job"
           echo "--- probe log ---"
           cat /tmp/smoke.log
