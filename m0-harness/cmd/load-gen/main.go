@@ -47,6 +47,10 @@ func main() {
 	mask := flag.Bool("mask", false, "Masque A2 (ground-truth-eval-plane-v3.md §6): don't send the "+
 		"traceparent header, simulating propagation loss — the JSONL record still logs the true "+
 		"trace_id/conn_key/stream_id/timestamp as ground truth, only the wire doesn't carry it")
+	truthInPath := flag.Bool("truth-in-path", false, "embed trace_id in the request path (e.g. /truth-<id>), "+
+		"visible in OBI's trace_printer output regardless of header propagation — an independent ground-truth "+
+		"channel for scoring a correlator's blind (port+timing-only) guess, never fed to the correlator itself. "+
+		"fake-upstream's handler is a catch-all, so any path works unmodified")
 	seed := flag.String("seed-policy", "variable", "fixed | variable (docs/target §1) — fixed reseeds identically per run, variable does not")
 	flag.Parse()
 
@@ -90,7 +94,11 @@ func main() {
 				},
 			})
 
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, *target+"/", nil)
+			path := "/"
+			if *truthInPath {
+				path = "/truth-" + traceID
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, *target+path, nil)
 			if err != nil {
 				log.Printf("build request: %v", err)
 				return
@@ -123,7 +131,8 @@ func main() {
 		}()
 	}
 	wg.Wait()
-	log.Printf("done: %d/%d requests sent, control=%q pool=%v mask=%v", sent.Load(), *total, *control, *pool, *mask)
+	log.Printf("done: %d/%d requests sent, control=%q pool=%v mask=%v truthInPath=%v",
+		sent.Load(), *total, *control, *pool, *mask, *truthInPath)
 }
 
 func randHex(n int) string {
