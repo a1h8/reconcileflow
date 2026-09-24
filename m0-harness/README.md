@@ -871,12 +871,29 @@ method.
 **The chain is only as strong as its weakest link.** The bridge concept is
 validated — the final stage alone, given a correct client port, performs
 like the earlier best case — but the current backend-pooling behavior
-defeats it before it gets there. Next: force Traefik to open a fresh
-backend connection per request (disable its backend keep-alive) to test
-the *complete* bridge end-to-end, isolating whether the concept holds all
-the way through once that one stage's ambiguity is removed — understanding
-this trades away the efficiency real connection pooling exists for, so it
-proves the concept, not a production configuration.
+defeats it before it gets there.
+
+**Tried to force it open, and hit Go's own transport semantics, not just
+Traefik's.** `maxIdleConnsPerHost: 0` doesn't disable pooling in Go's
+`http.Transport` — it means "use the default (2)," a well-known gotcha,
+not "unlimited/off." `forwardingTimeouts.idleConnTimeout: 1ms` had no effect
+at c=50 (497/500 still on one port): under sustained concurrent load,
+connections are essentially never idle long enough for the timeout to ever
+fire — there's no gap to time out. Dropping to c=1 (sequential requests)
+let it partially work — 7 distinct ports over 50 requests, up from 1 — but
+at c=1 there's no real candidate ambiguity to resolve in the first place
+(only one request in flight at a time), so proving the concept there
+proves nothing about the case that matters.
+
+**Stopping this specific avenue here.** Defeating a real reverse proxy's
+connection pooling under genuine concurrent load isn't achievable through
+Traefik's exposed config surface with the settings tried — would need
+either patching Traefik itself or replacing it with a minimal purpose-built
+test proxy, both a different, larger undertaking than tuning existing
+knobs. The bridge concept remains validated at the two stages that could
+be isolated (client-side port distribution, final candidate narrowing);
+whether it holds end-to-end under real concurrent load through a pooling
+proxy is genuinely unresolved, not concluded either way.
 
 ## Known limitations of this first slice
 
