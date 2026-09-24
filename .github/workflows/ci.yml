@@ -54,9 +54,22 @@ jobs:
       - name: verify clang has a BPF backend
         run: clang --target=bpf --version
 
+      # Ubuntu's apt `bpftool` is locked to an exact kernel package
+      # (linux-tools-$(uname -r)) that doesn't exist for the runner's Azure
+      # kernel flavor — confirmed failing here. `btf dump file` itself has
+      # no such requirement (it just reads and pretty-prints the BTF file),
+      # so the portable static release binary works on any kernel — same
+      # fallback pattern as "Getting clang without root" in the README.
+      - name: install portable bpftool
+        run: |
+          curl -sSL -o /tmp/bpftool.tar.gz \
+            https://github.com/libbpf/bpftool/releases/download/v7.7.0/bpftool-v7.7.0-amd64.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/bpftool.tar.gz bpftool
+          bpftool version
+
       - name: generate vmlinux.h
         working-directory: m0-harness/cmd/strong-tier-probe/bpf
-        run: sudo bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+        run: sudo /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
 
       - name: vendor libbpf headers
         working-directory: m0-harness/cmd/strong-tier-probe/bpf
