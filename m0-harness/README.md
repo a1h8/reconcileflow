@@ -30,7 +30,7 @@ target platform (`docs/target/ground-truth-eval-plane-v3.md`):
 flowchart TB
     subgraph SUT["System Under Test — never sees the Ground Truth"]
         OBI["OBI (predictor P1)<br/>direct eBPF trace_id<br/>direct_trace_coverage = 1.0000, STABLE<br/>(n=10000/c=200 × 10 reps, this stack only)"]
-        CORR["Correlator (predictor P2)<br/>temporal candidate ranking<br/>deliberately not started —<br/>waiting on OBI's measured coverage"]
+        CORR["Correlator (predictor P2) — MVP only<br/>temporal candidate ranking on masked traffic<br/>R: 52%→100% as window widens (100ms→1s)<br/>T unmeasured — shares its truth signal with R,<br/>needs an independent (kernel) clock to mean anything"]
     end
 
     LG["load-gen<br/>synthetic client, authoritative trace_id"]
@@ -426,11 +426,61 @@ reading of `D_cov` regardless.
   client) — `D_cov = 1.0000` here says nothing about those.
 - Same host, loopback only — no real network hop, no container/k8s namespace
   boundary.
-- The correlator (P2) still hasn't been built — per
-  `docs/target/m0-correlation-spike-protocol.md`, that was deliberately deferred
-  until OBI's coverage was actually measured. It now has been, and it's high
-  enough on this stack that building the correlator next should be justified by
-  a stack where OBI's coverage is *not* this clean, not this one.
+- The correlator (P2) MVP built below only exists because this section forced
+  the residual traffic into existence via masking — on real, unmasked traffic
+  on this stack, there's nothing for it to do (see next section).
+
+## Correlator MVP (P2) — Masque A2 calibration (2026-09-24)
+
+Thesis 2 (`ground-truth-eval-plane-v3.md`, top of file) requires **two** predictors
+compared on the same ground truth, potentially combinable (OBI ∪ correlator). But
+on this stack `direct_trace_coverage = 1.0000` (previous section) — there is no
+residual traffic at all for a correlator to prove itself against. The real M0-A
+spike (`docs/target/m0-correlation-spike-protocol.md`) tests this with a multi-hop
+topology (`load-generator → gateway → upstream-service → outbound-connector →
+fake-upstream`) where propagation can genuinely break at an intermediate hop —
+that topology doesn't exist yet (no spec for "gateway" beyond a diagram node, see
+architecture overview above). Instead, this uses the **Masque A2** calibration
+read that `ground-truth-eval-plane-v3.md` §6 specifies for exactly this
+situation: simulate the failure mode directly on the existing 2-hop harness.
+
+**Masking.** `load-gen -mask` withholds the `traceparent` header while still
+logging the true `trace_id`/`conn_key`/`timestamp_ns` as ground truth — the wire
+doesn't carry it, the oracle still knows it. n=1000, c=50: OBI still traced all
+1000 requests at the connection/handler level (it doesn't go blind), but
+self-authored a fresh `trace_id` for every one — confirmed via the same
+zero-parent-span marker as the earlier negative control (1000/1000).
+
+**Correlator MVP.** Per `m0-correlation-spike-protocol.md`'s own formula
+(`Candidates(obi) = SDK spans satisfying: same pod AND same destination AND
+temporal overlap`): candidate generation = `load-gen` records on the same
+connection (client port) whose start time falls within OBI's observed
+`[start − ε, end + ε]` window; ranking = closest by time (top-1).
+
+| Window ε | Unmatched | R (recall) | Candidates p50 / p95 |
+|---|---|---|---|
+| 100ms | 467/994 | 0.5211 | 1 / 7 |
+| 300ms | 396/994 | 0.6016 | 3 / 13 |
+| 500ms | 254/994 | 0.7445 | 5 / 18 |
+| 1000ms | 0/994 | **1.0000** | 10 / 21 |
+
+**Exactly the tradeoff the spike protocol anticipates** ("la distribution est
+plus importante que la moyenne"): a tight window has few candidates but misses
+real matches; a window wide enough to catch everything (≥1s here) also returns
+up to 21-24 candidates per event — real ambiguity from HTTP/2 multiplexing on
+pooled connections, not a measurement bug.
+
+**A real methodological gap found while building this, not hidden.** `T`
+(residual_top1_accuracy) was measured **exactly equal to `R`** at every window
+width — not a coincidence. The "truth" used to score this MVP is itself
+"the `load-gen` record closest in time to the OBI event," the same signal the
+top-1 ranking uses — so truth can never fail to be the top-1 pick once it's
+inside the candidate window. **`T` as measured here is not independently
+informative.** Fixing this needs a ground truth that doesn't share the
+correlator's own signal — the kernel-level connect/accept timestamps from
+`strong-tier-probe` (independent of both OBI's and `load-gen`'s own clocks)
+are the candidate for that, but that probe wasn't running during this batch.
+Not done yet; flagged rather than reported as if `T` meant something here.
 
 ## Known limitations of this first slice
 

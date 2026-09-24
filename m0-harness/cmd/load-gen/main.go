@@ -12,6 +12,11 @@
 //	negative : tag only; the actual shuffle of expected_trace_id happens in the offline
 //	           join (cmd/join), never here — load-gen must never fabricate wrong data,
 //	           only label it for the join step to corrupt on purpose.
+//
+// -mask implements the Masque A2 calibration read (ground-truth-eval-plane-v3.md §6):
+// simulates OBI's direct-propagation failure mode by withholding the traceparent header,
+// while still logging the true trace_id as ground truth — a correlator calibrated on this
+// is judged against the oracle, never against its own guesses.
 package main
 
 import (
@@ -39,6 +44,9 @@ func main() {
 	total := flag.Int("requests", 2000, "total requests to send")
 	pool := flag.Bool("pool", true, "reuse HTTP/2 connections (false = positive control: one conn per request)")
 	control := flag.String("control", "", "witness cell label: \"\" | positive | negative")
+	mask := flag.Bool("mask", false, "Masque A2 (ground-truth-eval-plane-v3.md §6): don't send the "+
+		"traceparent header, simulating propagation loss — the JSONL record still logs the true "+
+		"trace_id/conn_key/stream_id/timestamp as ground truth, only the wire doesn't carry it")
 	seed := flag.String("seed-policy", "variable", "fixed | variable (docs/target §1) — fixed reseeds identically per run, variable does not")
 	flag.Parse()
 
@@ -87,7 +95,9 @@ func main() {
 				log.Printf("build request: %v", err)
 				return
 			}
-			req.Header.Set("traceparent", traceparent)
+			if !*mask {
+				req.Header.Set("traceparent", traceparent)
+			}
 			if *control != "" {
 				req.Header.Set("X-Witness-Control", *control)
 			}
@@ -113,7 +123,7 @@ func main() {
 		}()
 	}
 	wg.Wait()
-	log.Printf("done: %d/%d requests sent, control=%q pool=%v", sent.Load(), *total, *control, *pool)
+	log.Printf("done: %d/%d requests sent, control=%q pool=%v mask=%v", sent.Load(), *total, *control, *pool, *mask)
 }
 
 func randHex(n int) string {
