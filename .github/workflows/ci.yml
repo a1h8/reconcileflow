@@ -65,6 +65,11 @@ jobs:
           curl -sSL -o /tmp/bpftool.tar.gz \
             https://github.com/libbpf/bpftool/releases/download/v7.7.0/bpftool-v7.7.0-amd64.tar.gz
           sudo tar -C /usr/local/bin -xzf /tmp/bpftool.tar.gz bpftool
+          # The release tarball's member isn't marked executable (confirmed:
+          # -rw-r--r--) — without +x, `bpftool` on PATH silently falls
+          # through to apt's kernel-locked wrapper instead of erroring,
+          # which is exactly the failure this step exists to avoid.
+          sudo chmod +x /usr/local/bin/bpftool
           bpftool version
 
       - name: generate vmlinux.h
