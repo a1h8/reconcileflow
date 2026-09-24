@@ -834,6 +834,50 @@ Other attributes now visible that the text printer doesn't show
 still Traefik's backend connection port, the same disconnected-port-space
 limit as before, just under a different field name.
 
+## Recovering the client-side port: instrument Traefik too (2026-09-24)
+
+The disconnected-port-space limit above assumed OBI could only see the
+proxy's backend connection. Not fundamentally true — it was an artifact of
+running Traefik in a Docker container (a separate Lima-VM kernel this host's
+eBPF can't reach). Traefik ships a portable native binary; run directly on
+this host (not containerized), it shares this host's kernel with OBI and
+`fake-upstream`, so **the same OBI instance can instrument both processes at
+once** (`OTEL_EBPF_OPEN_PORT=8443,9081`).
+
+This exposes a third event type beyond the `HTTP` (server) events used so
+far: **`HTTPClient`** — Traefik's own outbound call to `fake-upstream`.
+Chaining three signals: `fake-upstream` event's port → matching `HTTPClient`
+(Traefik-outbound) event, same port → nearest `HTTP` (Traefik-inbound) event
+by duration similarity within a temporal window → **that event's port is the
+true original client's port**, matchable against `load-gen`'s own recorded
+port directly (no disconnected port space anymore).
+
+**The bridge works exactly where tested, and exposes precisely where it
+doesn't.** Traefik's *inbound* side (client → Traefik) is well distributed —
+81 distinct ports across 990 requests (`load-gen`'s own connection reuse
+under c=50) — and the final matching stage against those ports gives
+candidate sets of p50=13/p95=23, right back in the range where duration
+ranking worked at 90% earlier. But **Traefik's *outbound* side (Traefik →
+`fake-upstream`) turned out to reuse a single pooled backend connection for
+all 990 requests** — the identical phenomenon found in the Docker-Traefik
+test, just relocated to a different hop. That first bridging stage has
+nothing to narrow on, so end-to-end: R=0.2758, T=0.2606 — barely better than
+the pre-bridge result, dominated by this one stage's failure. Tried
+windowed+duration matching at every stage instead of naive nearest-time —
+made no measurable difference (R/T moved by ~1 point), confirming the
+bottleneck is the missing port signal at that stage, not the matching
+method.
+
+**The chain is only as strong as its weakest link.** The bridge concept is
+validated — the final stage alone, given a correct client port, performs
+like the earlier best case — but the current backend-pooling behavior
+defeats it before it gets there. Next: force Traefik to open a fresh
+backend connection per request (disable its backend keep-alive) to test
+the *complete* bridge end-to-end, isolating whether the concept holds all
+the way through once that one stage's ambiguity is removed — understanding
+this trades away the efficiency real connection pooling exists for, so it
+proves the concept, not a production configuration.
+
 ## Known limitations of this first slice
 
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
