@@ -29,7 +29,7 @@ target platform (`docs/target/ground-truth-eval-plane-v3.md`):
 ```mermaid
 flowchart TB
     subgraph SUT["System Under Test — never sees the Ground Truth"]
-        OBI["OBI (predictor P1)<br/>direct eBPF trace_id<br/>not deployed in this repo yet"]
+        OBI["OBI (predictor P1)<br/>direct eBPF trace_id<br/>direct_trace_coverage = 1.0000, STABLE<br/>(n=10000/c=200 × 10 reps, this stack only)"]
         CORR["Correlator (predictor P2)<br/>temporal candidate ranking<br/>deliberately not started —<br/>waiting on OBI's measured coverage"]
     end
 
@@ -332,13 +332,86 @@ release tarball from GitHub and extracted `bin/clang*` + `lib/*` locally — no 
 step, works from any directory. `gcc` cannot substitute here: BPF code generation is
 LLVM-only, GCC has no BPF backend.
 
+## OBI — first `direct_trace_coverage` measurement (P1) (2026-09-24)
+
+`docs/m0-evaluation-protocol.md` §2 defines P1 — OBI direct: `direct_trace_coverage
+D_cov = fraction where OBI supplies a trace_id`, judged against the Ground Truth
+Store above, never against OBI's own self-report (§1's anti-circularity rule). This
+is the first time OBI itself has been deployed against this harness — everything
+before this section only built and validated the oracle that judges it.
+
+**Setup.** [OBI](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation)
+v0.13.0 (the portable Linux/amd64 release binary — no Kubernetes, no config file,
+env vars only), run with `sudo` and:
+
+```
+OTEL_EBPF_TARGET_PID=<fake-upstream's pid>
+OTEL_EBPF_TRACE_PRINTER=text   # prints each detected HTTP span to stdout —
+                                # no OTLP collector needed for this measurement
+OTEL_EBPF_LOG_LEVEL=info
+```
+
+`OTEL_EBPF_TRACE_PRINTER=text` output includes the exact `traceparent` OBI read
+via its `net/http.serverHandler.ServeHTTP` uprobe — the same field `load-gen`
+authoritatively set, so the join is a direct string comparison, not a fuzzy match.
+Required capabilities (`CAP_DAC_READ_SEARCH`, `CAP_NET_RAW`, `CAP_SYS_PTRACE`,
+`CAP_PERFMON`, `CAP_BPF`, `CAP_CHECKPOINT_RESTORE`) are broader than
+`strong-tier-probe`'s single `CAP_BPF` — OBI does binary/symbol introspection on
+top of kernel tracing, `sudo` is the simplest way to satisfy all six.
+
+**Result — Gate stabilité passed.** 10 repetitions (5 `seed-policy=fixed`, 5
+`seed-policy=variable`, n=10000/c=200 each, same scale as the fallback-tier
+degradation and the strong-tier probe validation above), fed into the real
+`assess()` from `src/reconcileflow/m0/stability.py` (`MIN_REPS=5`, `MAX_SD=0.015`
+— not a reimplementation):
+
+| | D_cov | SD across 5 reps |
+|---|---|---|
+| Fixed seed | 1.0000 (every rep) | 0.0 |
+| Variable seed | 1.0000 (every rep) | 0.0 |
+
+**Verdict: `Stability.STABLE`.** Every one of the 10 × 10000 requests was correctly
+attributed — 0 missed, 0 false positives — once measured the right way (see next
+paragraph for the wrong way).
+
+**A measurement artifact found and ruled out, not a real miss.** Splitting
+`obi.log` strictly by a before/after line-count marker per repetition first
+showed small apparent gaps (up to 12/10000) — trace_ids "missed" in one rep and
+appearing as "extra" in the next. This is not OBI inventing or dropping
+trace_ids: the `sleep 2` gap between repetitions wasn't always enough for OBI to
+flush its last few buffered events before the next marker was recorded — a
+timing artifact of this ad hoc measurement script, not of OBI or the oracle.
+Coverage counted the right way (detected at all, not detected within a strict
+window) is what the table above reports, and is the methodologically correct
+reading of `D_cov` regardless.
+
+**What this does not yet show:**
+- One stack only: Go / `net/http` / generic HTTP-2 / TLS — the `target_stack`
+  already fixed in `docs/m0-evaluation-protocol.md` §0. Per
+  `ground-truth-eval-plane-v3.md` §5, the verdict is a property of `(OBI × pile)`
+  and does **not** transfer to another stack (Java, gRPC, a different HTTP
+  client) — `D_cov = 1.0000` here says nothing about those.
+- Same host, loopback only — no real network hop, no container/k8s namespace
+  boundary.
+- Connection-level and request-level trace_id attribution only. Stream-level
+  detail (which HTTP/2 stream on a shared connection) wasn't cross-checked here
+  the way iteration 4 did for the kernel probe.
+- The correlator (P2) still hasn't been built — per
+  `docs/target/m0-correlation-spike-protocol.md`, that was deliberately deferred
+  until OBI's coverage was actually measured. It now has been, and it's high
+  enough on this stack that building the correlator next should be justified by
+  a stack where OBI's coverage is *not* this clean, not this one.
+
 ## Known limitations of this first slice
 
-- Fallback-tier identity only (no eBPF strong tier).
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
   690ms vs. the 850ms target) — not a certified generator, see
   `cmd/fake-upstream/main.go`.
 - `seed_policy=fixed` (protocol §1) is accepted as a flag but the harness does
   not itself seed a deterministic PRNG for request timing/order — the caller
-  is responsible for that today.
-- No k8s/eBPF deployment yet — this runs two local processes over `localhost`.
+  is responsible for that today. In practice this meant the "fixed" and
+  "variable" repetitions above were behaviorally identical; the stability gate
+  still passed honestly, but it didn't yet get to distinguish SUT-intrinsic
+  noise from load-profile sensitivity the way §3 intends.
+- No k8s deployment yet — OBI and the harness both ran as local processes over
+  `localhost`, not the DaemonSet/sidecar topology OBI supports in production.
