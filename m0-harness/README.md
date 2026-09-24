@@ -430,6 +430,52 @@ reading of `D_cov` regardless.
   the residual traffic into existence via masking — on real, unmasked traffic
   on this stack, there's nothing for it to do (see next section).
 
+## Skew calibration (2026-09-24) — and why the spec's method doesn't hold here
+
+`ground-truth-eval-plane-v3.md` §6 specifies a **Skew** calibration before Masque
+A2: on cases the oracle confirms OBI got right (never OBI's own self-report), diff
+"OBI (temps kernel/nœud) vs SDK (temps user/process)" — Δstart, Δend, p50/p95/p99,
+variance, drift, **par nœud**, to derive a calibrated matching window. First
+attempt at this used the wrong instrument: `strong-tier-probe` is itself another
+kernel-level eBPF observer, not an SDK — the spec's "SDK" side is the
+application's own user/process-level clock, which in this harness means
+`fake-upstream`'s own `time.Now()` timestamp (same process OBI instruments,
+recorded right before writing the response), not a third kernel observer.
+
+**Measured on 109425 genuinely-propagated OBI events** (non-zero parent-span,
+`trace_id` matched exactly against `fake-upstream`'s own record — the oracle
+confirming correctness, per §6's rule): `Δend = OBI_end − fake-upstream_ts`.
+
+| | p50 | p95 | p99 | mean | stdev |
+|---|---|---|---|---|---|
+| All 109425 events | 348ms | 826ms | 885ms | 347ms | 309ms |
+
+**That's not a clock skew — a real clock skew between two processes on the same
+host would be near-zero and stable, not hundreds of milliseconds with 309ms
+stdev.** Challenged by comparing load levels directly, isolating the confound:
+
+| Load | n | Δ |
+|---|---|---|
+| n=10, c=2 (near-idle) | 10 | -97ms to +139ms (one 855ms outlier) — consistent with genuine near-zero skew |
+| n=10000, c=200 (sustained burst) | 9904 | p50=335ms, p95=825ms |
+
+**Δ is load-dependent, not a node property.** Bucketing the high-load run by
+position within the burst (deciles, ordered by `fake-upstream`'s own timestamp)
+shows an oscillating pattern (~100-160ms alternating with ~550-600ms), not a
+simple monotonic queue-buildup-then-reset — plausibly OBI's own ring-buffer
+polling/flush cycle backing up under sustained load, though that mechanism isn't
+verified against OBI's source here, only the symptom is demonstrated.
+
+**Conclusion: the spec's "Skew → fenêtre calibrée par nœud" doesn't apply as
+written to this setup.** It assumes a roughly stationary per-node offset. What's
+actually measured is a load-dependent *reporting latency*, not a *clock* skew — a
+single fixed window calibrated from this distribution would be too tight during
+load spikes (exactly what produced the poor recall at ε=100ms in the correlator
+MVP below) and needlessly loose when idle. Any real "calibrated window" would
+need to be a function of instantaneous load, not a per-node constant — a genuine
+complication the spec's method doesn't anticipate, not a limitation of this
+harness's measurement.
+
 ## Correlator MVP (P2) — Masque A2 calibration (2026-09-24)
 
 Thesis 2 (`ground-truth-eval-plane-v3.md`, top of file) requires **two** predictors
@@ -455,7 +501,11 @@ zero-parent-span marker as the earlier negative control (1000/1000).
 (`Candidates(obi) = SDK spans satisfying: same pod AND same destination AND
 temporal overlap`): candidate generation = `load-gen` records on the same
 connection (client port) whose start time falls within OBI's observed
-`[start − ε, end + ε]` window; ranking = closest by time (top-1).
+`[start − ε, end + ε]` window; ranking = closest by time (top-1). The ε values
+below were swept, not calibrated — the "Skew calibration" section above (done
+afterward) found that a single fixed, load-independent ε isn't even the right
+kind of number to calibrate here, which retroactively explains why recall was
+so sensitive to ε in the first place.
 
 | Window ε | Unmatched | R (recall) | Candidates p50 / p95 |
 |---|---|---|---|
