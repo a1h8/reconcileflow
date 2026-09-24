@@ -734,6 +734,59 @@ request-distinguishing by design; a production service with more uniform
 response times would give duration less to work with), but a working
 existence proof, not a hypothesis.
 
+### The combined pipeline, measured end-to-end on real (not masked) traffic
+
+The natural next question: does duration-ranking actually help in the one
+scenario that matters — a real proxy run, where some requests succeed via
+direct propagation and others fail from the `/compliant`-route cliff, mixed
+in a single run, not separated by construction? Built the pipeline for real:
+per OBI event, if `parent-span != 0` use the direct `trace_id` as-is
+(`source=direct`); otherwise fall back to candidate generation + duration
+ranking (`source=correlated`), **keeping the full candidate set, never
+collapsing to a silent single guess** — this is literally "coverage without
+losing signal": nothing is discarded, low-confidence cases stay visibly
+low-confidence.
+
+Run at n=1000/c=50 through `/compliant`, scored against the independent
+`-truth-in-path` ground truth:
+
+| Source | n | Top-1 correct | Truth somewhere in kept candidates | Candidate set p50/p95 |
+|---|---|---|---|---|
+| direct | 874 | 87.87% | 87.87% | 1 |
+| correlated (fallback) | 120 | **1.67%** | 97.50% | 694 / 786 |
+| **combined pipeline** | 994 | **77.46%** | **89.03%** | — |
+| OBI alone (no fallback) | 994 | 77.26% | — | — |
+
+**A real, if modest, win on coverage** (89.03% vs 77.26% — nothing the
+fallback recovers is silently lost), **and a real, sobering limit on
+precision** (1.67% top-1 on the fallback slice, barely above the ~1/700
+chance floor of its candidate pool). The reason: **OBI observes Traefik's
+single pooled backend connection to `fake-upstream`, not the original
+client's connection to Traefik** — two disjoint port spaces. The port-based
+candidate narrowing that got candidate sets down to 8-21 earlier (and made
+duration ranking work at 90%) has no signal to key on here, so candidate
+generation falls back to a global temporal window across the whole run —
+p50/p95 of 694/786 candidates, not 8/21.
+
+**Tried to fix the ranking, not the candidate generation, and it didn't
+help — an honest negative result.** Hypothesis: independent per-event
+greedy ranking could cause collisions (two events both claiming the same
+best-duration candidate). Replaced it with a global optimal 1:1 assignment
+(Hungarian algorithm, `scipy.optimize.linear_sum_assignment`, minimizing
+total duration mismatch across all 120 fallback events at once) — **identical
+result, 2/120 either way.** Collisions weren't the bottleneck. With a
+~700-wide pool, duration similarity alone doesn't carry enough information to
+discriminate regardless of assignment strategy — birthday-paradox-scale
+duration collisions across 1000 requests in a 2-3 second burst. **This is an
+information problem, not an algorithm problem**: no amount of cleverness in
+how candidates are matched compensates for a signal that doesn't distinguish
+them in the first place. Real improvement here needs either recovering
+connection-level candidate narrowing (would mean instrumenting Traefik
+itself — not reachable from this host's eBPF, it runs in a separate
+Lima-VM kernel) or a higher-entropy signal than duration, and
+`fake-upstream`'s uniform trivial response gives the correlator nothing
+else to work with today.
+
 ## Known limitations of this first slice
 
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
