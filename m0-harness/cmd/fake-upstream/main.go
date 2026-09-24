@@ -19,7 +19,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
-	"fmt"
 	"log"
 	"math"
 	"math/big"
@@ -101,22 +100,44 @@ func main() {
 
 			injectLatencyProfileC()
 
+			// A second correlation signal alongside duration (README "how to improve
+			// the signal"): duration alone doesn't discriminate at scale (~700-wide
+			// candidate pools, Hungarian assignment showed it's an information
+			// problem, not a ranking one). Response size is orthogonal to timing —
+			// varied here the way real payloads naturally vary by resource/request,
+			// not encoded from trace_id (that would make the correlator's job
+			// artificial, not a legitimate content-based signal).
+			body := randomBody()
+
 			_ = w.Write(oracle.Record{
-				Side:        "fake-upstream",
-				ConnKey:     ci.Key(),
-				StreamID:    streamID,
-				TraceID:     traceID,
-				TimestampNS: time.Now().UnixNano(),
-				Control:     control,
+				Side:         "fake-upstream",
+				ConnKey:      ci.Key(),
+				StreamID:     streamID,
+				TraceID:      traceID,
+				TimestampNS:  time.Now().UnixNano(),
+				Control:      control,
+				ResponseSize: int64(len(body)),
 			})
 
 			rw.WriteHeader(http.StatusOK)
-			fmt.Fprintf(rw, "ok stream=%d\n", streamID)
+			rw.Write(body)
 		}),
 	}
 
 	log.Printf("fake-upstream listening on %s (HTTP/2 over self-signed TLS)", *addr)
 	log.Fatal(srv.ListenAndServeTLS("", ""))
+}
+
+// randomBody varies response size independent of trace_id — a content-based
+// correlation signal orthogonal to duration, the way real payloads vary by
+// resource/request rather than being encoded for correlation purposes.
+// Uniform, not trace_id-derived: a correlator reading this couldn't
+// reconstruct trace_id from it even if it wanted to.
+func randomBody() []byte {
+	n := 50 + mrand.Intn(4951) // uniform [50, 5000] bytes
+	b := make([]byte, n)
+	mrand.Read(b)
+	return b
 }
 
 // injectLatencyProfileC approximates docs/target/ground-truth-eval-plane-v3.md §9

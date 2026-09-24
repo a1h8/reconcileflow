@@ -12,6 +12,11 @@
 //	negative : tag only; the actual shuffle of expected_trace_id happens in the offline
 //	           join (cmd/join), never here — load-gen must never fabricate wrong data,
 //	           only label it for the join step to corrupt on purpose.
+//
+// -mask implements the Masque A2 calibration read (ground-truth-eval-plane-v3.md §6):
+// simulates OBI's direct-propagation failure mode by withholding the traceparent header,
+// while still logging the true trace_id as ground truth — a correlator calibrated on this
+// is judged against the oracle, never against its own guesses.
 package main
 
 import (
@@ -21,6 +26,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -39,6 +45,13 @@ func main() {
 	total := flag.Int("requests", 2000, "total requests to send")
 	pool := flag.Bool("pool", true, "reuse HTTP/2 connections (false = positive control: one conn per request)")
 	control := flag.String("control", "", "witness cell label: \"\" | positive | negative")
+	mask := flag.Bool("mask", false, "Masque A2 (ground-truth-eval-plane-v3.md §6): don't send the "+
+		"traceparent header, simulating propagation loss — the JSONL record still logs the true "+
+		"trace_id/conn_key/stream_id/timestamp as ground truth, only the wire doesn't carry it")
+	truthInPath := flag.Bool("truth-in-path", false, "embed trace_id in the request path (e.g. /truth-<id>), "+
+		"visible in OBI's trace_printer output regardless of header propagation — an independent ground-truth "+
+		"channel for scoring a correlator's blind (port+timing-only) guess, never fed to the correlator itself. "+
+		"fake-upstream's handler is a catch-all, so any path works unmodified")
 	seed := flag.String("seed-policy", "variable", "fixed | variable (docs/target §1) — fixed reseeds identically per run, variable does not")
 	flag.Parse()
 
@@ -82,12 +95,18 @@ func main() {
 				},
 			})
 
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, *target+"/", nil)
+			path := "/"
+			if *truthInPath {
+				path = "/truth-" + traceID
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, *target+path, nil)
 			if err != nil {
 				log.Printf("build request: %v", err)
 				return
 			}
-			req.Header.Set("traceparent", traceparent)
+			if !*mask {
+				req.Header.Set("traceparent", traceparent)
+			}
 			if *control != "" {
 				req.Header.Set("X-Witness-Control", *control)
 			}
@@ -98,22 +117,27 @@ func main() {
 				log.Printf("request failed: %v", err)
 				return
 			}
+			respSize, _ := io.Copy(io.Discard, resp.Body) // read fully: byte count is the signal, not just discarded
 			resp.Body.Close()
+			duration := time.Now().UnixNano() - sentAt
 
 			streamID := tracker.nextStream(connKey)
 			_ = w.Write(oracle.Record{
-				Side:        "load-gen",
-				ConnKey:     connKey,
-				StreamID:    streamID,
-				TraceID:     traceID,
-				TimestampNS: sentAt,
-				Control:     *control,
+				Side:         "load-gen",
+				ConnKey:      connKey,
+				StreamID:     streamID,
+				TraceID:      traceID,
+				TimestampNS:  sentAt,
+				Control:      *control,
+				DurationNS:   duration,
+				ResponseSize: respSize,
 			})
 			sent.Add(1)
 		}()
 	}
 	wg.Wait()
-	log.Printf("done: %d/%d requests sent, control=%q pool=%v", sent.Load(), *total, *control, *pool)
+	log.Printf("done: %d/%d requests sent, control=%q pool=%v mask=%v truthInPath=%v",
+		sent.Load(), *total, *control, *pool, *mask, *truthInPath)
 }
 
 func randHex(n int) string {
