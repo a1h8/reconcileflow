@@ -542,18 +542,82 @@ correlator's own signal — the kernel-level connect/accept timestamps from
 are the candidate for that, but that probe wasn't running during this batch.
 Not done yet; flagged rather than reported as if `T` meant something here.
 
+## Real multi-hop propagation loss (2026-09-24) — not masked, an actual hop
+
+Everything above used `load-gen -mask` — a proxy for propagation failure, not a
+real one. The user's actual concern (multi-environment, multi-hop: "si un
+défaillant l'autre prend le relais") needs a genuine intermediate hop where
+propagation can break on its own. `docs/target/m0-correlation-spike-protocol.md`
+wants a full `gateway → upstream-service → outbound-connector` pipeline for
+this; no spec exists for that (see architecture overview). Built the smallest
+faithful substitute instead: a standalone Traefik container (`docker run
+traefik:v3.1`, **not** the pre-existing `patchtst` k3s cluster found running on
+this machine — confirmed to be an unrelated parallel project, left untouched),
+with two routes in front of `fake-upstream`:
+
+- `/compliant` — passes the `traceparent` header through unchanged.
+- `/broken` — a `headers` middleware strips it (`customRequestHeaders:
+  {traceparent: ""}`), simulating a real non-compliant intermediate hop.
+
+Verified first with hand-crafted headers (`trace_id=deadbeef...`) before running
+at scale: `/compliant` reported the forged value back exactly; `/broken`
+reported a fresh self-authored one. Real per-hop behavior, not simulated.
+
+**At scale (n=1000, c=50 per route), two findings — one expected, one not.**
+
+| Route | OBI events | Self-authored | Matched authoritative |
+|---|---|---|---|
+| `/compliant` | ~2000 (`fake-upstream` confirms only 1000 real requests) | 1133 | 866/1000 = 0.8660 |
+| `/broken` | 1000 (no duplication) | 1000/1000 | 0/1000 = 0.0000 |
+
+`/broken` is clean and unambiguous: Traefik's header-stripping is detected
+completely, no artifacts. **This is the first genuinely real (not artificially
+masked) residual traffic produced in this harness** — proof that thesis 2's
+premise (OBI can fail on a real hop, something needs to catch it) is not
+hypothetical.
+
+`/compliant` is the surprise: `fake-upstream`'s own log confirms exactly 1000
+real requests were served — but OBI reports roughly double that, with more
+self-authored (missed) events than correctly-matched ones, **despite the header
+never being stripped on this route**. Root cause not fully diagnosed here — the
+proxied requests all share a single reused client port (`fake-upstream` sees
+one Traefik backend connection carrying all 1000 requests, HTTP/1.1 keep-alive
+reuse), consistent with OBI's context-tracking losing the propagated header on
+some requests sharing a proxy-pooled backend connection, distinct from the
+HTTP/2 multiplexing case measured earlier (which held at 100%). Flagged as a
+real, unexplained finding, not swept into the `/broken` result.
+
+**A second, independent finding surfaced while debugging the above**: OBI's
+`OTEL_EBPF_TRACE_PRINTER=text` leading timestamp is **batched, not per-event**
+— 1985 consecutive events carried only 6 distinct timestamp values (one batch
+held 541 events under the same printed timestamp, ~1s granularity). This
+retroactively weakens the precision of the Skew and correlator-MVP window
+sections above, both of which derived `obi_start`/`obi_end` from that leading
+timestamp — the qualitative finding (load-dependent, not a stable per-node
+offset) still holds, but the exact Δ values there carry up to ~1s of
+quantization error from this batching that wasn't accounted for at the time.
+Exact-`trace_id` matching (used for all the D_cov/D_acc numbers in this
+section and the OBI section above) is unaffected — it never depended on the
+timestamp field.
+
 ## Thesis 2 — where this leaves it, and the next decision (2026-09-24)
 
 `ground-truth-eval-plane-v3.md`'s thesis 2: OBI and the correlator are two
 predictors judged by one independent oracle, potentially combinable
-(OBI ∪ correlator). Four sections above chased this as far as this harness
-can honestly take it. Summary of what's actually been shown:
+(OBI ∪ correlator). Chased this as far as this harness can honestly take it so
+far. Summary, revised after the real multi-hop test above:
 
-- **On this stack, OBI alone wins outright.** `direct_trace_coverage = 1.0000`,
-  `Stability.STABLE`, no artificial help. There is no naturally-occurring
-  residual traffic for a correlator to add value on — matches
-  `m0-correlation-spike-protocol.md`'s own bet that OBI would make the scoring
-  problem disappear "dans une partie significative des cas."
+- **On the direct 2-hop path, OBI wins outright** — `direct_trace_coverage =
+  1.0000`, `Stability.STABLE`. But **real residual traffic does exist once a
+  genuine intermediate hop is in the picture** — not hypothetical, not
+  artificially masked. The `/broken` Traefik route (header stripped by a real
+  proxy) is unambiguous residual traffic. The `/compliant` route is a second,
+  *unintended* source of it: 86.6% direct match despite the header never being
+  stripped, apparently from backend connection pooling at the proxy — meaning
+  OBI's direct coverage can degrade from proxy plumbing alone, not just
+  non-compliant intermediaries. `m0-correlation-spike-protocol.md`'s bet (OBI
+  removes the scoring problem "dans une partie significative des cas") holds on
+  the direct path, not once a hop is added.
 - **The correlator MVP, tested only on artificially masked traffic**, shows
   recall is solvable (99.60%) once its matching window is load-calibrated
   instead of guessed — but candidate sets stay 8-21 wide even then, so recall
@@ -566,25 +630,28 @@ can honestly take it. Summary of what's actually been shown:
   close this either without further work.
 - **The Skew calibration attempt surfaced a finding independent of thesis 2
   itself**: the timing relationship between OBI and the application is
-  load-dependent, not a stable per-node offset — the spec's own calibration
-  method (§6) doesn't apply as written to a system with this behavior.
+  load-dependent, not a stable per-node offset, and OBI's own trace-printer
+  timestamp turned out to be batched (~1s granularity) rather than per-event —
+  the spec's own calibration method (§6) doesn't apply as written to a system
+  with this behavior.
 
-**Combinability (OBI ∪ correlator) — thesis 2's second half — was never
-actually tested.** There was no real residual traffic to combine against;
-masking is a proxy for the failure mode, not a substitute for measuring
-whether a correlator adds value on top of OBI in practice.
+**Combinability (OBI ∪ correlator) — thesis 2's second half — still hasn't
+been tested**, but the blocker changed. There is now real residual traffic
+(the `/broken` route, and the unexplained `/compliant` degradation) to
+combine against — what's missing is a correlator whose precision (`T`) can
+be trusted, not residual traffic to feed it.
 
 **Three ways forward, not a single obvious one:**
-1. **Stop here and call this the M0 verdict for this stack.** "OBI alone
-   suffices, Régime A, a full correlator isn't justified by this stack's real
-   traffic" is itself a complete, evidenced M0 conclusion — consistent with
-   M0's own stated purpose (`docs/target/ground-truth-eval-plane-v3.md`: retire
-   risk before industrializing, not build everything preemptively).
-2. **Test a stack where OBI's coverage is not this clean** — a different
-   `(OBI × pile)` pair per §5 (non-Go, gRPC, or a stack with weaker header
-   propagation) — the only way to get *naturally occurring* residual traffic
-   instead of an artificial mask, and the only way thesis 2's combinability
-   half could be tested for real.
+1. **Stop here and call this the M0 verdict for this stack pair.** "OBI wins
+   on the direct path, real residual traffic appears once a hop is added, a
+   correlator's *recall* is solvable but its *precision* is still unverifiable"
+   is itself a complete, evidenced M0 conclusion — consistent with M0's own
+   stated purpose (`docs/target/ground-truth-eval-plane-v3.md`: retire risk
+   before industrializing, not build everything preemptively).
+2. **Diagnose the `/compliant` degradation properly** — it's a genuine open
+   question (does OBI's context-tracking break under proxy-pooled backend
+   connections specifically?) with real operational consequences if true,
+   independent of whether a correlator ever gets built.
 3. **Close the `T`-measurability gap specifically** by adding a per-stream
    marker to `fake-upstream`'s response (independent of timing) — a bounded
    harness change, but it only makes the masked-simulation more rigorous, it
