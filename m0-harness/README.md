@@ -808,6 +808,32 @@ OTel-native; the text printer is a debug convenience, not its real output
 format) to see whether the structured span attributes expose response size
 or other fields the text summary silently drops.
 
+### Checked against raw OTLP: `response_size` confirmed genuinely absent (2026-09-24)
+
+Ran a local `otel/opentelemetry-collector-contrib` container (OTLP receiver,
+`debug` exporter) and separately `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=debug`
+(OBI logs full spans locally, no network needed) to see OBI's real structured
+output, not the text-printer summary. Confirmed: **`http.response.body.size:
+Int(0)`** in the raw span attributes too. Not a text-printer limitation as
+hoped — OBI's basic HTTP server instrumentation genuinely doesn't populate
+response size, in either output format. Closes this avenue for good, not
+just probably.
+
+**A genuine, useful side-finding while checking**: every request produces
+**two spans**, not one — a `Server` span (`GET /`) and a child `Internal`
+span (`processing`), linked by `Parent ID`. This is almost certainly what the
+real multi-hop test's "~2000 OBI events for 1000 real requests" actually was
+(section above) — not a suspicious duplicate, the normal two-span-per-request
+shape, with both spans printed as separate lines by the text summary. Doesn't
+change any of that section's conclusions (the cliff, the coverage numbers),
+but reframes what "2x" meant: structural, not anomalous.
+
+Other attributes now visible that the text printer doesn't show
+(`client.address`, `network.peer.port`, `http.route`, `url.path`,
+`url.scheme`) don't add a new correlation signal — `network.peer.port` is
+still Traefik's backend connection port, the same disconnected-port-space
+limit as before, just under a different field name.
+
 ## Known limitations of this first slice
 
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
