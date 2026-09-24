@@ -520,6 +520,16 @@ real matches; a window wide enough to catch everything (≥1s here) also returns
 up to 21-24 candidates per event — real ambiguity from HTTP/2 multiplexing on
 pooled connections, not a measurement bug.
 
+**Re-run with a genuinely calibrated window, not a guess.** Measured Δ on an
+*unmasked* reference batch at the identical load (n=1000, c=50 — same method as
+the Skew section above, just load-matched to this test instead of the earlier
+n=10/n=10000 extremes): p95 = 830ms at this load level. Using that as ε (not a
+swept guess): **R = 990/994 = 0.9960**, candidate_set_size p50=8, p95=21. Recall
+is effectively solved once the window is load-calibrated rather than guessed —
+but the candidate sets are still 8-21 wide, meaning **the hard part was never
+recall, it's ranking/precision** — and that's exactly the metric (`T`) already
+flagged above as unmeasurable with this harness's current signals.
+
 **A real methodological gap found while building this, not hidden.** `T`
 (residual_top1_accuracy) was measured **exactly equal to `R`** at every window
 width — not a coincidence. The "truth" used to score this MVP is itself
@@ -531,6 +541,57 @@ correlator's own signal — the kernel-level connect/accept timestamps from
 `strong-tier-probe` (independent of both OBI's and `load-gen`'s own clocks)
 are the candidate for that, but that probe wasn't running during this batch.
 Not done yet; flagged rather than reported as if `T` meant something here.
+
+## Thesis 2 — where this leaves it, and the next decision (2026-09-24)
+
+`ground-truth-eval-plane-v3.md`'s thesis 2: OBI and the correlator are two
+predictors judged by one independent oracle, potentially combinable
+(OBI ∪ correlator). Four sections above chased this as far as this harness
+can honestly take it. Summary of what's actually been shown:
+
+- **On this stack, OBI alone wins outright.** `direct_trace_coverage = 1.0000`,
+  `Stability.STABLE`, no artificial help. There is no naturally-occurring
+  residual traffic for a correlator to add value on — matches
+  `m0-correlation-spike-protocol.md`'s own bet that OBI would make the scoring
+  problem disappear "dans une partie significative des cas."
+- **The correlator MVP, tested only on artificially masked traffic**, shows
+  recall is solvable (99.60%) once its matching window is load-calibrated
+  instead of guessed — but candidate sets stay 8-21 wide even then, so recall
+  was never the hard part. **Precision (`T`) is the real unknown, and it's
+  structurally unmeasurable with this harness's current signals**: the only
+  ground truth available (temporal proximity to `load-gen`'s own record) is
+  the same signal the ranking uses. `strong-tier-probe`'s kernel identity would
+  help, but only at connection granularity — it doesn't see which of several
+  multiplexed HTTP/2 streams on one connection is which, so it wouldn't fully
+  close this either without further work.
+- **The Skew calibration attempt surfaced a finding independent of thesis 2
+  itself**: the timing relationship between OBI and the application is
+  load-dependent, not a stable per-node offset — the spec's own calibration
+  method (§6) doesn't apply as written to a system with this behavior.
+
+**Combinability (OBI ∪ correlator) — thesis 2's second half — was never
+actually tested.** There was no real residual traffic to combine against;
+masking is a proxy for the failure mode, not a substitute for measuring
+whether a correlator adds value on top of OBI in practice.
+
+**Three ways forward, not a single obvious one:**
+1. **Stop here and call this the M0 verdict for this stack.** "OBI alone
+   suffices, Régime A, a full correlator isn't justified by this stack's real
+   traffic" is itself a complete, evidenced M0 conclusion — consistent with
+   M0's own stated purpose (`docs/target/ground-truth-eval-plane-v3.md`: retire
+   risk before industrializing, not build everything preemptively).
+2. **Test a stack where OBI's coverage is not this clean** — a different
+   `(OBI × pile)` pair per §5 (non-Go, gRPC, or a stack with weaker header
+   propagation) — the only way to get *naturally occurring* residual traffic
+   instead of an artificial mask, and the only way thesis 2's combinability
+   half could be tested for real.
+3. **Close the `T`-measurability gap specifically** by adding a per-stream
+   marker to `fake-upstream`'s response (independent of timing) — a bounded
+   harness change, but it only makes the masked-simulation more rigorous, it
+   doesn't address that the simulation itself is synthetic.
+
+No default recommendation here — each is a real scope decision, not a next
+line of code.
 
 ## Known limitations of this first slice
 
