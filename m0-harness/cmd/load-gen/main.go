@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -116,18 +117,20 @@ func main() {
 				log.Printf("request failed: %v", err)
 				return
 			}
+			respSize, _ := io.Copy(io.Discard, resp.Body) // read fully: byte count is the signal, not just discarded
 			resp.Body.Close()
 			duration := time.Now().UnixNano() - sentAt
 
 			streamID := tracker.nextStream(connKey)
 			_ = w.Write(oracle.Record{
-				Side:        "load-gen",
-				ConnKey:     connKey,
-				StreamID:    streamID,
-				TraceID:     traceID,
-				TimestampNS: sentAt,
-				Control:     *control,
-				DurationNS:  duration,
+				Side:         "load-gen",
+				ConnKey:      connKey,
+				StreamID:     streamID,
+				TraceID:      traceID,
+				TimestampNS:  sentAt,
+				Control:      *control,
+				DurationNS:   duration,
+				ResponseSize: respSize,
 			})
 			sent.Add(1)
 		}()

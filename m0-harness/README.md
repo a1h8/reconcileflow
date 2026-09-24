@@ -783,9 +783,30 @@ how candidates are matched compensates for a signal that doesn't distinguish
 them in the first place. Real improvement here needs either recovering
 connection-level candidate narrowing (would mean instrumenting Traefik
 itself — not reachable from this host's eBPF, it runs in a separate
-Lima-VM kernel) or a higher-entropy signal than duration, and
-`fake-upstream`'s uniform trivial response gives the correlator nothing
-else to work with today.
+Lima-VM kernel) or a higher-entropy signal than duration.
+
+### A second signal added, and a dead end found: `responseLen` (2026-09-24)
+
+Tried the higher-entropy signal directly rather than leaving it as a
+suggestion: `fake-upstream` now returns a body of random size (uniform
+50-5000 bytes, independent of `trace_id` — content varies the way real
+payloads naturally vary by resource, not encoded for correlation purposes),
+`load-gen` reads and records the actual byte count it receives
+(`oracle.Record.ResponseSize`), orthogonal to `DurationNS`.
+
+**Dead end**: OBI's `OTEL_EBPF_TRACE_PRINTER=text` output always prints
+`responseLen:0B`, regardless of the real response size (confirmed non-zero
+independently via `curl -w '%{size_download}'`, 944 bytes on one sample).
+Not a bug in this harness — OBI's text summary line simply doesn't populate
+that field, at least not for this instrumentation path. The real signal
+exists (on the wire, in `fake-upstream`'s and `load-gen`'s own ground-truth
+records) but isn't observable through the channel a correlator would
+actually have to consume (OBI's own reported output), so it can't be used
+as-is. Confirms the response-size idea was sound; the text-printer channel
+just doesn't carry it — the natural next step is OTLP export (OBI is
+OTel-native; the text printer is a debug convenience, not its real output
+format) to see whether the structured span attributes expose response size
+or other fields the text summary silently drops.
 
 ## Known limitations of this first slice
 

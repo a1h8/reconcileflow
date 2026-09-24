@@ -60,6 +60,11 @@ type Record struct {
 	// compared even when the header is lost. Zero/omitted on fake-upstream's
 	// side, which has no round-trip of its own to measure.
 	DurationNS int64 `json:"duration_ns,omitempty"`
+	// ResponseSize is the response body length in bytes — on fake-upstream's
+	// side, the size it generated (randomBody, independent of trace_id); on
+	// load-gen's side, the size it actually received. A correlation signal
+	// orthogonal to DurationNS: content-based, not timing-based.
+	ResponseSize int64 `json:"response_size,omitempty"`
 }
 
 // Writer is a concurrency-safe JSONL appender — both binaries write to their
