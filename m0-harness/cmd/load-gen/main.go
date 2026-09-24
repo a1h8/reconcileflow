@@ -117,6 +117,7 @@ func main() {
 				return
 			}
 			resp.Body.Close()
+			duration := time.Now().UnixNano() - sentAt
 
 			streamID := tracker.nextStream(connKey)
 			_ = w.Write(oracle.Record{
@@ -126,6 +127,7 @@ func main() {
 				TraceID:     traceID,
 				TimestampNS: sentAt,
 				Control:     *control,
+				DurationNS:  duration,
 			})
 			sent.Add(1)
 		}()

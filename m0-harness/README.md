@@ -699,10 +699,40 @@ ranking signal first?), which this harness doesn't model.
 OBI alone is not sufficient once a real hop exists (two independent causes,
 both reproduced and diagnosed). A correlator built on temporal proximity alone
 recovers recall but not precision — a real, quantified limitation, not an
-open question anymore. The honest next step, if this continues, is a better
-ranking signal for the correlator (content- or sequence-based, not
-time-based) — not more measurement of the current one, which has been
-measured as far as it usefully can be.
+open question anymore.
+
+### A better ranking signal, tried and it works: duration (2026-09-24)
+
+The honest next step identified above — ranking on something other than
+time — was tried immediately, not left as a suggestion. `load-gen` now also
+records its own client-measured round-trip duration
+(`oracle.Record.DurationNS`); `injectLatencyProfileC` already gives every
+request a genuinely different latency, and OBI reports its own server-side
+duration for every event regardless of trace_id propagation — so the two can
+be compared even when the header is lost, without adding a marker OBI has to
+be taught to read.
+
+| Ranking signal | R | T (independent, `-truth-in-path`) |
+|---|---|---|
+| Time proximity (baseline, load-calibrated ε=830ms) | 0.9719 | 0.1518 |
+| **Duration similarity** | 0.9719 | **0.8965** |
+| Time + duration, equal weight (naive combination) | 0.9719 | 0.2673 |
+
+**Duration alone takes `T` from 15% to 90%** — recall is unaffected (candidate
+generation still uses the temporal window; only ranking changed), precision
+goes up nearly 6x. `injectLatencyProfileC`'s continuous distribution makes
+concurrent requests' durations distinguishable often enough to nearly resolve
+the ambiguity that defeated time-based ranking. **The naive equal-weight
+combination is worse than duration alone**, not better — the time-offset term
+(up to ε=0.83s) dominates the much smaller duration-difference term (tens of
+ms) when added at face value; a real combined ranker would need to weight the
+signals, not just sum them.
+
+This is a real, working answer to "what ranking signal would work" — not
+guaranteed to generalize (this harness's latency profile is unusually
+request-distinguishing by design; a production service with more uniform
+response times would give duration less to work with), but a working
+existence proof, not a hypothesis.
 
 ## Known limitations of this first slice
 
