@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main, m0-harness]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    name: Go build/vet/test (m0-harness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: m0-harness/go.mod
+      - name: build
+        working-directory: m0-harness
+        run: go build ./...
+      - name: vet
+        working-directory: m0-harness
+        run: go vet ./...
+      - name: test
+        working-directory: m0-harness
+        run: go test -race -cover ./...
+
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install
+        run: pip install -e ".[dev]"
+      - name: pytest
+        run: pytest tests/ -q
+
+  ebpf-smoke:
+    name: eBPF probe smoke test (real kernel, sudo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: m0-harness/go.mod
+
+      # Same recipe as m0-harness/README.md "Building" / "Getting clang
+      # without root" — GitHub-hosted Ubuntu runners ship clang with a BPF
+      # backend and bpftool already, so the portable-download fallback
+      # documented there for offline sandboxes shouldn't be needed here.
+      - name: verify clang has a BPF backend
+        run: clang --target=bpf --version
+
+      # Ubuntu's apt `bpftool` is locked to an exact kernel package
+      # (linux-tools-$(uname -r)) that doesn't exist for the runner's Azure
+      # kernel flavor — confirmed failing here. `btf dump file` itself has
+      # no such requirement (it just reads and pretty-prints the BTF file),
+      # so the portable static release binary works on any kernel — same
+      # fallback pattern as "Getting clang without root" in the README.
+      - name: install portable bpftool
+        run: |
+          curl -sSL -o /tmp/bpftool.tar.gz \
+            https://github.com/libbpf/bpftool/releases/download/v7.7.0/bpftool-v7.7.0-amd64.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/bpftool.tar.gz bpftool
+          # The release tarball's member isn't marked executable (confirmed:
+          # -rw-r--r--) — without +x, `bpftool` on PATH silently falls
+          # through to apt's kernel-locked wrapper instead of erroring,
+          # which is exactly the failure this step exists to avoid.
+          sudo chmod +x /usr/local/bin/bpftool
+          bpftool version
+
+      - name: generate vmlinux.h
+        working-directory: m0-harness/cmd/strong-tier-probe/bpf
+        run: sudo /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+
+      - name: vendor libbpf headers
+        working-directory: m0-harness/cmd/strong-tier-probe/bpf
+        run: |
+          mkdir -p vendor/bpf
+          BASE=https://raw.githubusercontent.com/libbpf/libbpf/v1.4.0/src
+          for f in bpf_helpers.h bpf_helper_defs.h bpf_tracing.h bpf_core_read.h bpf_endian.h; do
+            curl -sSL -o "vendor/bpf/$f" "$BASE/$f"
+          done
+
+      - name: compile probe.o
+        working-directory: m0-harness/cmd/strong-tier-probe/bpf
+        run: |
+          clang -target bpf -D__TARGET_ARCH_x86 \
+            -I. -Ivendor \
+            -g -O2 -c probe.c -o probe.o
+
+      - name: build strong-tier-probe
+        working-directory: m0-harness/cmd/strong-tier-probe
+        run: go build -o strong-tier-probe .
+
+      # Smoke scope only (not the full n=10000 pairing/join validation from
+      # the session's manual runs — that's a periodic benchmark, not a
+      # per-PR gate): attach for real under sudo, confirm a clean load and a
+      # clean shutdown (the errors.Is fix from iteration 6), and that the
+      # drop counter is readable. This is the one code path unit tests
+      # structurally cannot reach without CAP_BPF.
+      - name: attach and shut down clean under sudo
+        working-directory: m0-harness/cmd/strong-tier-probe
+        run: |
+          sudo ./strong-tier-probe --out /tmp/smoke.jsonl > /tmp/smoke.log 2>&1 &
+          probe_job=$!
+          sleep 2
+          # pkill by name, not the captured PID: sudo may fork a monitor
+          # process rather than exec'ing in place, so $! isn't reliably the
+          # signal target — it's still the right thing for `wait` below.
+          # -f (full command line), not -x: "strong-tier-probe" is 17 chars,
+          # over the 15-char /proc/[pid]/comm limit -x matches against
+          # (confirmed failing here: "zero matches", kernel truncates comm).
+          sudo pkill -INT -f strong-tier-probe
+          wait "$probe_job"
+          echo "--- probe log ---"
+          cat /tmp/smoke.log
+          grep -q "strong-tier-probe attached" /tmp/smoke.log
+          grep -q "ring buffer reserve failures" /tmp/smoke.log
+          grep -q "shutting down" /tmp/smoke.log

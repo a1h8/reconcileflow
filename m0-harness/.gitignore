@@ -1,0 +1,5 @@
+bin/
+*.o
+*.jsonl
+cmd/strong-tier-probe/bpf/vmlinux.h
+cmd/strong-tier-probe/bpf/vendor/
