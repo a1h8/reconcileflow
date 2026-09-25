@@ -917,6 +917,46 @@ be isolated (client-side port distribution, final candidate narrowing);
 whether it holds end-to-end under real concurrent load through a pooling
 proxy is genuinely unresolved, not concluded either way.
 
+## `http-signal-probe` — the stateless-design hypothesis, confirmed (2026-09-25)
+
+The `/compliant` cliff section above found OBI's hard failure at ~500 requests
+on one pooled connection, checked the obvious "bounded kernel map" explanation
+against OBI's real source and ruled it out, and filed
+[OBI#3571](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/issues/3571)
+rather than guess further. `docs/target/reconcileflow-traceability-spec.md`
+§4 asked the follow-up: would a probe built the way `strong-tier-probe`
+already is — no kernel-side state, raw events straight to a ring buffer,
+all correlation done in userspace — sidestep this class of failure by
+construction, regardless of what OBI's specific bug turns out to be?
+
+**`cmd/http-signal-probe`** tests exactly this, deliberately narrow: a single
+uprobe on `net/http/internal/http2.(*serverConn).runHandler` (Go's HTTP/2
+request-dispatch entry point — not `net/http.(*serverHandler).ServeHTTP`,
+which only fires for HTTP/1.1 and silently never triggers on H2 traffic, a
+real dead-end hit and fixed during this POC), emitting `{pid, timestamp_ns}`
+straight to a ring buffer. No map beyond that ring buffer and a drop
+counter. It does not read `traceparent` — decoding a Go `http.Header` map
+from eBPF is the genuinely hard, multi-month part of what OBI does, out of
+scope for a throughput POC — and it does not attempt request/response
+pairing.
+
+**Result, same Traefik-pooled-connection setup that broke OBI, at double
+the scale**: n=2000 through the single backend connection, **0 ring-buffer
+reserve failures, 2005 events recorded for ~2000 requests** (the small
+excess is incidental background traffic, not duplication) — no
+degradation, no cliff, 4x past the point where OBI's direct propagation
+permanently stopped. Confirms the hypothesis structurally: keeping
+correlation state out of the kernel avoids this entire class of failure
+by construction, independent of whatever OBI's specific bug turns out to
+be once #3571 gets a maintainer response.
+
+**What this does and doesn't prove.** It proves throughput holds under
+sustained load with zero loss — the actual question asked. It does **not**
+prove a full replacement for OBI is easy: reading the propagated
+`traceparent` without introducing kernel-side state (the next real step)
+still has to solve the same header-decoding problem OBI solves, just
+without the bounded-map shortcut — unexplored here, not claimed as solved.
+
 ## Known limitations of this first slice
 
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
