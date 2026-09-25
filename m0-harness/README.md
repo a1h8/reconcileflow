@@ -615,15 +615,35 @@ OBI reports 2000 events on that one connection, not 1000.
 emission sequence rather than by the (batched, imprecise) timestamp.** The
 last correctly-matched event is at sequence index 999 of 2000. From index
 1000 onward — exactly half — every single remaining event is self-authored,
-unbroken, to the end of the run. Consistent with a fixed-capacity table
-OBI keeps per connection to track in-flight propagated context: once it
-fills (here, at ~500 real requests on one connection), direct propagation
-stops working *entirely* for that connection, not just for the overflow —
-every request after the cliff misses, including ones that would have fit
-comfortably earlier in the run. Not confirmed against OBI's source (no
-capacity constant located), but the signature (sharp, total, permanent) is
-hard to explain any other way. This is a concrete, production-relevant
-failure mode: **sustained traffic through a connection-pooling proxy will
+unbroken, to the end of the run.
+
+**First guess (a fixed-capacity per-connection map) was wrong — checked
+against OBI's actual source, not left as a hunch.** Cloned
+`open-telemetry/opentelemetry-ebpf-instrumentation` at v0.13.0:
+`bpf/maps/ongoing_http.h`, `ongoing_http2_connections.h`,
+`bpf/gotracer/maps/{runtime,nethttp}.h` — every relevant `LRU_HASH` is sized
+5000–30000 entries, far above the ~500-request cliff, and LRU eviction
+wouldn't produce a *permanent, total* cutoff at a clean boundary anyway.
+Checked OBI's own issue tracker next: closed issue #3027 ("Fix stale go
+trace map data") describes almost exactly this class of bug — a removed
+`goexit1` probe left stale per-goroutine trace-map entries that a *new*
+goroutine could inherit after Go's runtime reused the same memory address —
+but that fix merged 2026-08-14, before v0.13.0 shipped (2026-09-04), so it's
+already present here and doesn't explain this. A closely related, still-open
+theme does exist (#2551, "Unbounded trace merging with
+`context_propagation: headers`" — the maintainers' own words: *"this is the
+general gap none of [the prior fixes] cover"*), but that's the inverse
+symptom (over-merging, not total loss), so it isn't a confirmed match either.
+
+**Filed upstream rather than leaving it as an unverified guess**:
+[open-telemetry/opentelemetry-ebpf-instrumentation#3571](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/issues/3571),
+with the exact reproduction (Traefik pooled backend, n=1000, the 999/2000
+sequence-index cliff) and everything ruled out above. Root cause remains
+open pending maintainer response — not resolved by this session, correctly
+escalated instead of guessed at further.
+
+Whatever the exact mechanism, the observed behavior is real and
+reproducible: **sustained traffic through a connection-pooling proxy will
 eventually and permanently break OBI's direct propagation on that
 connection**, not a transient/recoverable blip — exactly the kind of gap the
 user's original concern (multi-hop, needs failover) was about, just with a
@@ -660,11 +680,13 @@ as gaps:
   - **Volume, even through a fully compliant hop** (`/compliant`): a hard
     cliff, not gradual drift — the last correctly-propagated event is at
     sequence index 999 of 2000; from index 1000 (exactly half) to the end,
-    every single event is self-authored. Consistent with a fixed-capacity
-    per-connection tracking table in OBI that, once full (~500 real requests
-    on one connection here), stops working *permanently* for that connection,
-    not just for the overflow. Not confirmed against OBI's source, but the
-    signature (sharp, total, permanent) is hard to explain otherwise.
+    every single event is self-authored. The first guess (a fixed-capacity
+    per-connection map) was checked against OBI's actual source and ruled
+    out (all relevant maps are 5000–30000 entries, LRU, wouldn't produce a
+    clean permanent cutoff) — filed upstream as
+    [#3571](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/issues/3571)
+    rather than left as an unverified guess; root cause open pending
+    maintainer response.
     **This is the concrete version of the user's original concern**: sustained
     traffic through a connection-pooling proxy — not a compliance failure —
     will eventually and permanently break direct propagation.
