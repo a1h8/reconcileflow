@@ -617,6 +617,16 @@ last correctly-matched event is at sequence index 999 of 2000. From index
 1000 onward — exactly half — every single remaining event is self-authored,
 unbroken, to the end of the run.
 
+> **⚠ Corrected 2026-09-26 — this specific "hard cliff" shape does not
+> reproduce.** Re-running this exact configuration with a service-scoped
+> (not combined-stream) analysis gives a scattered ~10% failure rate with no
+> permanent failing suffix, not a clean permanent cutoff at index 999. See
+> ["Correction: the 'hard cliff' claim does not survive re-testing"](#correction-the-hard-cliff-claim-does-not-survive-re-testing-2026-09-26)
+> below for the full re-test and the likely cause (an unfiltered,
+> combined-stream event count in the original ad hoc analysis). Left
+> unedited above for an honest record of what was originally measured and
+> claimed.
+
 **First guess (a fixed-capacity per-connection map) was wrong — checked
 against OBI's actual source, not left as a hunch.** Cloned
 `open-telemetry/opentelemetry-ebpf-instrumentation` at v0.13.0:
@@ -642,12 +652,11 @@ sequence-index cliff) and everything ruled out above. Root cause remains
 open pending maintainer response — not resolved by this session, correctly
 escalated instead of guessed at further.
 
-Whatever the exact mechanism, the observed behavior is real and
-reproducible: **sustained traffic through a connection-pooling proxy will
-eventually and permanently break OBI's direct propagation on that
-connection**, not a transient/recoverable blip — exactly the kind of gap the
-user's original concern (multi-hop, needs failover) was about, just with a
-volume trigger instead of a compliance trigger.
+> **⚠ Corrected 2026-09-26**: the paragraph above ("permanently break... not
+> a transient/recoverable blip") is also not supported by the re-test — the
+> failure is real but intermittent (10–34%, scattered) and tied to
+> single-connection multiplexing, not volume, and not permanent. See the
+> correction section below.
 
 **A second, independent finding surfaced while debugging the above**: OBI's
 `OTEL_EBPF_TRACE_PRINTER=text` leading timestamp is **batched, not per-event**
@@ -677,19 +686,26 @@ as gaps:
   diagnosed causes, not one:
   - **Non-compliance** (`/broken`): a proxy that strips the header. Clean,
     total, expected.
-  - **Volume, even through a fully compliant hop** (`/compliant`): a hard
-    cliff, not gradual drift — the last correctly-propagated event is at
-    sequence index 999 of 2000; from index 1000 (exactly half) to the end,
-    every single event is self-authored. The first guess (a fixed-capacity
-    per-connection map) was checked against OBI's actual source and ruled
-    out (all relevant maps are 5000–30000 entries, LRU, wouldn't produce a
-    clean permanent cutoff) — filed upstream as
-    [#3571](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/issues/3571)
-    rather than left as an unverified guess; root cause open pending
-    maintainer response.
-    **This is the concrete version of the user's original concern**: sustained
-    traffic through a connection-pooling proxy — not a compliance failure —
-    will eventually and permanently break direct propagation.
+  - **Concurrency, through a fully compliant hop** (`/compliant`): originally
+    reported (and filed upstream as
+    [#3571](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/issues/3571))
+    as a hard, permanent cliff at sequence index 999/2000. **Corrected
+    2026-09-26**: that specific shape did not survive a faithful re-test —
+    see ["Correction: the 'hard cliff' claim does not survive
+    re-testing"](#correction-the-hard-cliff-claim-does-not-survive-re-testing-2026-09-26).
+    What actually holds up, isolated by elimination across ten independent
+    runs: a real but intermittent (10–34%, scattered, never permanent) loss
+    of trace-context readability at the final service, triggered by many
+    requests genuinely multiplexed over **one shared TCP connection**
+    (Traefik's own backend-pooling behavior), not by volume and not a
+    Traefik propagation defect (Traefik's own outbound header is clean,
+    0 self-authored across every test run, ~3,600 requests).
+    **The concrete version of the user's original concern still stands**,
+    just more precisely scoped: a connection-pooling hop *can* intermittently
+    drop trace context under real concurrent load — not "eventually and
+    permanently," as first claimed, but often enough (10–34% observed here)
+    that a PCI-DSS-grade tool cannot treat direct propagation as sufficient
+    on its own.
 - **The correlator MVP's recall is solved (100% once load-calibrated), but its
   precision was never real until this session's last step.** `T` was first
   measured exactly equal to `R` — a circularity bug in the MVP's own scoring,
@@ -846,9 +862,16 @@ just probably.
 span (`processing`), linked by `Parent ID`. This is almost certainly what the
 real multi-hop test's "~2000 OBI events for 1000 real requests" actually was
 (section above) — not a suspicious duplicate, the normal two-span-per-request
-shape, with both spans printed as separate lines by the text summary. Doesn't
-change any of that section's conclusions (the cliff, the coverage numbers),
-but reframes what "2x" meant: structural, not anomalous.
+shape, with both spans printed as separate lines by the text summary.
+
+> **⚠ This observation turned out to matter more than stated here.** The
+> original cliff analysis computed its 999/2000 sequence index over this
+> same combined, two-spans-per-request stream *without* separating the two
+> span types first — see the
+> ["Correction"](#correction-the-hard-cliff-claim-does-not-survive-re-testing-2026-09-26)
+> section: that is the leading hypothesis for why a permanent cliff appeared
+> at exactly the halfway point. So the claim right below this note ("doesn't
+> change any of that section's conclusions") is itself corrected — it did.
 
 Other attributes now visible that the text printer doesn't show
 (`client.address`, `network.peer.port`, `http.route`, `url.path`,
@@ -944,9 +967,20 @@ pairing.
 the scale**: n=2000 through the single backend connection, **0 ring-buffer
 reserve failures, 2005 events recorded for ~2000 requests** (the small
 excess is incidental background traffic, not duplication) — no
-degradation, no cliff, 4x past the point where OBI's direct propagation
-permanently stopped. Confirms the hypothesis structurally: keeping
-correlation state out of the kernel avoids this entire class of failure
+degradation at throughput level.
+
+> **⚠ Corrected 2026-09-26**: "4x past the point where OBI's direct
+> propagation permanently stopped" overstates what OBI's bug actually is
+> — see the
+> ["Correction"](#correction-the-hard-cliff-claim-does-not-survive-re-testing-2026-09-26)
+> section: there is no permanent stopping point, and OBI's failure is not a
+> throughput/ring-buffer-capacity problem to begin with (this POC never
+> claimed to read `traceparent`, so it was never actually testing the same
+> failure mode as OBI's — it tests raw uprobe throughput under connection
+> pooling, a necessary but not sufficient condition for a real replacement).
+
+Confirms the throughput hypothesis structurally: keeping
+correlation state out of the kernel avoids ring-buffer-capacity failure
 by construction, independent of whatever OBI's specific bug turns out to
 be once #3571 gets a maintainer response.
 
@@ -957,48 +991,79 @@ prove a full replacement for OBI is easy: reading the propagated
 still has to solve the same header-decoding problem OBI solves, just
 without the bounded-map shortcut — unexplored here, not claimed as solved.
 
-## Localizing the cliff: incoming header-read, not propagation (2026-09-26)
+## Correction: the "hard cliff" claim does not survive re-testing (2026-09-26)
 
-Maintainer `grcevski`'s comment on
+**Mea culpa, stated plainly rather than smoothed over.** Maintainer
+`grcevski`'s comment on
 [OBI#3571](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/issues/3571)
-asked precisely the right diagnostic question: is this a propagation/
-forwarding failure at the proxy, or a header-reading failure at the final
-service? Native Traefik + `fake-upstream`, both instrumented simultaneously
-by the same OBI instance (`OTEL_EBPF_OPEN_PORT=8443,9081`, per the bridging
-work above), makes this directly measurable: OBI emits a distinct
-`HTTPClient` event for Traefik's own outbound call (proof of what Traefik
-actually sent) alongside the `HTTP` event for `fake-upstream`'s incoming
-request (proof of what was received).
+asked the right diagnostic questions (is this propagation/forwarding at
+the proxy, or a header-read problem at the final service? has Traefik's
+outbound side actually been checked?), and answering them properly — by
+re-testing rather than reasoning from the original one-off analysis —
+surfaced that **the ticket's central claim, a permanent hard cliff (clean
+until sequence index 999/2000, then 100% self-authored forever after), does
+not reproduce.** Re-running the *exact* original configuration (n=1000,
+c=50, one continuous run, Traefik → `fake-upstream`, both instrumented by
+the same OBI instance) gives 10.3% self-authored, **scattered across the
+whole sequence, with no permanent all-failing suffix** — not the reported
+shape at all.
 
-Ran the same `/compliant`, real-header, c=50 scenario three independent
-times (n=500 each) against the same long-lived pooled connection (the
-Traefik/`fake-upstream` process pair has been running continuously since
-2026-09-25, so the pool carries over between runs):
+The original `/compliant` finding reported "~2000 OBI events for 1000 real
+requests" and computed the 999/2000 cliff index over that combined,
+un-filtered stream. That analysis was done ad hoc in a terminal and was
+never saved as a script — it cannot be re-audited directly. The most likely
+explanation, consistent with everything measured since: it mixed two
+different event types (Traefik-inbound and `fake-upstream`-incoming)
+without separating them by service, and an index-based ground-truth match
+against that doubled, unfiltered stream ran out of real correspondences
+at exactly the halfway point — manufacturing the appearance of a sharp,
+permanent cutoff. This is a plausible root cause for *our own* number, not
+a confirmed one; it is disclosed as the leading hypothesis, not fact.
 
-| run | Traefik outbound self-authored | fake-upstream incoming self-authored |
-|-----|--------------------------------:|--------------------------------------:|
-| 1   | 0/500 (0%)                      | 50/500 (10%)                          |
-| 2   | 0/500 (0%)                      | 105/500 (21%)                         |
-| 3   | 0/500 (0%)                      | 132/500 (26.4%)                       |
+**What *is* real, established this time with a service-scoped, connection-
+tracked methodology across ten independent runs (~3,600 requests total)
+instead of one ad hoc pass:**
 
-**Traefik's outbound propagation is clean, reproducibly, 0/1500 across three
-independent runs** — not a single-run fluke, as close to certain as this
-harness can establish: the bug is not in Traefik forwarding the header.
-**fake-upstream's incoming reads fail at a rate that is itself not stable —
-it grew monotonically across the three consecutive runs (10% → 21% → 26.4%)
-on the same pooled connection**, the same shape as the original cliff
-(self-authored rate climbing with cumulative volume on one connection, not
-a fixed error rate) — consistent with, though not yet confirmed identical
-to, the ~50%-at-n=1000 cliff reported earlier in this document. This
-directly confirms grcevski's own hypothesis on the issue: the failure is in
-reading `traceparent` off the incoming request at the final Go service, not
-in forwarding/propagation.
+| test | concurrency | connection(s) | Traefik outbound self-authored | final-service incoming self-authored |
+|---|---|---|---|---|
+| 3× separate c=50 batches, n=500 each | 50 | 1 fresh connection per batch (confirmed by distinct source port each time) | 0/1500 | 10%, 21%, 26.4% |
+| 2× c=1, n=500 each | 1 | 72–78 connections | 0/1000 | 0/1000 |
+| c=50, n=1000, one continuous run (exact original config) | 50 | 1 (port confirmed unique) | 0/1000 | 103/1000 (10.3%), scattered, no permanent suffix |
+| 2× c=50, n=100 each | 50 | 1 per run | 0/200 | 34%, 32% |
+| **c=50, n=500, direct `load-gen` → `fake-upstream`, no Traefik** | 50 | **101 distinct connections** | n/a | **0/500 (0%)** |
 
-**Not yet done**: reproducing this at the original cliff's scale (a single
-continuous n=1000+ run, dual-instrumented) to check whether it's the same
-mechanism or a related-but-distinct one — the three runs above are
-independent n=500 batches on a connection that persisted across all of
-them, suggestive but not equivalent to one continuous n=1500 run.
+Reading across all ten: **Traefik's outbound propagation is clean, 0
+self-authored across every single test, ~3,600 requests** — not implicated,
+full stop. The failure is real, reproducible, and localized to
+`fake-upstream`'s incoming header read — but it is **neither volume-driven
+nor stable in magnitude (10–34%, no trend with total requests sent) nor a
+permanent cliff (always scattered, never a permanent failing suffix)**.
+
+**The variable that actually matters, isolated by elimination**: whether
+many concurrent requests are genuinely multiplexed over **one single TCP
+connection** to the Go service. Traefik funnels its entire backend burst
+through exactly one connection under load (confirmed by source port in
+every test above) and shows the failure. `load-gen` hitting `fake-upstream`
+directly at the identical concurrency (c=50) spreads the same 500 requests
+over 101 separate connections and shows **zero** failures. This is not a
+Traefik-specific bug and not a volume-triggered map exhaustion (both
+earlier hypotheses, now falsified by direct test) — it is specific to
+genuine single-connection request multiplexing, which only Traefik's
+connection-pooling behavior produced in this harness.
+
+**Bottom line on "is there still a real bug worth a ticket": yes, a
+real one, but a smaller and differently-shaped one than filed.** A
+correction is owed to OBI#3571 — retracting the permanent-cliff framing and
+the ~2000-events-for-1000-requests count, replacing it with this precise,
+elimination-tested characterization (single-shared-connection multiplexing
+→ intermittent, non-permanent, 10–34% loss of incoming trace-context
+readability at the final Go service, Traefik itself exonerated).
+
+**Process lesson, adopted as a standing rule going forward**: no upstream
+ticket gets filed on a claim that hasn't survived at least one independent,
+service-scoped, elimination-style re-test — the ad hoc single-pass analysis
+that produced the original cliff number is exactly the failure mode this
+rule is meant to catch.
 
 ## Known limitations of this first slice
 
