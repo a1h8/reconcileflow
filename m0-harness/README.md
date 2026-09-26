@@ -957,6 +957,49 @@ prove a full replacement for OBI is easy: reading the propagated
 still has to solve the same header-decoding problem OBI solves, just
 without the bounded-map shortcut — unexplored here, not claimed as solved.
 
+## Localizing the cliff: incoming header-read, not propagation (2026-09-26)
+
+Maintainer `grcevski`'s comment on
+[OBI#3571](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/issues/3571)
+asked precisely the right diagnostic question: is this a propagation/
+forwarding failure at the proxy, or a header-reading failure at the final
+service? Native Traefik + `fake-upstream`, both instrumented simultaneously
+by the same OBI instance (`OTEL_EBPF_OPEN_PORT=8443,9081`, per the bridging
+work above), makes this directly measurable: OBI emits a distinct
+`HTTPClient` event for Traefik's own outbound call (proof of what Traefik
+actually sent) alongside the `HTTP` event for `fake-upstream`'s incoming
+request (proof of what was received).
+
+Ran the same `/compliant`, real-header, c=50 scenario three independent
+times (n=500 each) against the same long-lived pooled connection (the
+Traefik/`fake-upstream` process pair has been running continuously since
+2026-09-25, so the pool carries over between runs):
+
+| run | Traefik outbound self-authored | fake-upstream incoming self-authored |
+|-----|--------------------------------:|--------------------------------------:|
+| 1   | 0/500 (0%)                      | 50/500 (10%)                          |
+| 2   | 0/500 (0%)                      | 105/500 (21%)                         |
+| 3   | 0/500 (0%)                      | 132/500 (26.4%)                       |
+
+**Traefik's outbound propagation is clean, reproducibly, 0/1500 across three
+independent runs** — not a single-run fluke, as close to certain as this
+harness can establish: the bug is not in Traefik forwarding the header.
+**fake-upstream's incoming reads fail at a rate that is itself not stable —
+it grew monotonically across the three consecutive runs (10% → 21% → 26.4%)
+on the same pooled connection**, the same shape as the original cliff
+(self-authored rate climbing with cumulative volume on one connection, not
+a fixed error rate) — consistent with, though not yet confirmed identical
+to, the ~50%-at-n=1000 cliff reported earlier in this document. This
+directly confirms grcevski's own hypothesis on the issue: the failure is in
+reading `traceparent` off the incoming request at the final Go service, not
+in forwarding/propagation.
+
+**Not yet done**: reproducing this at the original cliff's scale (a single
+continuous n=1000+ run, dual-instrumented) to check whether it's the same
+mechanism or a related-but-distinct one — the three runs above are
+independent n=500 batches on a connection that persisted across all of
+them, suggestive but not equivalent to one continuous n=1500 run.
+
 ## Known limitations of this first slice
 
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
