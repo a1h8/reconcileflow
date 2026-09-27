@@ -1065,6 +1065,75 @@ service-scoped, elimination-style re-test — the ad hoc single-pass analysis
 that produced the original cliff number is exactly the failure mode this
 rule is meant to catch.
 
+## Dose-response: self-authored rate scales with concurrency, not volume (2026-09-27)
+
+The correction above narrowed the bug to "single-shared-connection
+multiplexing," but every test behind that table ran at c=50 — concurrency and
+connection-count were never varied independently, so "single connection" and
+"high concurrency" were still confounded. The open question: does the
+incoming-header-read failure need a contention threshold to appear, or is it
+present at any genuine concurrency level, just less likely? These predict
+different mechanisms — a capacity/contention bug vs. a per-stream
+mis-association race — and the earlier table can't distinguish them.
+
+**Setup.** Same OBI v0.13.0 (portable release binary, matching the version
+used throughout this investigation), `fake-upstream`, and native Traefik
+(v3.7.13) as before, `OTEL_EBPF_OPEN_PORT=8443,9081` instrumenting both.
+Unlike earlier ad hoc runs, this analysis has a saved, re-runnable script:
+[`analyze_obi_log.py`](analyze_obi_log.py) joins OBI's raw
+`OTEL_EBPF_TRACE_PRINTER=text` output against `load-gen`'s ground truth by
+trace_id set membership (a trace_id OBI reports that `load-gen` never issued
+is "self-authored") — a simpler and more direct check than the connKey-based
+`cmd/join`, and one that doesn't require OBI's output to expose 5-tuple
+identity at all. One real bug surfaced and got fixed live while building it:
+the first regex cut `traceparent=[...]` off at its first `]`, not realizing
+the field itself contains a nested bracket (the parent-id's flags suffix),
+truncating every trace_id and reporting 100% self-authored on a hand-verified
+correct run — caught immediately because 100% was implausible, not left in.
+
+Five levels, `c` = 2/5/10/20/50, held at `n=300` each, load-gen through
+Traefik → `fake-upstream`, one continuous OBI session (never restarted; OBI's
+own port-based discovery re-attached automatically when Traefik itself was
+restarted mid-setup for an unrelated config fix). Each level's connection
+count was checked directly, not assumed, by counting distinct source ports on
+Traefik's outbound `HTTPClient` events:
+
+| concurrency | requests | connections | self-authored (fake-upstream incoming) | Traefik in / out |
+|---|---|---|---|---|
+| 2 | 300 | 1 | 0.7% (2/300) | 0% / 0% |
+| 5 | 300 | 1 | 2.7% (8/300) | 0% / 0% |
+| 10 | 300 | 1 | 6.0% (18/300) | 0% / 0% |
+| 20 | 300 | 1 | 12.7% (38/300) | 0% / 0% |
+| 50 | 300 | 1 | 19.3% (58/300) | 0% / 0% |
+
+**This answers the question the earlier table couldn't.** Every level holds
+exactly one physical connection, confirmed rather than assumed, so
+concurrency is isolated as the only variable moving across rows. The failure
+is **already present at c=2** (0.7%, not zero) and climbs monotonically and
+roughly smoothly through c=50 (19.3%) — no visible threshold below which it
+disappears, and no sign of the "only kicks in above some contention level"
+shape a pure capacity/exhaustion bug would predict. Traefik's own inbound and
+outbound events stay at exactly 0% across all five levels, once again
+exonerating Traefik itself.
+
+**Reading, not yet proof.** A monotonic climb from a nonzero floor is the
+signature a per-stream state race would produce (more concurrent streams on
+one connection → more chances for two of them to collide over shared state),
+consistent with the working hypothesis that this is a synchronization bug in
+how OBI associates a read `traceparent` with the correct in-flight stream,
+not a bounded-resource ceiling. It does not by itself identify *what* shared
+state races — that would need looking at OBI's own source for how it keys
+its per-connection/per-stream correlation data, not inferred from outside
+black-box behavior. The 20→50 step (12.7%→19.3%, a smaller jump than
+5→10→20's roughly ×2.3 pattern) may be the start of a saturation curve or may
+be noise at n=300 — not enough points to tell apart, and not claimed as
+either here.
+
+**What this changes for the OBI#3571 correction still owed**: strengthens it
+with a cleaner characterization — "grows with concurrent stream count on a
+shared connection, present at any level tested down to c=2" — rather than
+"needs high load," which was never actually established.
+
 ## Known limitations of this first slice
 
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
