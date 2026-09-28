@@ -1134,6 +1134,66 @@ with a cleaner characterization — "grows with concurrent stream count on a
 shared connection, present at any level tested down to c=2" — rather than
 "needs high load," which was never actually established.
 
+## The real M0-A topology, finally built: a genuine second hop (2026-09-28)
+
+Every test so far used a 2-hop substitute (`load-gen → Traefik → fake-upstream`)
+for the 4-node topology `m0-correlation-spike-protocol.md` actually specifies
+(`load-generator → gateway → upstream-service → outbound-connector →
+fake-upstream`) — flagged repeatedly above as a known gap ("no spec exists for
+that"). Built the missing piece: a second Traefik instance (`gateway`, port
+7080) in front of the existing one (now playing `upstream-service` +
+`outbound-connector`, port 9081), itself still fronting `fake-upstream`
+(8443). One OBI session, `OTEL_EBPF_OPEN_PORT=8443,9081,7080`, instruments all
+three. This is a genuine two-independent-hop pooled chain, not a simulated
+one — the first time this harness has tested whether trace context survives
+more than one real proxy hop in series.
+
+**A labelling quirk found immediately, reported as observed, not explained.**
+Both Traefik instances run the identical binary — OBI logs `"instrumenting
+process"` for only one of the two PIDs (uprobes attach to code, not
+processes, so this alone doesn't mean the second instance goes unobserved —
+and it doesn't: its traffic shows up fine). But the upstream instance's own
+*inbound* span consistently prints an unrelated-looking destination
+(`traefik:48736`) instead of its real listening port (9081), while the
+gateway's inbound span correctly shows `traefik:7080`. Traceable to something
+in how OBI resolves the destination when two instances of the same
+instrumented executable are both active — not investigated further here,
+reported as a new, undiagnosed symptom in case it matters later.
+
+**The result, c=50/n=300, grouped by real destination port (not `svc=`
+label, which is identical "traefik" for both hops):**
+
+| Hop | Event | Self-authored |
+|---|---|---|
+| Gateway inbound (load-gen → gateway, :7080) | HTTP | 0% |
+| Gateway outbound (gateway → upstream, :9081) | HTTPClient | 0% |
+| Upstream inbound (gateway → upstream, real port 9081) | HTTP | **49.7%** (149/300) |
+| Upstream outbound (upstream → fake-upstream, :8443) | HTTPClient | **49.7%** (149/300) |
+| fake-upstream inbound (final hop) | HTTP | 51.3% (154/300) |
+
+**Two things read together, one solid, one open.** Upstream's outbound rate
+exactly matching its own inbound rate (both 49.7%) is consistent with OBI
+propagating whatever trace context it associated with a goroutine at
+receive-time straight through to that same goroutine's outbound call — not a
+second, independent corruption at the outbound step, the same one carried
+forward. The gateway staying at 0% while upstream does not is consistent with
+the established single-connection-multiplexing trigger: the gateway's inbound
+side (from `load-gen`) isn't pooled the way upstream's inbound side (from the
+gateway) is.
+
+**What is not established**: 49.7% at c=50 is far above the 19.3% the single
+-hop setup measured at the identical concurrency and connection count
+(dose-response table above). Two candidate explanations, not distinguished
+by this test: being a reverse proxy under instrumentation (rather than a
+plain leaf `net/http` server like `fake-upstream`) makes the failure worse,
+or the two Traefik instances sharing one instrumented binary creates
+additional shared-state contention beyond the per-connection effect already
+measured — plausibly related to the labelling quirk above, but not confirmed
+to be the same root cause. Left open by decision, not by oversight — further
+isolation on this axis (e.g., swapping the gateway for a different proxy
+binary to remove the shared-executable confound) was considered and
+deliberately not pursued this session.
+
 ## Known limitations of this first slice
 
 - Latency profile C is an approximate lognormal fit (p50/p95 match, p99 ≈
