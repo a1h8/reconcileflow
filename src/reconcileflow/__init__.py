@@ -1,7 +1,7 @@
 """reconcileflow — reconciliation engine.
 
-Milestone J1: matching semantics, in memory, with no streaming and no
-persistent state. See the README for the roadmap and the design notes.
+The matching engine stays in memory and side-effect free. The provenance
+module adds optional local persistence and versioned source adapters.
 """
 
 from .engine import blocking_key, reconcile
