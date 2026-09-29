@@ -3,3 +3,5 @@ bin/
 *.jsonl
 cmd/strong-tier-probe/bpf/vmlinux.h
 cmd/strong-tier-probe/bpf/vendor/
+cmd/http-signal-probe/bpf/vmlinux.h
+cmd/http-signal-probe/bpf/vendor/

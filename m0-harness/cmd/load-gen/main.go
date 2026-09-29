@@ -1,6 +1,6 @@
 // load-gen is the M0 harness's authoritative client (docs/target/ground-truth-eval-plane-v3.md
-// §1, oracle GT2): it originates every trace_id, so its own log is ground truth by
-// construction — no inference needed on this side, only on fake-upstream's.
+// §1): it originates every trace_id. Its local request ordinals are NOT
+// protocol stream IDs; protocol-level GT2 capture remains unimplemented.
 //
 // Concurrency defaults to 100 (docs/target/m0-evaluation-run-001.md §1) specifically to
 // stress HTTP/2 connection pooling — the condition under which the fallback-tier
@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,30 +53,29 @@ func main() {
 		"visible in OBI's trace_printer output regardless of header propagation — an independent ground-truth "+
 		"channel for scoring a correlator's blind (port+timing-only) guess, never fed to the correlator itself. "+
 		"fake-upstream's handler is a catch-all, so any path works unmodified")
-	seed := flag.String("seed-policy", "variable", "fixed | variable (docs/target §1) — fixed reseeds identically per run, variable does not")
+	seed := flag.String("seed-policy", "variable", "variable only; fixed replay is not implemented")
+	timeout := flag.Duration("timeout", 30*time.Second, "deadline per request, including response body")
+	requireHTTP2 := flag.Bool("require-http2", true, "mark a request failed unless HTTP/2 was negotiated")
 	flag.Parse()
+	if *concurrency <= 0 || *total <= 0 || *timeout <= 0 {
+		log.Fatal("concurrency, requests and timeout must be positive")
+	}
+	if *seed != "variable" {
+		log.Fatal("only seed-policy=variable is supported; fixed replay is not implemented")
+	}
 
 	w, err := oracle.NewWriter(*outPath)
 	if err != nil {
 		log.Fatalf("open output: %v", err)
 	}
-	defer w.Close()
 
 	tracker := newConnTracker()
-	transport := &http.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, // lab self-signed cert only
-		DisableKeepAlives: !*pool,
-	}
-	client := &http.Client{Transport: transport}
-
-	if *seed == "fixed" {
-		log.Printf("seed_policy=fixed: this run's request sequence is meant to be replayed identically; " +
-			"determinism is the caller's responsibility (fixed request bodies/order), the harness does not seed a PRNG here")
-	}
+	client := newClient(*pool, *timeout)
+	defer client.CloseIdleConnections()
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, *concurrency)
-	var sent atomic.Int64
+	var succeeded, failed, writeFailures atomic.Int64
 
 	for i := 0; i < *total; i++ {
 		wg.Add(1)
@@ -88,56 +88,93 @@ func main() {
 			parentID := randHex(8) // 8 bytes = 16 hex chars, W3C parent-id
 			traceparent := fmt.Sprintf("00-%s-%s-01", traceID, parentID)
 
-			var connKey string
-			ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
-				GotConn: func(info httptrace.GotConnInfo) {
-					connKey = tracker.identify(info.Conn)
-				},
-			})
-
 			path := "/"
 			if *truthInPath {
 				path = "/truth-" + traceID
 			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, *target+path, nil)
-			if err != nil {
-				log.Printf("build request: %v", err)
-				return
+			record := performRequest(client, tracker, *target+path, traceID, traceparent, *control, *mask, *requireHTTP2)
+			if err := w.Write(record); err != nil {
+				writeFailures.Add(1)
+				log.Printf("write record: %v", err)
 			}
-			if !*mask {
-				req.Header.Set("traceparent", traceparent)
+			if record.Error != "" {
+				failed.Add(1)
+			} else {
+				succeeded.Add(1)
 			}
-			if *control != "" {
-				req.Header.Set("X-Witness-Control", *control)
-			}
-
-			sentAt := time.Now().UnixNano()
-			resp, err := client.Do(req)
-			if err != nil {
-				log.Printf("request failed: %v", err)
-				return
-			}
-			respSize, _ := io.Copy(io.Discard, resp.Body) // read fully: byte count is the signal, not just discarded
-			resp.Body.Close()
-			duration := time.Now().UnixNano() - sentAt
-
-			streamID := tracker.nextStream(connKey)
-			_ = w.Write(oracle.Record{
-				Side:         "load-gen",
-				ConnKey:      connKey,
-				StreamID:     streamID,
-				TraceID:      traceID,
-				TimestampNS:  sentAt,
-				Control:      *control,
-				DurationNS:   duration,
-				ResponseSize: respSize,
-			})
-			sent.Add(1)
 		}()
 	}
 	wg.Wait()
-	log.Printf("done: %d/%d requests sent, control=%q pool=%v mask=%v truthInPath=%v",
-		sent.Load(), *total, *control, *pool, *mask, *truthInPath)
+	if err := w.Close(); err != nil {
+		writeFailures.Add(1)
+		log.Printf("close output: %v", err)
+	}
+	log.Printf("done: attempted=%d succeeded=%d failed=%d write_failures=%d control=%q pool=%v mask=%v truthInPath=%v",
+		*total, succeeded.Load(), failed.Load(), writeFailures.Load(), *control, *pool, *mask, *truthInPath)
+	if failed.Load() != 0 || writeFailures.Load() != 0 {
+		os.Exit(1)
+	}
+}
+
+func newClient(pool bool, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: &http.Transport{
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, // lab self-signed cert only
+			ForceAttemptHTTP2: true,
+			DisableKeepAlives: !pool,
+		},
+	}
+}
+
+// One record for every attempted request, including build, transport and body failures.
+// StreamID remains a local completion ordinal, NEVER a protocol stream ID.
+func performRequest(client *http.Client, tracker *connTracker, target, traceID, traceparent, control string, mask, requireHTTP2 bool) (record oracle.Record) {
+	started := time.Now()
+	record = oracle.Record{
+		SchemaVersion: 2, Side: "load-gen", TraceID: traceID, Control: control,
+		TimestampNS: started.UnixNano(), StreamID: -1, IdentityKind: "local_ordinal",
+	}
+	defer func() { record.DurationNS = time.Since(started).Nanoseconds() }()
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { record.ConnKey = tracker.identify(info.Conn) },
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		record.Error = "build: " + err.Error()
+		return
+	}
+	if !mask {
+		req.Header.Set("traceparent", traceparent)
+	}
+	if control != "" {
+		req.Header.Set("X-Witness-Control", control)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		record.Error = "transport: " + err.Error()
+		return
+	}
+	record.Protocol = resp.Proto
+	record.StatusCode = resp.StatusCode
+	if resp.TLS != nil {
+		record.NegotiatedProtocol = resp.TLS.NegotiatedProtocol
+	}
+	record.ResponseSize, err = io.Copy(io.Discard, resp.Body)
+	closeErr := resp.Body.Close()
+	record.StreamID = tracker.nextStream(record.ConnKey)
+	switch {
+	case err != nil:
+		record.Error = "body: " + err.Error()
+	case closeErr != nil:
+		record.Error = "close body: " + closeErr.Error()
+	case requireHTTP2 && resp.ProtoMajor != 2:
+		record.Error = "protocol: expected HTTP/2, got " + resp.Proto
+	case resp.StatusCode < 200 || resp.StatusCode >= 300:
+		record.Error = fmt.Sprintf("status: %d", resp.StatusCode)
+	}
+	return
 }
 
 func randHex(n int) string {
@@ -155,14 +192,14 @@ func randHex(n int) string {
 type connTracker struct {
 	mu         sync.Mutex
 	generation map[string]int
-	keyByTuple map[string]string // caches the assigned key per 5-tuple for this run
+	keyByConn  map[net.Conn]string // actual connection identity; tuple reuse is a new generation
 	streamSeq  map[string]*atomic.Int64
 }
 
 func newConnTracker() *connTracker {
 	return &connTracker{
 		generation: map[string]int{},
-		keyByTuple: map[string]string{},
+		keyByConn:  map[net.Conn]string{},
 		streamSeq:  map[string]*atomic.Int64{},
 	}
 }
@@ -171,16 +208,15 @@ func (t *connTracker) identify(c net.Conn) string {
 	fiveTuple := c.LocalAddr().String() + "-" + c.RemoteAddr().String()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// Mirrors fake-upstream's nextGeneration exactly: first time a 5-tuple is
-	// seen -> generation 0, incremented only on 5-tuple reuse. Both sides must
-	// agree on this rule since only the rule (not a shared counter) is what
-	// keeps generation numbers aligned across the two processes.
-	key, seen := t.keyByTuple[fiveTuple]
+	// Reusing the same connection preserves identity; a distinct connection
+	// recycling the tuple increments its generation. This still cannot prove
+	// agreement with a separate observer that may see unused connections.
+	key, seen := t.keyByConn[c]
 	if !seen {
 		gen := t.generation[fiveTuple]
 		t.generation[fiveTuple] = gen + 1
 		key = oracle.ConnKey(fiveTuple, gen)
-		t.keyByTuple[fiveTuple] = key
+		t.keyByConn[c] = key
 		t.streamSeq[key] = &atomic.Int64{}
 	}
 	return key

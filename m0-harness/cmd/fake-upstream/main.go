@@ -109,7 +109,8 @@ func main() {
 			// artificial, not a legitimate content-based signal).
 			body := randomBody()
 
-			_ = w.Write(oracle.Record{
+			if err := w.Write(oracle.Record{
+				SchemaVersion: 2, IdentityKind: "local_ordinal", Protocol: r.Proto, StatusCode: http.StatusOK,
 				Side:         "fake-upstream",
 				ConnKey:      ci.Key(),
 				StreamID:     streamID,
@@ -117,7 +118,9 @@ func main() {
 				TimestampNS:  time.Now().UnixNano(),
 				Control:      control,
 				ResponseSize: int64(len(body)),
-			})
+			}); err != nil {
+				log.Fatalf("write oracle record: %v", err)
+			}
 
 			rw.WriteHeader(http.StatusOK)
 			rw.Write(body)
