@@ -69,7 +69,8 @@ class Record:
 
     Normalisation (currency, sign, timezone, reference casing) has already
     happened: two records that correspond to each other carry **equal**
-    amounts here, not opposite ones.
+    amounts here, not opposite ones. Explicit currencies must agree; an
+    unspecified currency only matches another unspecified currency.
     """
 
     id: str
@@ -77,6 +78,7 @@ class Record:
     amount: Decimal
     value_date: date
     reference: str | None = None
+    currency: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
