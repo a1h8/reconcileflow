@@ -1,4 +1,4 @@
-// join is the offline oracle join (docs/target/ground-truth-eval-plane-v3.md, GT2):
+// join is a legacy ordinal-join diagnostic, NOT the protocol-level GT2 oracle:
 // it reads load-gen's authoritative trace_id-per-(conn_key,stream_id) and
 // fake-upstream's observed trace_id-per-(conn_key,stream_id), joins on the key,
 // and reports D_acc — the fraction where they agree.
@@ -39,6 +39,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("read fake-upstream log: %v", err)
 	}
+
+	for _, records := range [][]oracle.Record{expected, observed} {
+		for _, r := range records {
+			if r.SchemaVersion >= 2 && (r.Protocol != "HTTP/1.1" || r.Error != "") {
+				log.Fatal("legacy ordinal join requires successful HTTP/1.1 records; local ordinals are not an HTTP/2 oracle")
+			}
+		}
+	}
+	log.Print("legacy diagnostic only: local ordinals and independently assigned connection generations do not establish GT2")
 
 	type key struct {
 		connKey  string

@@ -1,4 +1,4 @@
-// Package oracle implements the GT2 ground-truth record shared by load-gen
+// Package oracle implements experimental records shared by load-gen
 // (authoritative: it originates trace_id) and fake-upstream (observed: it
 // receives the connection/stream and can only infer identity from userspace).
 //
@@ -24,8 +24,8 @@ import (
 // ConnectionStartNS is metadata only, deliberately excluded from Key(): it is
 // measured independently on each side (server accept time vs. client dial
 // time, different clocks) and can never be bit-identical across processes.
-// Only FiveTuple+Generation is safe to join on, because both sides observe
-// 5-tuple recurrence in the same relative order.
+// FiveTuple+Generation is only a fallback: independent observers may miss
+// connections. It is not proof of shared connection or stream identity.
 type ConnectionInstance struct {
 	FiveTuple         string `json:"five_tuple"` // "srcIP:srcPort-dstIP:dstPort"
 	ConnectionStartNS int64  `json:"connection_start_ns"`
@@ -44,14 +44,21 @@ func ConnKey(fiveTuple string, generation int) string {
 }
 
 // Record is one line of the ground-truth JSONL log. Emitted by both sides;
-// joined offline on (connection_instance_key, stream_id).
+// The legacy join uses (conn_key, stream_id), but stream_id is only a local
+// ordinal; it cannot establish identity under HTTP/2 multiplexing.
 type Record struct {
-	Side        string `json:"side"` // "load-gen" | "fake-upstream"
-	ConnKey     string `json:"conn_key"`
-	StreamID    int    `json:"stream_id"` // per-connection request sequence number
-	TraceID     string `json:"trace_id"`  // W3C traceparent trace-id field
-	TimestampNS int64  `json:"timestamp_ns"`
-	Control     string `json:"control,omitempty"` // "" | "positive" | "negative" — witness cell tag
+	SchemaVersion      int    `json:"schema_version,omitempty"`
+	IdentityKind       string `json:"identity_kind,omitempty"`
+	Protocol           string `json:"protocol,omitempty"`
+	NegotiatedProtocol string `json:"negotiated_protocol,omitempty"`
+	StatusCode         int    `json:"status_code,omitempty"`
+	Error              string `json:"error,omitempty"`
+	Side               string `json:"side"` // "load-gen" | "fake-upstream"
+	ConnKey            string `json:"conn_key"`
+	StreamID           int    `json:"stream_id"` // local ordinal, NOT the HTTP/2 protocol stream ID
+	TraceID            string `json:"trace_id"`  // W3C traceparent trace-id field
+	TimestampNS        int64  `json:"timestamp_ns"`
+	Control            string `json:"control,omitempty"` // "" | "positive" | "negative" — witness cell tag
 	// DurationNS is load-gen's own client-measured round-trip time (send to
 	// response received) — a correlation signal independent of temporal
 	// proximity: injectLatencyProfileC gives each request a genuinely

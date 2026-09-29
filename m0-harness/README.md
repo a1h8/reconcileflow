@@ -1,5 +1,13 @@
 # M0 harness
 
+> **Current status (2026-09-29):** see [demo readiness and next steps](../docs/m0-demo-readiness.md).
+> The sections below are an experimental history, not a current certification.
+> New runs explicitly attempt HTTP/2, record the negotiated protocol and retain
+> failed requests. Earlier direct runs did not verify HTTP/2 negotiation.
+> `stream_id` is a local ordinal, not a protocol stream ID; the legacy join is
+> not a GT2 oracle. OBI PR #3587 targets the reported multiplexing bug; its
+> post-merge evaluation remains pending.
+
 First runnable slice of the Correlation Evaluation Harness
 (`docs/target/ground-truth-eval-plane-v3.md`, `docs/target/m0-evaluation-run-001.md` §0.1).
 Implements approach (B): build against the declared real `target_stack`
