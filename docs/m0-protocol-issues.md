@@ -14,6 +14,7 @@
 | PI-3 | UNDERSPEC | blocking | PROVISIONAL (0.90) |
 | PI-4 | UNDERSPEC | low | RESOLVED (2026-09-21) |
 | PI-5 | AMBIGUOUS | medium | RESOLVED (2026-09-21) |
+| PI-6 | GAP | high | RESOLVED (2026-09-30) |
 
 ---
 
@@ -74,3 +75,31 @@ with n). The code applies (i), on the sample standard deviation, for each decisi
 **Decision (2026-09-21).** Reading (i). A CI narrows as repetitions are added, so under (ii) a
 system could be made to pass by running more repetitions, which reopens post-hoc adjustment.
 The standard deviation measures repeatability independently of n.
+
+## PI-6: `r`/`t` have no way to express "not measured" (RESOLVED)
+
+**Symptom.** `Metrics.r`/`Metrics.t` (P2's residual-only metrics) have no way to express "not
+measured." Two consequences, both reachable with real numbers from the 2026-09-30 OBI PR #3587
+before/after measurement (`m0-demo-readiness.md` §1): (a) a perfect P1 result (`F = 1 - D = 0`,
+the first time this project has measured `D` at exactly 100%) has its `A` vs
+`A_WITH_WEAK_RESIDUAL` verdict decided by an arbitrary `r`/`t` placeholder instead of the
+measurement, since there is no residual for either value to describe; (b) a P1-only run (the
+correlator never executed) can silently manufacture `B_HYBRID` — crediting a correlator
+contribution with zero supporting evidence.
+
+**Cause.** The protocol's own draft (`m0-evaluation-run-001.md`, `docs/target/`) defines
+`A_WITH_WEAK_RESIDUAL` with a redundant `F <= 5%` conjunct that gestures at "a small residual
+exists" without ever specifying the `F = 0` boundary. Section 3.3's `BORDERLINE` definition lists
+`R`/`T` as unconditionally perturbable inputs, which is equally undefined once they are not
+measured.
+
+**Decision (2026-09-30).** `r`/`t` become optional (`Decimal | None`). `F == 0` short-circuits to
+`A` unconditionally — there is no residual, so the §3.3 veto has nothing to act on and cannot
+fire. `F > 0` with `r`/`t` unset and needed by the branch (the `q` computation, or the `r < 80%`
+check) returns a new `CORRELATOR_NOT_MEASURED` outcome rather than guessing; the
+`NEEDS_DIFFERENT_MECHANISM` routes that depend only on `D`/`D_acc`/`unresolved` (PI-1) are
+unaffected. `Decision` gains `borderline_checked: bool`, false whenever the full
+`D`/`D_acc`/`unresolved`/`R`/`T` perturbation set (§3.3) could not be executed for lack of a
+correlator measurement — silently reporting "not BORDERLINE" would otherwise claim a robustness
+check that never ran. Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working
+notes: `docs/target/m0-signal-confidence-gap.md`.

@@ -13,7 +13,14 @@ TH = RUN_001
 
 
 def metrics(d_cov="1", d_acc="1", r="1", t="1", coverage="1", capture="0"):
-    return Metrics(D(d_cov), D(d_acc), D(r), D(t), D(coverage), D(capture))
+    return Metrics(
+        D(d_cov),
+        D(d_acc),
+        D(r) if r is not None else None,
+        D(t) if t is not None else None,
+        D(coverage),
+        D(capture),
+    )
 
 
 def verdict(**kw):
@@ -36,7 +43,10 @@ def test_obi_carries_attribution_is_a():
 
 
 def test_weak_residual_behind_strong_obi():
-    assert verdict(r="0.5", t="0.3") is Attribution.A_WITH_WEAK_RESIDUAL
+    """A genuine small residual (D = 99.5%, not the F = 0 default) is required
+    here: this test is about a weak residual, which cannot exist when the
+    residual itself is empty (PI-6)."""
+    assert verdict(d_acc="0.995", r="0.5", t="0.3") is Attribution.A_WITH_WEAK_RESIDUAL
 
 
 def test_candidate_absent_needs_different_mechanism():
@@ -57,8 +67,11 @@ def test_hybrid_when_obi_plus_correlator_are_good_enough():
 
 
 def test_q_is_not_used_below_r_threshold():
-    """R = 5%, T = 4% would give Q = 80%: it must not read as a good ranker."""
-    assert verdict(r="0.05", t="0.04") is Attribution.A_WITH_WEAK_RESIDUAL
+    """R = 5%, T = 4% would give Q = 80%: it must not read as a good ranker.
+
+    D = 99.5% (a genuine small residual), not the F = 0 default (PI-6).
+    """
+    assert verdict(d_acc="0.995", r="0.05", t="0.04") is Attribution.A_WITH_WEAK_RESIDUAL
 
 
 def test_just_under_threshold_is_borderline_never_rounded_up():
@@ -68,13 +81,85 @@ def test_just_under_threshold_is_borderline_never_rounded_up():
 
 
 def test_irrelevant_metric_near_its_threshold_is_not_borderline():
-    """E sits at 90% but D clears 95% with margin, so E cannot change the verdict."""
-    assert decide(metrics(r="0.5", t="0.3"), TH).attribution is Attribution.A_WITH_WEAK_RESIDUAL
+    """E sits at 90% but D clears 95% with margin, so E cannot change the verdict.
+
+    D = 99.5% (a genuine small residual), not the F = 0 default (PI-6).
+    """
+    result = decide(metrics(d_acc="0.995", r="0.5", t="0.3"), TH)
+    assert result.attribution is Attribution.A_WITH_WEAK_RESIDUAL
 
 
 def test_metrics_reject_non_fractions():
     with pytest.raises(ValueError):
         metrics(d_acc="99")
+
+
+# --- PI-6: r/t have no way to express "not measured" ---------------------
+
+
+def test_zero_residual_is_a_without_any_correlator_measurement():
+    """F = 0 (D = 1 exactly): no residual exists, so r/t are never consulted."""
+    assert verdict(r=None, t=None) is Attribution.A
+
+
+def test_zero_residual_nominal_is_a_regardless_of_a_bad_placeholder():
+    """Same F = 0 measurement; r/t are real but deliberately bad (0, 0). The
+    NOMINAL verdict is still A -- computed without ever reading r/t, exactly
+    as it would be for r=t=1 or any other value.
+
+    The overall `.attribution` can still legitimately become BORDERLINE here
+    (not asserted): perturbing `d` alone away from the exact F = 0 point
+    re-enters the ordinary tree, where these particular (bad, but real and
+    measured) r/t values would produce A_WITH_WEAK_RESIDUAL instead. That is
+    a correct, mechanical reading of a real measurement, not the PI-6 bug --
+    PI-6 was about r/t being *unmeasured* (None), covered by the tests below.
+    """
+    assert decide(metrics(r="0", t="0"), TH).nominal is Attribution.A
+
+
+def test_correlator_not_measured_beats_a_with_weak_residual_guess():
+    """D >= 95%/D_acc >= 99%/unresolved <= 3% but a real (nonzero) residual,
+    and the correlator was never run: must not silently become
+    A_WITH_WEAK_RESIDUAL."""
+    assert verdict(d_acc="0.995", r=None, t=None) is Attribution.CORRELATOR_NOT_MEASURED
+
+
+def test_correlator_not_measured_beats_hybrid_guess():
+    """This is the dangerous PI-6 case: D < 95% with no correlator run must
+    not silently become B_HYBRID just because a placeholder r/t was
+    convenient."""
+    assert verdict(d_cov="0.7", r=None, t=None) is Attribution.CORRELATOR_NOT_MEASURED
+
+
+def test_needs_different_mechanism_unaffected_by_missing_correlator():
+    """PI-1's routing depends only on d/d_acc/unresolved: unaffected by PI-6."""
+    assert (
+        verdict(d_cov="1", d_acc="0.975", r=None, t=None)
+        is Attribution.NEEDS_DIFFERENT_MECHANISM
+    )
+
+
+def test_borderline_checked_false_when_correlator_not_measured():
+    result = decide(metrics(r=None, t=None), TH)
+    assert result.attribution is Attribution.A
+    assert result.borderline_checked is False
+
+
+def test_borderline_checked_false_for_correlator_not_measured_outcome():
+    result = decide(metrics(d_cov="0.7", r=None, t=None), TH)
+    assert result.attribution is Attribution.CORRELATOR_NOT_MEASURED
+    assert result.borderline_checked is False
+
+
+def test_borderline_checked_true_when_correlator_is_measured():
+    result = decide(metrics(d_acc="0.995", r="0.5", t="0.3"), TH)
+    assert result.attribution is Attribution.A_WITH_WEAK_RESIDUAL
+    assert result.borderline_checked is True
+
+
+def test_gate0_failure_is_not_borderline_checked():
+    result = decide(metrics(capture="0.011", coverage="0.9"), TH)
+    assert result.borderline_checked is False
 
 
 def rep(value, ops=10_000):
