@@ -1,12 +1,14 @@
 # M0 harness
 
-> **Current status (2026-09-29):** see [demo readiness and next steps](../docs/m0-demo-readiness.md).
+> **Current status (2026-09-30):** see [demo readiness and next steps](../docs/m0-demo-readiness.md).
 > The sections below are an experimental history, not a current certification.
 > New runs explicitly attempt HTTP/2, record the negotiated protocol and retain
 > failed requests. Earlier direct runs did not verify HTTP/2 negotiation.
 > `stream_id` is a local ordinal, not a protocol stream ID; the legacy join is
-> not a GT2 oracle. OBI PR #3587 targets the reported multiplexing bug; its
-> post-merge evaluation remains pending.
+> not a GT2 oracle. OBI PR #3587 (the reported multiplexing bug) merged
+> 2026-09-29 and its post-merge before/after comparison is done — see
+> ["OBI PR #3587 merged"](#obi-pr-3587-merged--beforeafter-measurement-on-our-own-topology-2026-09-30)
+> below.
 
 First runnable slice of the Correlation Evaluation Harness
 (`docs/target/ground-truth-eval-plane-v3.md`, `docs/target/m0-evaluation-run-001.md` §0.1).
@@ -1215,3 +1217,78 @@ deliberately not pursued this session.
   noise from load-profile sensitivity the way §3 intends.
 - No k8s deployment yet — OBI and the harness both ran as local processes over
   `localhost`, not the DaemonSet/sidecar topology OBI supports in production.
+
+## OBI PR #3587 merged — before/after measurement on our own topology (2026-09-30)
+
+[OBI PR #3587](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3587)
+merged 2026-09-29T09:18:34Z (merge commit `335c1c9eac0d908193609aca66fb3205240fb0ac`,
+parent `5016ad0019229860483c9e0e541ca7179c3bb6b6`). `docs/m0-demo-readiness.md` §1
+called for pinning the actual merged commit and comparing old/corrected OBI on
+the same workload once available — this is that comparison.
+
+**Both commits built from source, same toolchain, on purpose.** No downloaded
+binary is a valid stand-in here: the last tagged release (`v0.13.0`) is 248
+commits behind the merge, and OBI's `main`/`nightly` image tags are rolling —
+both had already moved past the pre-merge commit by the time this ran, so no
+registry has an artifact for it anymore. Building both commits with the
+identical toolchain (Go 1.27.1, clang 21.1.8) isolates exactly the PR's diff
+and removes build environment as a confound.
+
+**Topology rebuilt from scratch.** Nothing from earlier sessions' Traefik setup
+persisted on disk (gitignored, ad hoc). Reconstructed the same 2-hop shape that
+originally produced the 999/2000 cliff and the concurrency-sweep table above:
+`load-gen` → Traefik v3.7.13 (pooled HTTP/2 backend connection) → `fake-upstream`,
+plus a `/broken` route (a Traefik middleware stripping `traceparent` on the way
+to `fake-upstream`) as a negative control.
+
+**Scoring method: per-request identity at three hops independently**, via
+`analyze_run.py` (`-truth-in-path` on `load-gen`) — Traefik inbound
+(`traefik:48736`), Traefik outbound on its pooled backend connection
+(`127.0.0.1:8443:8443`), `fake-upstream` inbound (`fake-upstream:8443`) — scored
+as correct / swapped to another real, known `trace_id` / self-authored. Events
+were attributed to their run by the request's own `trace_id` (globally unique
+across all cells, verified collision-free before scoring), not by an
+obi.log before/after line-count marker — the line-marker approach used
+earlier in this README is known to leak a few boundary events across a
+flush-timing race (see the fallback-tier join-miss lesson above); keying on
+identity instead eliminates that artifact class rather than tolerating it.
+
+**Result:**
+
+| Concurrency | `old` (`5016ad00`) correct | `new` (`335c1c9e`) correct |
+|---|---|---|
+| c=20 (5 reps) | 94.1–97.4%, mean 96.2–96.3%, SD 0.008–0.011 | **100.000%**, SD 0.000 |
+| c=50 | 90.9–95.1% | **100.000%** |
+| c=100 | 80.1–84.0% | **100.000%** |
+| c=200 / n=10000 (2 reps) | 83.7–89.0% | **100.000%** |
+
+`old`'s errors are dominated by `wrong_known_trace` — not a missing trace_id,
+but OBI attributing a request's traceparent to a *different*, real,
+concurrently in-flight request — and the rate worsens monotonically with
+concurrency (7–28 swaps/1000 at c=20 up to 445–728 swaps/10000 at c=200,
+i.e. the swap fraction itself grows, not just the absolute count). `new`
+produced zero swaps and zero self-authored events at every concurrency level
+tested, c=20 through c=200: 103,000 hop-observations total, none wrong.
+
+The c=20 SD is under this repo's own `stability.assess()` threshold
+(`MAX_SD=0.015`) on both binaries, so that gap is `STABLE`, not noise. The
+c=200 point is 2 reps, not 5 — enough to see the old/new gap is not a fluke
+(same direction and order of magnitude as the c=20→100 progression already
+established), not enough to claim a formal stability verdict at that specific
+scale.
+
+**Negative control held on both binaries.** The `/broken` route's
+`fake-upstream` hop reads 0% correct / 100% self-authored on `old` and on
+`new` alike — the header is genuinely gone before the backend sees it in both
+cases, which is the point: it confirms the measurement did not go blind after
+the OBI upgrade. Traefik's own two hops on that route (upstream of where the
+header actually gets stripped) track each binary's clean-route rate, as
+expected.
+
+**What this does and does not settle.** This confirms, independently of
+upstream's own fix description, that PR #3587 eliminates the per-stream
+traceparent misattribution on this harness's own topology, at concurrency and
+volume levels that made the bug clearly visible on the pre-fix commit. It does
+not by itself establish whether a correlator is still needed for other
+reasons (`ground-truth-eval-plane-v3.md`'s thesis 2, combinability) — that
+question does not depend on this specific OBI bug, fixed or not.
