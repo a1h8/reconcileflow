@@ -16,6 +16,7 @@
 | PI-5 | AMBIGUOUS | medium | RESOLVED (2026-09-21) |
 | PI-6 | GAP | high | RESOLVED (2026-09-30) |
 | PI-7 | GAP | medium | RESOLVED (2026-10-01) |
+| PI-8 | GAP / UNDERSPEC | medium | RESOLVED, MIN_SIGNALS PROVISIONAL (2026-10-01) |
 
 ---
 
@@ -124,3 +125,21 @@ invariant.
 no new `Attribution` outcome, no change to `_classify`/`decide`/`Decision`. `t == r` remains
 legal; `r` or `t == None` (PI-6) bypasses the check entirely. Implemented in `attribution.py`;
 tests in `tests/test_m0.py`. Full working notes: `docs/target/m0-pi7-t-leq-r-invariant.md`.
+
+## PI-8: latency gate crashes below a minimum signal count (RESOLVED, `MIN_SIGNALS` PROVISIONAL)
+
+**Symptom.** `gate([])` raises `IndexError` (`percentile()` indexes an empty sorted list with no
+check) — reachable trivially via the public API (`gate(signal_availability([], {}))`). Neither
+`m0-evaluation-protocol.md` §4 nor `tests/test_m0.py` addressed the zero-signal case. The crash is
+the sharp edge of a wider problem: nearest-rank percentiles are statistically hollow at any small
+`n`, not just `n=0`.
+
+**Cause.** `gate()` never checked its input had enough signals to make `p95`/`p99` meaningful,
+let alone nonempty.
+
+**Decision (2026-10-01).** A provisional `MIN_SIGNALS = 100` (same status as PI-3's
+`q_acceptable_min` — to be frozen before a real run). `gate()` raises `ValueError` below it,
+naming the count and threshold. No new `LatencyVerdict` member: `PASS`/`FAIL` stays binary, and
+the module already has a "raise rather than guess" precedent (`signal_availability`'s per-node
+skew check). Implemented in `latency.py`; tests in `tests/test_m0.py`. Full working notes:
+`docs/target/m0-pi8-latency-min-signals.md`.

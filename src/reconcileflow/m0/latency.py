@@ -14,6 +14,10 @@ from enum import Enum
 
 P95_MAX_S = 1.0
 P99_MAX_S = 2.0
+# Provisional (PI-8, same status as attribution.RUN_001's q_acceptable_min):
+# below this, p99 under nearest-rank is not meaningfully distinct from the
+# maximum observed value, let alone computable at n=0.
+MIN_SIGNALS = 100
 
 
 class LatencyVerdict(Enum):
@@ -44,5 +48,10 @@ def percentile(values: Sequence[float], p: int) -> float:
 
 
 def gate(l1_corrected: Sequence[float]) -> LatencyVerdict:
+    if len(l1_corrected) < MIN_SIGNALS:
+        raise ValueError(
+            f"only {len(l1_corrected)} signal(s), need at least {MIN_SIGNALS} "
+            "for p95/p99 to be meaningful (PI-8)"
+        )
     ok = percentile(l1_corrected, 95) <= P95_MAX_S and percentile(l1_corrected, 99) <= P99_MAX_S
     return LatencyVerdict.PASS if ok else LatencyVerdict.FAIL

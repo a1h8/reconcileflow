@@ -393,6 +393,12 @@ Example: REGIME = A  AND  LATENCY_VERDICT = FAIL
 Never "A = all good".
 ```
 
+**[amended, PI-8]** `MIN_SIGNALS = 100` signals, provisional (same status as PI-3's
+`q_acceptable_min` — to be frozen before a real run). Below it, `gate()` raises rather than
+returning `PASS`/`FAIL`: nearest-rank `p99` needs `ceil(0.99 * n)` to be a meaningfully distinct
+index from `n` itself, which first happens at `n = 100`. No third `LATENCY_VERDICT` value —
+`PASS`/`FAIL` stays binary, a verdict is only ever returned when it is computable at all.
+
 `detection_latency` (L3): threshold pre-registered **separately**, once the operational delay of
 the SRE platform is fixed. **Do not reuse an application SLO.**
 

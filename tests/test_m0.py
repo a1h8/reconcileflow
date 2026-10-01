@@ -222,3 +222,20 @@ def test_missing_skew_is_an_error_not_a_silent_passthrough():
 def test_latency_tail_alone_fails_the_gate():
     l1 = [0.1] * 97 + [3.0] * 3
     assert gate(l1) is LatencyVerdict.FAIL
+
+
+# --- PI-8: latency gate crashes below a minimum signal count --------------
+
+
+def test_gate_on_empty_signals_raises_not_crashes():
+    with pytest.raises(ValueError):
+        gate([])
+
+
+def test_gate_below_min_signals_raises():
+    with pytest.raises(ValueError):
+        gate([0.1] * 99)
+
+
+def test_gate_at_min_signals_is_unaffected():
+    assert gate([0.1] * 100) is LatencyVerdict.PASS
