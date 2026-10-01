@@ -91,6 +91,11 @@ class Metrics:
             value = getattr(self, name)
             if value is not None and not _ZERO <= value <= _ONE:
                 raise ValueError(f"{name} must be a fraction in [0, 1], or None if not measured")
+        if self.r is not None and self.t is not None and self.t > self.r:
+            # A correct top1 pick is, by construction, inside the candidate
+            # set R counts -- T > R can only come from a measurement bug
+            # (diverging denominators), never a genuine result (PI-7).
+            raise ValueError(f"t ({self.t}) cannot exceed r ({self.r}): T <= R always")
         if self.oracle_capture_failure > self.unresolved:
             raise ValueError("oracle_capture_failure cannot exceed the unresolved zone")
 

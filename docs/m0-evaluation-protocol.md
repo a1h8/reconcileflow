@@ -136,6 +136,9 @@ P2 - Correlator (on the RESIDUAL, not the whole dataset)
    [amended, PI-6] R and T are UNDEFINED, not zero, when the correlator was not run on
    this dataset -- distinct from "measured and found to be zero." See §3.2's
    CORRELATOR_NOT_MEASURED outcome and §3.3's borderline_checked.
+   [amended, PI-7] T <= R always, when both are measured: a correct top1 pick is, by
+   construction, inside the candidate set R counts. T > R can only come from a
+   measurement bug (diverging denominators) and is rejected, not scored.
    residual_MRR
    candidate_size_p50/p95/p99 (diagnostic)
 

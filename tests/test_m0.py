@@ -94,6 +94,25 @@ def test_metrics_reject_non_fractions():
         metrics(d_acc="99")
 
 
+# --- PI-7: T <= R invariant ------------------------------------------------
+
+
+def test_t_greater_than_r_is_rejected():
+    """A correct top1 pick is, by construction, inside the candidate set R
+    counts -- T > R can only come from a measurement bug."""
+    with pytest.raises(ValueError):
+        metrics(r="0.85", t="0.95")
+
+
+def test_t_equal_to_r_is_accepted():
+    assert verdict(d_acc="0.995", r="0.5", t="0.5") is Attribution.A_WITH_WEAK_RESIDUAL
+
+
+def test_t_greater_than_r_with_r_none_is_not_rejected():
+    """Nothing to compare against when the correlator wasn't measured (PI-6)."""
+    assert verdict(d_cov="0.7", r=None, t="0.95") is Attribution.CORRELATOR_NOT_MEASURED
+
+
 # --- PI-6: r/t have no way to express "not measured" ---------------------
 
 

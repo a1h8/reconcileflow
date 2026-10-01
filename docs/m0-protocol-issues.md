@@ -15,6 +15,7 @@
 | PI-4 | UNDERSPEC | low | RESOLVED (2026-09-21) |
 | PI-5 | AMBIGUOUS | medium | RESOLVED (2026-09-21) |
 | PI-6 | GAP | high | RESOLVED (2026-09-30) |
+| PI-7 | GAP | medium | RESOLVED (2026-10-01) |
 
 ---
 
@@ -103,3 +104,23 @@ unaffected. `Decision` gains `borderline_checked: bool`, false whenever the full
 correlator measurement — silently reporting "not BORDERLINE" would otherwise claim a robustness
 check that never ran. Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working
 notes: `docs/target/m0-signal-confidence-gap.md`.
+
+## PI-7: missing `T <= R` invariant (RESOLVED)
+
+**Symptom.** `R` and `T` are definitionally related (`T <= R` always: a correct top1 pick is, by
+construction, inside the candidate set counted by `R`), but nothing enforced it. `r=0.85, t=0.95`
+(`Q = T/R = 1.118`, itself impossible) passed `Q >= 0.90` and returned a clean, confident `A` —
+not even `BORDERLINE` — on a measurement that could only originate from a bug (`R`/`T` computed
+with diverging denominators, the same class of defect `m0-harness/README.md`'s own "Lesson"
+section already documents once, for a different pair of counters).
+
+**Cause.** `Metrics.__post_init__` validated `r`/`t` independently as fractions in `[0, 1]` (or
+`None`, per PI-6) but never validated the relationship between them. The protocol text
+(`m0-evaluation-protocol.md` §2) defines `R` and `T` separately and never states the `T <= R`
+invariant.
+
+**Decision (2026-10-01).** `Metrics.__post_init__` rejects `t > r` when both are measured
+(`ValueError`), the same way out-of-range values already are. A pure input-validation addition:
+no new `Attribution` outcome, no change to `_classify`/`decide`/`Decision`. `t == r` remains
+legal; `r` or `t == None` (PI-6) bypasses the check entirely. Implemented in `attribution.py`;
+tests in `tests/test_m0.py`. Full working notes: `docs/target/m0-pi7-t-leq-r-invariant.md`.
