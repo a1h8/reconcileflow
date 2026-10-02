@@ -20,6 +20,7 @@
 | PI-9 | GAP | high | RESOLVED (2026-10-02) |
 | PI-10 | GAP | medium | RESOLVED (2026-10-02) |
 | PI-11 | GAP | medium | RESOLVED (2026-10-02) |
+| PI-12 | GAP | high | RESOLVED (2026-10-02) |
 
 ---
 
@@ -202,3 +203,22 @@ near zero. A tolerance band would be exactly PI-3/PI-8's shape of problem — a 
 business threshold nobody asked for — so none is introduced. Checked at the same `gate()`
 chokepoint as PI-8's `MIN_SIGNALS`. No new `LatencyVerdict` member. Implemented in `latency.py`;
 tests in `tests/test_m0.py`. Full working notes: `docs/target/m0-pi11-negative-latency.md`.
+
+## PI-12: `Thresholds` has zero validation, unlike `Metrics` (RESOLVED)
+
+**Symptom.** `Metrics.__post_init__` rejects out-of-range fractions, `None`-ambiguity (PI-6), and
+the `T <= R` invariant (PI-7). `Thresholds` is a plain `@dataclass` with no `__post_init__`
+whatsoever. `Thresholds(q_acceptable_min=Decimal("-1"))` turns a catastrophic `Q=1.2%` ranking
+into a clean `A` instead of `A_WITH_WEAK_RESIDUAL`. `Thresholds(d_min=Decimal("-1"))` makes
+`D >= 95%` vacuously true regardless of the real `D`, making `B`/`C`/`NEEDS`-via-`R` unreachable.
+`Thresholds` is exactly the kind of "pre-registered, frozen before the run" object this protocol
+is built around — a transcription mistake in it is at least as likely and consequential as a bad
+measurement, and had zero protection.
+
+**Cause.** `Metrics` validates its own fields; nobody applied the same scrutiny to `Thresholds`.
+
+**Decision (2026-10-02).** `Thresholds.__post_init__` validates the eight fraction fields as
+`[0, 1]` (same check `Metrics` already applies) and the two bands (`borderline_band`,
+`d_acc_band`) as strictly positive, `(0, 1]`. `RUN_001`'s actual values are unaffected.
+Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working notes:
+`docs/target/m0-pi12-thresholds-unvalidated.md`.

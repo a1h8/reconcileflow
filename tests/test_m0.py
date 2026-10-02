@@ -4,7 +4,14 @@ from decimal import Decimal
 
 import pytest
 
-from reconcileflow.m0.attribution import RUN_001, Attribution, Metrics, RunStatus, decide
+from reconcileflow.m0.attribution import (
+    RUN_001,
+    Attribution,
+    Metrics,
+    RunStatus,
+    Thresholds,
+    decide,
+)
 from reconcileflow.m0.latency import LatencyVerdict, Signal, gate, signal_availability
 from reconcileflow.m0.stability import Repetition, Stability, assess
 
@@ -92,6 +99,34 @@ def test_irrelevant_metric_near_its_threshold_is_not_borderline():
 def test_metrics_reject_non_fractions():
     with pytest.raises(ValueError):
         metrics(d_acc="99")
+
+
+# --- PI-12: Thresholds has no validation, unlike Metrics -------------------
+
+
+def test_thresholds_reject_out_of_range_fraction():
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=D("-1"))
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=D("0.90"), d_min=D("-1"))
+
+
+def test_thresholds_reject_zero_or_negative_band():
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=D("0.90"), borderline_band=D("0"))
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=D("0.90"), borderline_band=D("-0.02"))
+
+
+def test_run_001_itself_still_constructs_cleanly():
+    Thresholds(q_acceptable_min=D("0.90"))
+
+
+def test_bad_q_acceptable_min_can_no_longer_launder_a_catastrophic_ranking():
+    """Before PI-12: q_acceptable_min=-1 turned a Q=1.2% ranking into a
+    clean A. Now construction itself is rejected."""
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=D("-1"))
 
 
 # --- PI-7: T <= R invariant ------------------------------------------------

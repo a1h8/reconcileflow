@@ -26,6 +26,7 @@ from reconcileflow.m0.attribution import (
     Attribution,
     Metrics,
     RunStatus,
+    Thresholds,
     decide,
 )
 from reconcileflow.m0.latency import MIN_SIGNALS, LatencyVerdict, gate
@@ -298,3 +299,25 @@ def test_assess_raises_when_one_repetition_disagrees(names, extra_only_in_one_re
     reps = [odd_one_out, *base]
     with pytest.raises(ValueError):
         assess(reps, reps)
+
+
+# --- attribution.py: Thresholds validation (PI-12) --------------------------
+
+out_of_range = st.one_of(
+    st.decimals(min_value=Decimal("-10"), max_value=Decimal("-0.0001"), places=4),
+    st.decimals(min_value=Decimal("1.0001"), max_value=Decimal("10"), places=4),
+)
+
+
+@SETTINGS
+@given(out_of_range)
+def test_thresholds_always_rejects_out_of_range_q_acceptable_min(bad):
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=bad)
+
+
+@SETTINGS
+@given(st.one_of(st.just(Decimal("0")), out_of_range))
+def test_thresholds_always_rejects_zero_or_out_of_range_band(bad):
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=Decimal("0.90"), borderline_band=bad)

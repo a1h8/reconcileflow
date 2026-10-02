@@ -62,6 +62,26 @@ class Thresholds:
     # make even a perfect D_acc borderline (protocol issue PI-2).
     d_acc_band: Decimal = Decimal("0.005")
 
+    def __post_init__(self) -> None:
+        # Metrics validates its own fields; this is the same scrutiny applied
+        # to the configuration side -- a pre-registered threshold is at least
+        # as consequential as a bad measurement if it's wrong (PI-12).
+        for name in (
+            "q_acceptable_min",
+            "d_min",
+            "d_acc_min",
+            "unresolved_max",
+            "r_min",
+            "e_min",
+            "capture_failure_max",
+            "truth_coverage_min",
+        ):
+            if not _ZERO <= getattr(self, name) <= _ONE:
+                raise ValueError(f"{name} must be a fraction in [0, 1]")
+        for name in ("borderline_band", "d_acc_band"):
+            if not _ZERO < getattr(self, name) <= _ONE:
+                raise ValueError(f"{name} must be a positive fraction in (0, 1]")
+
 
 # Run #001 thresholds. ``q_acceptable_min`` = 0.90 is provisional (issue PI-3): it
 # mirrors the E >= 90% bar of category B and must be frozen before the run.
