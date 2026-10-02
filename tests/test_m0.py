@@ -257,6 +257,30 @@ def test_too_few_reps_or_ops_is_insufficient():
     assert assess([rep("0.96", ops=9_999)] * 5, STEADY) is Stability.INSUFFICIENT
 
 
+# --- PI-13: Repetition has no validation, same shape as PI-12 -------------
+
+
+def test_repetition_rejects_out_of_range_metric():
+    """A systematic 150% (unit-conversion typo, not a fraction) repeated
+    identically across reps would give SD = 0 -- STABLE -- invisible to a
+    consistency check precisely because it IS consistent. Reject at
+    construction instead."""
+    with pytest.raises(ValueError):
+        Repetition({"d": D("150")}, 10_000)
+
+
+def test_repetition_rejects_negative_gt_ops():
+    with pytest.raises(ValueError):
+        Repetition({"d": D("0.96")}, -5)
+
+
+def test_bad_repeated_metric_can_no_longer_launder_a_fake_stable():
+    """Before PI-13: five reps agreeing on d=150 reported STABLE. Now
+    construction itself is rejected."""
+    with pytest.raises(ValueError):
+        [Repetition({"d": D("150")}, 10_000) for _ in range(5)]
+
+
 # --- PI-9: stability gate must not trust reps[0] for which metrics exist --
 
 

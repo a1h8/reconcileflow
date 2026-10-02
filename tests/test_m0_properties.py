@@ -321,3 +321,20 @@ def test_thresholds_always_rejects_out_of_range_q_acceptable_min(bad):
 def test_thresholds_always_rejects_zero_or_out_of_range_band(bad):
     with pytest.raises(ValueError):
         Thresholds(q_acceptable_min=Decimal("0.90"), borderline_band=bad)
+
+
+# --- stability.py: Repetition validation (PI-13) ---------------------------
+
+
+@SETTINGS
+@given(out_of_range)
+def test_repetition_always_rejects_out_of_range_metric(bad):
+    with pytest.raises(ValueError):
+        Repetition({"d": bad}, 10_000)
+
+
+@SETTINGS
+@given(st.integers(max_value=-1))
+def test_repetition_always_rejects_negative_gt_ops(bad_ops):
+    with pytest.raises(ValueError):
+        Repetition({"d": Decimal("0.9")}, bad_ops)

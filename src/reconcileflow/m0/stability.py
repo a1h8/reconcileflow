@@ -12,6 +12,8 @@ MIN_REPS = 5
 EXTENDED_REPS = 10
 MIN_GT_OPS_PER_REP = 10_000
 MAX_SD = Decimal("0.015")  # 1.5 points
+_ZERO = Decimal(0)
+_ONE = Decimal(1)
 
 
 class Stability(Enum):
@@ -26,6 +28,18 @@ class Stability(Enum):
 class Repetition:
     metrics: Mapping[str, Decimal]  # decision metrics, as fractions
     deterministic_gt_ops: int
+
+    def __post_init__(self) -> None:
+        # Same scrutiny Metrics and Thresholds already apply (PI-12, PI-13):
+        # a systematic error -- the same wrong value every repetition --
+        # gives SD = 0 and a confident STABLE verdict, invisible to a check
+        # whose purpose is measuring consistency precisely because it IS
+        # consistent.
+        for name, value in self.metrics.items():
+            if not _ZERO <= value <= _ONE:
+                raise ValueError(f"metric {name!r} must be a fraction in [0, 1], got {value}")
+        if self.deterministic_gt_ops < 0:
+            raise ValueError("deterministic_gt_ops cannot be negative")
 
 
 def _metric_names(reps: Sequence[Repetition]) -> frozenset[str]:

@@ -21,6 +21,7 @@
 | PI-10 | GAP | medium | RESOLVED (2026-10-02) |
 | PI-11 | GAP | medium | RESOLVED (2026-10-02) |
 | PI-12 | GAP | high | RESOLVED (2026-10-02) |
+| PI-13 | GAP | medium | RESOLVED (2026-10-02) |
 
 ---
 
@@ -222,3 +223,21 @@ measurement, and had zero protection.
 `d_acc_band`) as strictly positive, `(0, 1]`. `RUN_001`'s actual values are unaffected.
 Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working notes:
 `docs/target/m0-pi12-thresholds-unvalidated.md`.
+
+## PI-13: `Repetition` has no validation, same shape as PI-12 (RESOLVED)
+
+**Symptom.** `Repetition({"d": Decimal("150")}, 10_000)` ×5 reports `STABLE` — documented as
+"fractions," never checked. Because all five repetitions agree on the same wrong value, `SD = 0`
+exactly, which is `<= MAX_SD` by construction: systematic corruption is invisible to a check
+whose whole purpose is measuring consistency, precisely because it *is* consistent. A genuinely
+inconsistent bad value is already caught today (verified) as a large SD — only the agreeing one
+slips through. Separately, `deterministic_gt_ops < 0` is only accidentally caught (any negative
+number is `< MIN_GT_OPS_PER_REP`), not by any real check.
+
+**Cause.** `Repetition` is a plain dataclass, the same gap `Thresholds` had before PI-12 —
+nobody applied `Metrics`' scrutiny to this third dataclass.
+
+**Decision (2026-10-02).** `Repetition.__post_init__` validates every `metrics` value as a
+fraction in `[0, 1]` and `deterministic_gt_ops` as `>= 0`, explicitly rather than by accident.
+Implemented in `stability.py`; tests in `tests/test_m0.py`. Full working notes:
+`docs/target/m0-pi13-repetition-unvalidated.md`.
