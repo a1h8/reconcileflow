@@ -28,10 +28,29 @@ class Repetition:
     deterministic_gt_ops: int
 
 
+def _metric_names(reps: Sequence[Repetition]) -> frozenset[str]:
+    """The metric set every repetition in the group must share (PI-9).
+
+    ``reps[0]`` is not treated as ground truth: a metric missing from it but
+    present (and possibly unstable) later must be rejected, not silently
+    dropped from the worst-SD computation.
+    """
+    names = frozenset(reps[0].metrics)
+    if not names:
+        raise ValueError("a repetition's metrics must be nonempty")
+    for r in reps:
+        if frozenset(r.metrics) != names:
+            raise ValueError(
+                f"all repetitions in a group must track the same metrics, "
+                f"got {sorted(names)} vs {sorted(r.metrics)}"
+            )
+    return names
+
+
 def _worst_sd(reps: Sequence[Repetition]) -> Decimal:
     return max(
         Decimal(str(statistics.stdev(float(r.metrics[name]) for r in reps)))
-        for name in reps[0].metrics
+        for name in _metric_names(reps)
     )
 
 
@@ -48,6 +67,13 @@ def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]
         r.deterministic_gt_ops < MIN_GT_OPS_PER_REP for g in groups for r in g
     ):
         return Stability.INSUFFICIENT
+
+    fixed_names, variable_names = _metric_names(fixed_seed), _metric_names(variable_seed)
+    if fixed_names != variable_names:
+        raise ValueError(
+            f"fixed and variable seed groups must track the same metrics, "
+            f"got {sorted(fixed_names)} vs {sorted(variable_names)}"
+        )
 
     if _worst_sd(fixed_seed) > MAX_SD:
         return Stability.UNSTABLE if len(fixed_seed) >= EXTENDED_REPS else Stability.EXTEND_TO_10

@@ -207,6 +207,44 @@ def test_too_few_reps_or_ops_is_insufficient():
     assert assess([rep("0.96", ops=9_999)] * 5, STEADY) is Stability.INSUFFICIENT
 
 
+# --- PI-9: stability gate must not trust reps[0] for which metrics exist --
+
+
+def test_metric_missing_from_first_rep_is_rejected_not_silently_stable():
+    """r swings 0.10 -> 0.95 across reps (wildly unstable), but reps[0] lacks
+    it. Before PI-9 this returned STABLE, never examining r at all."""
+    reps = [
+        Repetition({"d": D("0.96")}, 10_000),
+        Repetition({"d": D("0.96"), "r": D("0.10")}, 10_000),
+        Repetition({"d": D("0.96"), "r": D("0.90")}, 10_000),
+        Repetition({"d": D("0.96"), "r": D("0.20")}, 10_000),
+        Repetition({"d": D("0.96"), "r": D("0.95")}, 10_000),
+    ]
+    with pytest.raises(ValueError):
+        assess(reps, reps)
+
+
+def test_extra_metric_in_first_rep_is_rejected_clearly():
+    reps = [Repetition({"d": D("0.96"), "r": D("0.50")}, 10_000)] + [
+        Repetition({"d": D("0.96")}, 10_000) for _ in range(4)
+    ]
+    with pytest.raises(ValueError):
+        assess(reps, reps)
+
+
+def test_all_empty_metrics_is_rejected_clearly():
+    reps = [Repetition({}, 10_000) for _ in range(5)]
+    with pytest.raises(ValueError):
+        assess(reps, reps)
+
+
+def test_fixed_and_variable_groups_must_track_the_same_metrics():
+    fixed = STEADY
+    variable = [Repetition({"d": D(v), "r": D("0.5")}, 10_000) for v in ("0.96",) * 5]
+    with pytest.raises(ValueError):
+        assess(fixed, variable)
+
+
 def test_latency_is_skew_corrected_before_the_gate():
     # Raw L1 = 5.0s, but the node clock runs 4.5s behind: real latency is 0.5s.
     signals = [Signal("n1", source_event_time=100.0, correlator_ingest_time=105.0)] * 100

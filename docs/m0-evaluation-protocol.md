@@ -353,6 +353,12 @@ SD_fixed small, SD_variable large    -> stable BUT pattern-sensitive
 repetitions; the worst metric decides. It is not a confidence-interval width: a CI narrows as
 repetitions are added, so it could be satisfied by running more of them.
 
+**[amended, PI-9]** "The worst metric decides" presupposes every repetition tracks the same set of
+decision metrics — unenforced before, which let a metric absent from the first repetition go
+unchecked regardless of how unstable it was. Every repetition in a group must track an identical,
+nonempty metric set; the fixed-seed and variable-seed groups must track the same set as each
+other. A mismatch is rejected, not silently resolved by trusting the first repetition.
+
 ---
 
 ## 4. Latencies: three distinct latencies, skew-corrected

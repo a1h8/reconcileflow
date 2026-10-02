@@ -17,6 +17,7 @@
 | PI-6 | GAP | high | RESOLVED (2026-09-30) |
 | PI-7 | GAP | medium | RESOLVED (2026-10-01) |
 | PI-8 | GAP / UNDERSPEC | medium | RESOLVED, MIN_SIGNALS PROVISIONAL (2026-10-01) |
+| PI-9 | GAP | high | RESOLVED (2026-10-02) |
 
 ---
 
@@ -143,3 +144,22 @@ naming the count and threshold. No new `LatencyVerdict` member: `PASS`/`FAIL` st
 the module already has a "raise rather than guess" precedent (`signal_availability`'s per-node
 skew check). Implemented in `latency.py`; tests in `tests/test_m0.py`. Full working notes:
 `docs/target/m0-pi8-latency-min-signals.md`.
+
+## PI-9: stability gate silently ignores metrics missing from `reps[0]` (RESOLVED)
+
+**Symptom.** `_worst_sd` iterates only `reps[0].metrics`. A metric absent from `reps[0]` but
+wildly unstable in later reps is never checked — `assess()` returns a confident `STABLE` verdict,
+not a crash, the most severe failure mode found in this series (PI-6/7/8 all surface as a crash
+or an explicit not-a-verdict outcome; this one lies silently). Separately, an extra key in
+`reps[0]` crashes with an opaque `KeyError`, and all-empty metrics crashes with an opaque
+`ValueError` from `max()` on an empty generator.
+
+**Cause.** No check that every repetition in a group — or across the fixed/variable groups the
+decomposition compares — tracks an identical, nonempty set of metric names. `reps[0]` was
+treated as ground truth for "which metrics exist" with nothing to catch disagreement.
+
+**Decision (2026-10-02).** New `_metric_names(reps)` helper: nonempty, and identical across
+every repetition in the group, else `ValueError` naming the mismatch. `_worst_sd` uses it instead
+of `reps[0].metrics` directly. `assess()` additionally cross-checks fixed-seed and variable-seed
+track the same names, before any SD is computed. Implemented in `stability.py`; tests in
+`tests/test_m0.py`. Full working notes: `docs/target/m0-pi9-stability-metric-consistency.md`.
