@@ -18,6 +18,7 @@
 | PI-7 | GAP | medium | RESOLVED (2026-10-01) |
 | PI-8 | GAP / UNDERSPEC | medium | RESOLVED, MIN_SIGNALS PROVISIONAL (2026-10-01) |
 | PI-9 | GAP | high | RESOLVED (2026-10-02) |
+| PI-10 | GAP | medium | RESOLVED (2026-10-02) |
 
 ---
 
@@ -163,3 +164,22 @@ every repetition in the group, else `ValueError` naming the mismatch. `_worst_sd
 of `reps[0].metrics` directly. `assess()` additionally cross-checks fixed-seed and variable-seed
 track the same names, before any SD is computed. Implemented in `stability.py`; tests in
 `tests/test_m0.py`. Full working notes: `docs/target/m0-pi9-stability-metric-consistency.md`.
+
+## PI-10: the `F == 0` short-circuit fires on a mathematically impossible perturbed point (RESOLVED)
+
+**Symptom.** `decide()` on `d_cov=1, d_acc=0.98` (a confident `NEEDS_DIFFERENT_MECHANISM`,
+nowhere near a real threshold) reports `BORDERLINE`. Perturbing the derived `d` axis alone by its
+registered band lands on `d=1.00` while `d_acc` stays at its real `0.98` in that same point —
+`(d=1.00, d_acc=0.98)` is mathematically impossible for any real `Metrics` instance (implies
+`d_cov=1.0204`), but PI-6's `if d == 1` short-circuit does not check `d_acc` and treats it as a
+genuine zero-residual state anyway.
+
+**Cause.** PI-6's short-circuit on `d == 1` is correct for every real measurement (a product of
+two `<= 1` factors reaches `1` only if both do), but was never checked against the pre-existing
+perturbation loop, which treats `D` and `D_acc` as independently movable and can synthesize this
+impossible combination.
+
+**Decision (2026-10-02).** Short-circuit requires `d == 1 AND d_acc == 1`, not `d` alone. A no-op
+for every real measurement; only refuses to fire on the synthetic, impossible perturbed point.
+Implemented in `attribution.py`; test in `tests/test_m0.py` reproducing this exact case. Full
+working notes: `docs/target/m0-pi10-borderline-impossible-point.md`.

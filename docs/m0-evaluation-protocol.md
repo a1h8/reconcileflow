@@ -186,15 +186,16 @@ Below that, Q is not computed and the decision rests on R alone (NEEDS branch).
 
 ### 3.2 The five outcomes: a mutually exclusive, exhaustive partition
 
-**[amended, PI-6]** A new root gate precedes the tree below: `F == 0` (`D == 1`
-exactly) short-circuits straight to `A`, without ever reading `R`/`T` — an
-empty residual leaves nothing for the §3.3 veto to act on. Wherever the
-original tree already reads `R`/`T` (the `Q` computation, and the `R < 80%`
-check), a run where the correlator was never measured returns
-`CORRELATOR_NOT_MEASURED` rather than guessing.
+**[amended, PI-6, tightened PI-10]** A new root gate precedes the tree below:
+`F == 0` (`D_cov == 1 AND D_acc == 1` — not `D == 1` alone, see PI-10)
+short-circuits straight to `A`, without ever reading `R`/`T` — an empty
+residual leaves nothing for the §3.3 veto to act on. Wherever the original
+tree already reads `R`/`T` (the `Q` computation, and the `R < 80%` check), a
+run where the correlator was never measured returns `CORRELATOR_NOT_MEASURED`
+rather than guessing.
 
 ```
-                         F == 0  (D == 1 exactly) ?
+                   F == 0  (D_cov == 1 AND D_acc == 1) ?
                            /                     \
                         YES                        NO
                          |                          |
@@ -236,11 +237,13 @@ check), a run where the correlator was never measured returns
 
 ```
 A
-   F == 0  (D == 1 exactly)
+   F == 0  (D_cov == 1 AND D_acc == 1 -- not D == 1 alone, see PI-10)
    OR  ( D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3%  AND  (R >= 80% AND Q acceptable) )
    -> OBI carries the attribution; the correlator is a marginal fallback. [amended, PI-6]
       The `F == 0` clause needs no correlator measurement at all: there is no
-      residual for one to be marginal or weak *about*.
+      residual for one to be marginal or weak *about*. [tightened, PI-10] Checking
+      `D == 1` alone let a single-axis perturbation of the derived `D` land on
+      an impossible `(D=1, D_acc != 1)` point during the §3.3 robustness check.
 
 A_WITH_WEAK_RESIDUAL
    F > 0  AND  D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3%  AND  R, T measured

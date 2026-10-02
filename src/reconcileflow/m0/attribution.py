@@ -143,13 +143,22 @@ def _classify(
 ) -> Attribution:
     """The tree of §3.2, with no borderline handling.
 
-    ``F == 0`` (``d == 1`` exactly) short-circuits to ``A`` before ``r``/``t``
-    are ever read: an empty residual leaves nothing for the §3.3 veto to act
-    on, so no measurement of the correlator could change this verdict (PI-6).
-    Every other branch that needs ``r``/``t`` returns ``CORRELATOR_NOT_
-    MEASURED`` rather than guessing when they are ``None``.
+    ``F == 0`` (``d == 1`` *and* ``d_acc == 1``) short-circuits to ``A``
+    before ``r``/``t`` are ever read: an empty residual leaves nothing for
+    the §3.3 veto to act on, so no measurement of the correlator could
+    change this verdict (PI-6). Every other branch that needs ``r``/``t``
+    returns ``CORRELATOR_NOT_MEASURED`` rather than guessing when they are
+    ``None``.
+
+    Checking ``d_acc`` too, not just ``d`` (PI-10): for a genuine
+    measurement ``d == d_cov * d_acc == 1`` already forces ``d_acc == 1``
+    (two factors `<= 1` multiply to `1` only if both do), so this is a
+    no-op on real data. It matters for the §3.3 perturbation loop, which
+    moves `d` and `d_acc` as independent axes and can otherwise synthesize
+    the impossible point ``(d=1, d_acc=0.98)`` -- `d == 1` alone would
+    treat that as a genuine zero-residual measurement.
     """
-    if d == _ONE:
+    if d == _ONE and d_acc == _ONE:
         return Attribution.A
     if d >= th.d_min and d_acc >= th.d_acc_min and unresolved <= th.unresolved_max:
         if r is None or t is None:

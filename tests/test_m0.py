@@ -181,6 +181,21 @@ def test_gate0_failure_is_not_borderline_checked():
     assert result.borderline_checked is False
 
 
+# --- PI-10: F==0 short-circuit must not fire on an impossible perturbed point
+
+
+def test_needs_different_mechanism_is_not_borderline_via_impossible_point():
+    """d_cov=1, d_acc=0.98: a confident NEEDS_DIFFERENT_MECHANISM, nowhere
+    near any real threshold. Before PI-10, perturbing the derived `d` axis
+    alone landed on d=1.00 while d_acc stayed at its real 0.98 in that same
+    point -- (d=1.00, d_acc=0.98) is impossible for any real measurement
+    (implies d_cov=1.0204), but `if d == 1` alone treated it as a genuine
+    zero-residual state and flipped the verdict, reporting BORDERLINE."""
+    result = decide(metrics(d_acc="0.98"), TH)
+    assert result.nominal is Attribution.NEEDS_DIFFERENT_MECHANISM
+    assert result.attribution is Attribution.NEEDS_DIFFERENT_MECHANISM
+
+
 def rep(value, ops=10_000):
     return Repetition({"d": D(value)}, ops)
 
