@@ -408,6 +408,12 @@ returning `PASS`/`FAIL`: nearest-rank `p99` needs `ceil(0.99 * n)` to be a meani
 index from `n` itself, which first happens at `n = 100`. No third `LATENCY_VERDICT` value —
 `PASS`/`FAIL` stays binary, a verdict is only ever returned when it is computable at all.
 
+**[amended, PI-11]** A negative value anywhere in `l1_corrected` also makes `gate()` raise, no
+tolerance band. Once skew is correctly applied, `L1 >= 0` always — the correlator cannot ingest a
+signal before the corrected moment it was produced. Skew is a fixed, pre-measured correction, not
+a live noisy estimate, so a negative result means the skew is wrong, not that the true latency
+was merely near zero.
+
 `detection_latency` (L3): threshold pre-registered **separately**, once the operational delay of
 the SRE platform is fixed. **Do not reuse an application SLO.**
 

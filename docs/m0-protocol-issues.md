@@ -19,6 +19,7 @@
 | PI-8 | GAP / UNDERSPEC | medium | RESOLVED, MIN_SIGNALS PROVISIONAL (2026-10-01) |
 | PI-9 | GAP | high | RESOLVED (2026-10-02) |
 | PI-10 | GAP | medium | RESOLVED (2026-10-02) |
+| PI-11 | GAP | medium | RESOLVED (2026-10-02) |
 
 ---
 
@@ -183,3 +184,21 @@ impossible combination.
 for every real measurement; only refuses to fire on the synthetic, impossible perturbed point.
 Implemented in `attribution.py`; test in `tests/test_m0.py` reproducing this exact case. Full
 working notes: `docs/target/m0-pi10-borderline-impossible-point.md`.
+
+## PI-11: `gate()` accepts physically impossible negative latencies (RESOLVED)
+
+**Symptom.** `gate([-0.5] * 100)` returns `PASS`. `L1` (`signal_availability`) is causally
+impossible to be negative once skew is correctly applied — a badly broken skew correction (wrong
+sign, stale value, wrong node) reads as an excellent, fast `PASS` instead of a detected fault.
+Nothing checked this.
+
+**Cause.** `gate()` never validated that its input is a physically valid set of corrected
+latencies, only that there are enough of them (PI-8).
+
+**Decision (2026-10-02).** Any negative value in `l1_corrected` is rejected (`ValueError`), no
+tolerance band: skew is a fixed, pre-measured correction (not a live noisy estimate), so a
+negative result after applying it means the skew is wrong, not that the true latency was merely
+near zero. A tolerance band would be exactly PI-3/PI-8's shape of problem — a new provisional
+business threshold nobody asked for — so none is introduced. Checked at the same `gate()`
+chokepoint as PI-8's `MIN_SIGNALS`. No new `LatencyVerdict` member. Implemented in `latency.py`;
+tests in `tests/test_m0.py`. Full working notes: `docs/target/m0-pi11-negative-latency.md`.

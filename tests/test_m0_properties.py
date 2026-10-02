@@ -253,6 +253,24 @@ def test_gate_at_or_above_min_signals_never_raises(l1):
     assert gate(l1) in (LatencyVerdict.PASS, LatencyVerdict.FAIL)
 
 
+maybe_negative_latencies = st.lists(
+    st.floats(min_value=-10.0, max_value=10.0, allow_nan=False, allow_infinity=False),
+    min_size=MIN_SIGNALS,
+    max_size=MIN_SIGNALS * 3,
+)
+
+
+@SETTINGS
+@given(maybe_negative_latencies)
+def test_gate_rejects_any_mix_containing_a_negative_signal(l1):
+    """PI-11: a single negative L1 anywhere in an otherwise-plausible batch
+    must still raise -- fuzzed across every count and position, not just
+    the all-negative and single-negative examples picked by hand."""
+    assume(any(v < 0 for v in l1))
+    with pytest.raises(ValueError):
+        gate(l1)
+
+
 # --- stability.py ------------------------------------------------------------
 
 

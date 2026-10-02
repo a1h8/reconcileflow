@@ -53,5 +53,17 @@ def gate(l1_corrected: Sequence[float]) -> LatencyVerdict:
             f"only {len(l1_corrected)} signal(s), need at least {MIN_SIGNALS} "
             "for p95/p99 to be meaningful (PI-8)"
         )
+    negative = [v for v in l1_corrected if v < 0]
+    if negative:
+        # Once skew is correctly applied, ingest-before-source is causally
+        # impossible: a negative L1 means the skew is wrong, not that the
+        # true latency was merely near zero (PI-11). No tolerance band --
+        # skew is a fixed, pre-measured correction, not a live noisy
+        # estimate that would legitimately scatter around zero.
+        raise ValueError(
+            f"{len(negative)} signal(s) have negative L1 (worst: {min(negative)}s) -- "
+            "ingest before the skew-corrected source event is impossible; "
+            "the skew correction is wrong, not the system (PI-11)"
+        )
     ok = percentile(l1_corrected, 95) <= P95_MAX_S and percentile(l1_corrected, 99) <= P99_MAX_S
     return LatencyVerdict.PASS if ok else LatencyVerdict.FAIL

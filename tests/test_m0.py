@@ -292,3 +292,20 @@ def test_gate_below_min_signals_raises():
 
 def test_gate_at_min_signals_is_unaffected():
     assert gate([0.1] * 100) is LatencyVerdict.PASS
+
+
+# --- PI-11: gate() rejects physically impossible negative latencies -------
+
+
+def test_gate_rejects_a_single_negative_signal():
+    with pytest.raises(ValueError):
+        gate([0.1] * 99 + [-0.001])
+
+
+def test_gate_rejects_all_negative_signals():
+    with pytest.raises(ValueError):
+        gate([-0.5] * 100)
+
+
+def test_gate_accepts_zero_as_the_fastest_legal_latency():
+    assert gate([0.0] * 100) is LatencyVerdict.PASS
