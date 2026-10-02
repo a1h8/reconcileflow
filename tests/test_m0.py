@@ -368,3 +368,31 @@ def test_gate_rejects_all_negative_signals():
 
 def test_gate_accepts_zero_as_the_fastest_legal_latency():
     assert gate([0.0] * 100) is LatencyVerdict.PASS
+
+
+# --- PI-14: gate() rejects non-finite (NaN/inf) latencies ------------------
+
+
+def test_gate_rejects_nan():
+    with pytest.raises(ValueError):
+        gate([0.1] * 99 + [float("nan")])
+
+
+def test_gate_rejects_inf():
+    with pytest.raises(ValueError):
+        gate([0.1] * 99 + [float("inf")])
+
+
+def test_nan_breaks_permutation_invariance_before_the_fix_this_closes_it():
+    """Regression sentinel: the exact multiset that demonstrated the bug --
+    90 values at 0.1, 9 at 5.0, 1 NaN -- must now raise for every
+    permutation, not silently return a different p95 depending on order."""
+    import random
+
+    base = [0.1] * 90 + [5.0] * 9 + [float("nan")]
+    rng = random.Random(42)
+    for _ in range(20):
+        shuffled = base[:]
+        rng.shuffle(shuffled)
+        with pytest.raises(ValueError):
+            gate(shuffled)

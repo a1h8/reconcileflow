@@ -22,6 +22,7 @@
 | PI-11 | GAP | medium | RESOLVED (2026-10-02) |
 | PI-12 | GAP | high | RESOLVED (2026-10-02) |
 | PI-13 | GAP | medium | RESOLVED (2026-10-02) |
+| PI-14 | GAP | high | RESOLVED (2026-10-02) |
 
 ---
 
@@ -241,3 +242,20 @@ nobody applied `Metrics`' scrutiny to this third dataclass.
 fraction in `[0, 1]` and `deterministic_gt_ops` as `>= 0`, explicitly rather than by accident.
 Implemented in `stability.py`; tests in `tests/test_m0.py`. Full working notes:
 `docs/target/m0-pi13-repetition-unvalidated.md`.
+
+## PI-14: `NaN` in latency data breaks `percentile()`'s permutation invariance (RESOLVED)
+
+**Symptom.** `NaN` is missed by PI-11's `v < 0` check (`NaN` comparisons are always `False`) and
+breaks `sorted()`'s determinism: the identical multiset, permuted into 20 different input orders,
+produced `p95 ∈ {0.1, 5.0}` for the same data — `percentile()` lost the permutation-invariance
+property this project treats as foundational elsewhere (the core engine's own
+`test_permutation_invariance`). `inf` is milder (sorts correctly, a single `inf` among `n=100`
+legitimately reads `PASS` by design — percentiles tolerate a bounded fraction of arbitrary
+values) but is still physically meaningless for a real latency.
+
+**Cause.** `gate()` validated count (PI-8) and sign (PI-11) but never finiteness.
+
+**Decision (2026-10-02).** `gate()` rejects any non-finite value (`NaN` or `inf`) in
+`l1_corrected`, same chokepoint as PI-8/PI-11. Implemented in `latency.py`; tests in
+`tests/test_m0.py`, including the permutation-based reproduction. Full working notes:
+`docs/target/m0-pi14-nan-inf-latency.md`.

@@ -414,6 +414,13 @@ signal before the corrected moment it was produced. Skew is a fixed, pre-measure
 a live noisy estimate, so a negative result means the skew is wrong, not that the true latency
 was merely near zero.
 
+**[amended, PI-14]** A non-finite value (`NaN` or `inf`) anywhere in `l1_corrected` also makes
+`gate()` raise. `NaN` breaks `sorted()`'s determinism — confirmed directly: the identical
+multiset, permuted into 20 input orders, produced two different `p95` values for the same data,
+losing the permutation-invariance this project treats as foundational elsewhere. `inf` sorts
+correctly (a single `inf` among enough samples legitimately reading `PASS` is correct nearest-
+rank behavior, not a bug) but is still physically meaningless for a real latency.
+
 `detection_latency` (L3): threshold pre-registered **separately**, once the operational delay of
 the SRE platform is fixed. **Do not reuse an application SLO.**
 

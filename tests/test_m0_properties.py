@@ -15,6 +15,7 @@ a biased mixture plus `assume()` on the branches narrow enough that even
 biasing isn't enough to guarantee a hit within a reasonable example budget.
 """
 
+import math
 from decimal import ROUND_CEILING, Decimal
 
 import pytest
@@ -338,3 +339,25 @@ def test_repetition_always_rejects_out_of_range_metric(bad):
 def test_repetition_always_rejects_negative_gt_ops(bad_ops):
     with pytest.raises(ValueError):
         Repetition({"d": Decimal("0.9")}, bad_ops)
+
+
+maybe_non_finite_latencies = st.lists(
+    st.one_of(
+        st.floats(min_value=0.0, max_value=10.0, allow_nan=False, allow_infinity=False),
+        st.just(float("nan")),
+        st.just(float("inf")),
+        st.just(float("-inf")),
+    ),
+    min_size=MIN_SIGNALS,
+    max_size=MIN_SIGNALS * 3,
+)
+
+
+@SETTINGS
+@given(maybe_non_finite_latencies)
+def test_gate_rejects_any_mix_containing_a_non_finite_signal(l1):
+    """PI-14: a single NaN or inf anywhere in an otherwise-plausible batch
+    must still raise -- fuzzed across every count and position."""
+    assume(any(not math.isfinite(v) for v in l1))
+    with pytest.raises(ValueError):
+        gate(l1)

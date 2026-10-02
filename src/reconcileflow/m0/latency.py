@@ -53,6 +53,17 @@ def gate(l1_corrected: Sequence[float]) -> LatencyVerdict:
             f"only {len(l1_corrected)} signal(s), need at least {MIN_SIGNALS} "
             "for p95/p99 to be meaningful (PI-8)"
         )
+    non_finite = [v for v in l1_corrected if not math.isfinite(v)]
+    if non_finite:
+        # NaN breaks sorted()'s determinism -- percentile() stops being a
+        # property of the data and starts depending on arrival order
+        # (verified: the same multiset, permuted, produced different p95
+        # values). inf sorts correctly but no real latency is infinite
+        # (PI-14).
+        raise ValueError(
+            f"{len(non_finite)} signal(s) are not finite (NaN or inf) -- "
+            "a latency measurement cannot be either (PI-14)"
+        )
     negative = [v for v in l1_corrected if v < 0]
     if negative:
         # Once skew is correctly applied, ingest-before-source is causally
