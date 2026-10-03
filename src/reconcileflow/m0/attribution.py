@@ -246,6 +246,14 @@ def decide(m: Metrics, th: Thresholds) -> Decision:
         for sign in (-1, 1):
             band = th.d_acc_band if name == "d_acc" else th.borderline_band
             moved = {**point, name: value + sign * band}
+            # D and D_acc are not independent (D = D_cov * D_acc, D_cov <= 1,
+            # so D <= D_acc always), nor are T and R (PI-7, T <= R always).
+            # Moving one member of a pair while the other stays at its real
+            # value can synthesize a point no real measurement could ever
+            # produce (PI-15) -- judging it would not be a genuine
+            # sensitivity to anything measured.
+            if moved["d"] > moved["d_acc"] or moved["t"] > moved["r"]:
+                continue
             if _classify(**moved, th=th) is not nominal:
                 return Decision(status, Attribution.BORDERLINE, nominal, True)
     return Decision(status, nominal, nominal, True)

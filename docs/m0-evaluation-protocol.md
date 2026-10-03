@@ -330,6 +330,13 @@ aggregates). The **veto** looks explicitly at the residual (`R`, `Q`) so a bad t
 behind an average. Poor performance on <= 5% of traffic gives `A_WITH_WEAK_RESIDUAL`, never an
 automatic C.
 
+**[amended, PI-15]** Two of the five inputs are not independent: `D <= D_acc` (`D = D_cov *
+D_acc`, `D_cov <= 1`) and `T <= R` (PI-7). The perturbation loop skips any synthetic point
+violating either — moving one member of a pair while the other stays at its real value can
+otherwise land on a combination no real measurement could ever produce (e.g. `D = 1` while
+`D_acc` stays at a real, lower value), and judging that impossible point as if it were a
+genuine sensitivity is not what "BORDERLINE" is meant to mean.
+
 ### Stability gate: repeatability (a verdict only if stable)
 
 ```

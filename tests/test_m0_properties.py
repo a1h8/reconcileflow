@@ -361,3 +361,37 @@ def test_gate_rejects_any_mix_containing_a_non_finite_signal(l1):
     assume(any(not math.isfinite(v) for v in l1))
     with pytest.raises(ValueError):
         gate(l1)
+
+
+# --- attribution.py: perturbation loop must skip impossible synthetic
+#     points (PI-15) --------------------------------------------------------
+
+
+def _independent_borderline(m, th):
+    """Re-implementation of decide()'s perturbation loop, written separately
+    from attribution.py, so a regression in attribution.py's own loop (not
+    just in the two specific examples PI-15 was found through) still gets
+    caught by comparing against this."""
+    from reconcileflow.m0.attribution import _classify
+
+    point = {"d": m.d_cov * m.d_acc, "d_acc": m.d_acc, "unresolved": m.unresolved, "r": m.r, "t": m.t}
+    nominal = _classify(**point, th=th)
+    for name, value in point.items():
+        for sign in (-1, 1):
+            band = th.d_acc_band if name == "d_acc" else th.borderline_band
+            moved = {**point, name: value + sign * band}
+            if moved["d"] > moved["d_acc"] or moved["t"] > moved["r"]:
+                continue  # impossible synthetic point (PI-15): must not count
+            if _classify(**moved, th=th) is not nominal:
+                return Attribution.BORDERLINE
+    return nominal
+
+
+@SETTINGS
+@given(small_real_residual_metrics(correlator_measured=True))
+def test_borderline_matches_an_independent_reimplementation_of_the_guard(m):
+    """decide()'s own attribution must agree with a from-scratch
+    reimplementation of the perturbation loop (including the PI-15 skip),
+    across the narrowest region this bug was found in."""
+    th = RUN_001
+    assert decide(m, th).attribution is _independent_borderline(m, th)

@@ -23,6 +23,7 @@
 | PI-12 | GAP | high | RESOLVED (2026-10-02) |
 | PI-13 | GAP | medium | RESOLVED (2026-10-02) |
 | PI-14 | GAP | high | RESOLVED (2026-10-02) |
+| PI-15 | GAP | high | RESOLVED (2026-10-02) |
 
 ---
 
@@ -259,3 +260,30 @@ values) but is still physically meaningless for a real latency.
 `l1_corrected`, same chokepoint as PI-8/PI-11. Implemented in `latency.py`; tests in
 `tests/test_m0.py`, including the permutation-based reproduction. Full working notes:
 `docs/target/m0-pi14-nan-inf-latency.md`.
+
+## PI-15: the perturbation loop can synthesize impossible points on either side of two invariants (RESOLVED)
+
+**Symptom.** PI-10 fixed one direction of one pair (perturbing `D` onto an impossible
+`D > D_acc` point). The opposite direction of the same pair (perturbing `D_acc` instead) reaches
+the identical kind of impossible point and was never checked — confirmed, isolated so only this
+one of the ten single-axis perturbations flips: `d_cov=0.999, d_acc=0.991, r=0.95, t=0.90`
+(nominal `A`, `D = 0.990009 >= 95%`, `D_acc = 99.1% >= 99%`) reports `BORDERLINE` via perturbing
+`D_acc` alone by its own band (`-0.005`, crossing the `99%` boundary to `98.6%` while `D` stays at
+its real, unperturbed `0.990009` — above the perturbed `D_acc`, impossible). A second, independent
+pair has the identical problem: `R`/`T`, the exact invariant PI-7 enforces on *measured* values,
+is never checked *during perturbation* — confirmed: `r=0.81, t=0.80` (nominal `A`, `Q=98.8%`)
+reports `BORDERLINE` via perturbing `r` alone onto the impossible `(r=0.79, t=0.80)`, `t > r`.
+
+**Cause.** The perturbation loop treats `D`, `D_acc`, `unresolved`, `R`, `T` as five fully
+independent axes, but two pairs are not independent: `D <= D_acc` (`D = D_cov * D_acc`,
+`D_cov <= 1`) and `T <= R` (PI-7). PI-10 patched the short-circuit, which happened to fix one
+direction of one pair, not the root cause.
+
+**Decision (2026-10-02).** The perturbation loop itself skips any synthetic point where
+`moved[d] > moved[d_acc]` or `moved[t] > moved[r]`, before asking `_classify` to judge it — both
+always real `Decimal`s inside this loop, since it only runs when `borderline_checked` is already
+true. Subsumes PI-10's fix for the borderline interaction without requiring the short-circuit's
+specific wording; PI-10's tightening stays in place as defense-in-depth on the nominal
+classification. Implemented in `attribution.py`; tests in `tests/test_m0.py` reproducing both
+exact cases. Full working notes:
+`docs/target/m0-pi15-perturbation-ignores-cross-metric-invariants.md`.

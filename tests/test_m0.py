@@ -231,6 +231,32 @@ def test_needs_different_mechanism_is_not_borderline_via_impossible_point():
     assert result.attribution is Attribution.NEEDS_DIFFERENT_MECHANISM
 
 
+# --- PI-15: the perturbation loop can't synthesize impossible points -----
+
+
+def test_a_is_not_borderline_via_impossible_d_acc_perturbation():
+    """d_cov=0.999, d_acc=0.991 (d=0.990009): close enough to the 0.99
+    boundary that perturbing d_acc alone by its small band (0.005) crosses
+    it, while `d` (derived, not perturbed in that same point) stays at its
+    real 0.990009 -- above the perturbed d_acc=0.986, which is impossible
+    (d <= d_acc always for any real d_cov <= 1). Isolated so only this one
+    perturbation would flip (verified: every other axis leaves the verdict
+    at A) -- before PI-15, this alone produced BORDERLINE."""
+    result = decide(metrics(d_cov="0.999", d_acc="0.991", r="0.95", t="0.90"), TH)
+    assert result.nominal is Attribution.A
+    assert result.attribution is Attribution.A
+
+
+def test_a_is_not_borderline_via_impossible_r_perturbation():
+    """r=0.81, t=0.80 (nominal A: Q=80/81=98.8% >= 90%). Before PI-15,
+    perturbing r alone to 0.79 (t staying at its real 0.80) synthesized the
+    impossible (r=0.79, t=0.80) -- t <= r always (PI-7) -- and judged it as
+    a genuine sensitivity instead of an impossible point."""
+    result = decide(metrics(d_acc="0.995", r="0.81", t="0.80"), TH)
+    assert result.nominal is Attribution.A
+    assert result.attribution is Attribution.A
+
+
 def rep(value, ops=10_000):
     return Repetition({"d": D(value)}, ops)
 
