@@ -140,6 +140,21 @@ def test_bad_q_acceptable_min_can_no_longer_launder_a_catastrophic_ranking():
         Thresholds(q_acceptable_min=D("-1"))
 
 
+# --- PI-20: r_min == 0 makes _q divide by zero ------------------------------
+
+
+def test_thresholds_reject_zero_r_min():
+    """r_min=0 is individually a legal fraction in [0, 1] (PI-12's original
+    check), but _q() divides by r whenever r >= r_min -- only safe if r_min
+    itself is > 0."""
+    with pytest.raises(ValueError):
+        Thresholds(q_acceptable_min=D("0.90"), r_min=D("0"))
+
+
+def test_run_001_r_min_still_constructs_cleanly():
+    Thresholds(q_acceptable_min=D("0.90"), r_min=D("0.80"))
+
+
 # --- PI-16: Metrics has no way to express sample size ----------------------
 
 

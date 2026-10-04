@@ -28,6 +28,7 @@
 | PI-17 | GAP | medium | RESOLVED (2026-10-04) |
 | PI-18 | GAP | low | RESOLVED (2026-10-04) |
 | PI-19 | GAP | medium | RESOLVED (2026-10-04) |
+| PI-20 | GAP | medium | RESOLVED (2026-10-04) |
 
 ---
 
@@ -365,3 +366,20 @@ touched.
 in `Repetition.__post_init__` against `deterministic_gt_ops`. Implemented in `stability.py`;
 tests in `tests/test_m0.py`. Full working notes:
 `docs/target/m0-pi19-repetition-ratio-sample-size-mismatch.md`.
+
+## PI-20: `r_min == 0` makes `_q` divide by zero (RESOLVED)
+
+**Symptom.** `Thresholds(r_min=Decimal("0"))` and `Metrics(r=Decimal("0"), t=Decimal("0"), ...)`
+are each individually legal, but `decide()` crashes with `decimal.InvalidOperation` (`0 / 0`)
+when both occur together -- `_q`'s `t / r if r >= th.r_min else None` assumes `r >= r_min`
+guarantees `r > 0`, which is false when `r_min == 0`.
+
+**Cause.** `Thresholds.__post_init__` (PI-12) validates `r_min` as a plain fraction in `[0, 1]`,
+the same group as thresholds never used as a divisor. `_q`'s formula structurally requires
+`r_min > 0`; the two were never cross-checked -- the same "two things that should move together,
+tracked independently" shape as PI-9/PI-15/PI-17/PI-18/PI-19.
+
+**Decision (2026-10-04).** `r_min` moves into PI-12's strictly-positive group alongside
+`borderline_band`/`d_acc_band`: `Thresholds.__post_init__` now requires `0 < r_min <= 1`.
+`RUN_001`'s value (`0.80`) is unaffected. Implemented in `attribution.py`; tests in
+`tests/test_m0.py`. Full working notes: `docs/target/m0-pi20-r-min-zero-divides-by-zero.md`.

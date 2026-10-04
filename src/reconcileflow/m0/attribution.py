@@ -81,14 +81,16 @@ class Thresholds:
             "d_min",
             "d_acc_min",
             "unresolved_max",
-            "r_min",
             "e_min",
             "capture_failure_max",
             "truth_coverage_min",
         ):
             if not _ZERO <= getattr(self, name) <= _ONE:
                 raise ValueError(f"{name} must be a fraction in [0, 1]")
-        for name in ("borderline_band", "d_acc_band"):
+        # r_min joins borderline_band/d_acc_band's strictly-positive group,
+        # not the plain-fraction group above: _q() divides by r whenever
+        # r >= r_min, which only avoids 0/0 if r_min itself is > 0 (PI-20).
+        for name in ("r_min", "borderline_band", "d_acc_band"):
             if not _ZERO < getattr(self, name) <= _ONE:
                 raise ValueError(f"{name} must be a positive fraction in (0, 1]")
 
