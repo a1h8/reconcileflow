@@ -12,6 +12,8 @@ MIN_REPS = 5
 EXTENDED_REPS = 10
 MIN_GT_OPS_PER_REP = 10_000
 MAX_SD = Decimal("0.015")  # 1.5 points
+_ZERO = Decimal(0)
+_ONE = Decimal(1)
 
 
 class Stability(Enum):
@@ -27,11 +29,42 @@ class Repetition:
     metrics: Mapping[str, Decimal]  # decision metrics, as fractions
     deterministic_gt_ops: int
 
+    def __post_init__(self) -> None:
+        # Same scrutiny Metrics and Thresholds already apply (PI-12, PI-13):
+        # a systematic error -- the same wrong value every repetition --
+        # gives SD = 0 and a confident STABLE verdict, invisible to a check
+        # whose purpose is measuring consistency precisely because it IS
+        # consistent.
+        for name, value in self.metrics.items():
+            if not _ZERO <= value <= _ONE:
+                raise ValueError(f"metric {name!r} must be a fraction in [0, 1], got {value}")
+        if self.deterministic_gt_ops < 0:
+            raise ValueError("deterministic_gt_ops cannot be negative")
+
+
+def _metric_names(reps: Sequence[Repetition]) -> frozenset[str]:
+    """The metric set every repetition in the group must share (PI-9).
+
+    ``reps[0]`` is not treated as ground truth: a metric missing from it but
+    present (and possibly unstable) later must be rejected, not silently
+    dropped from the worst-SD computation.
+    """
+    names = frozenset(reps[0].metrics)
+    if not names:
+        raise ValueError("a repetition's metrics must be nonempty")
+    for r in reps:
+        if frozenset(r.metrics) != names:
+            raise ValueError(
+                f"all repetitions in a group must track the same metrics, "
+                f"got {sorted(names)} vs {sorted(r.metrics)}"
+            )
+    return names
+
 
 def _worst_sd(reps: Sequence[Repetition]) -> Decimal:
     return max(
         Decimal(str(statistics.stdev(float(r.metrics[name]) for r in reps)))
-        for name in reps[0].metrics
+        for name in _metric_names(reps)
     )
 
 
@@ -48,6 +81,13 @@ def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]
         r.deterministic_gt_ops < MIN_GT_OPS_PER_REP for g in groups for r in g
     ):
         return Stability.INSUFFICIENT
+
+    fixed_names, variable_names = _metric_names(fixed_seed), _metric_names(variable_seed)
+    if fixed_names != variable_names:
+        raise ValueError(
+            f"fixed and variable seed groups must track the same metrics, "
+            f"got {sorted(fixed_names)} vs {sorted(variable_names)}"
+        )
 
     if _worst_sd(fixed_seed) > MAX_SD:
         return Stability.UNSTABLE if len(fixed_seed) >= EXTENDED_REPS else Stability.EXTEND_TO_10
