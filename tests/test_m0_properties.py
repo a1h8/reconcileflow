@@ -377,10 +377,17 @@ def test_thresholds_always_rejects_out_of_range_q_acceptable_min(bad):
 
 
 @SETTINGS
-@given(st.one_of(st.just(Decimal("0")), out_of_range))
-def test_thresholds_always_rejects_zero_or_out_of_range_band(bad):
+@given(
+    st.sampled_from(("r_min", "borderline_band", "d_acc_band")),
+    st.one_of(st.just(Decimal("0")), out_of_range),
+)
+def test_thresholds_always_rejects_zero_or_out_of_range_strictly_positive_field(name, bad):
+    """r_min, borderline_band and d_acc_band share the strictly-positive
+    (0, 1] group (PI-12, PI-20) -- fuzzed across all three, not just
+    borderline_band, so a regression narrowing the check to one field
+    would be caught regardless of which one it hits."""
     with pytest.raises(ValueError):
-        Thresholds(q_acceptable_min=Decimal("0.90"), borderline_band=bad)
+        Thresholds(q_acceptable_min=Decimal("0.90"), **{name: bad})
 
 
 # --- stability.py: Repetition validation (PI-13) ---------------------------
