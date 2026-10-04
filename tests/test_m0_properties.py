@@ -23,6 +23,8 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from reconcileflow.m0.attribution import (
+    MIN_RESIDUAL_SAMPLE_SIZE,
+    MIN_SAMPLE_SIZE,
     RUN_001,
     Attribution,
     Metrics,
@@ -34,6 +36,15 @@ from reconcileflow.m0.latency import MIN_SIGNALS, LatencyVerdict, gate
 from reconcileflow.m0.stability import Repetition, assess
 
 SETTINGS = settings(max_examples=500, deadline=None)
+
+
+def _make_metrics(d_cov, d_acc, r, t, truth_coverage, capture_failure):
+    """n/n_residual (PI-16), fixed comfortably above the minimum: these
+    tests are about the decision logic, not about re-testing PI-16's own
+    sample-size gate (which has its own dedicated tests below)."""
+    n_residual = MIN_RESIDUAL_SAMPLE_SIZE if r is not None else None
+    return Metrics(d_cov, d_acc, r, t, truth_coverage, capture_failure, MIN_SAMPLE_SIZE, n_residual)
+
 
 _fractions = st.decimals(
     min_value=Decimal("0"), max_value=Decimal("1"), places=4, allow_nan=False, allow_infinity=False
@@ -73,7 +84,7 @@ def metrics(draw):
             places=4,
         )
     )
-    return Metrics(d_cov, d_acc, r, t, truth_coverage, capture_failure)
+    return _make_metrics(d_cov, d_acc, r, t, truth_coverage, capture_failure)
 
 
 @SETTINGS
@@ -96,7 +107,7 @@ def zero_residual_metrics(draw):
     actual hit count instead of trusting a green test."""
     truth_coverage = draw(st.decimals(min_value=Decimal("0.97"), max_value=Decimal("1"), places=4))
     r, t = draw(correlator_pair())
-    return Metrics(Decimal("1"), Decimal("1"), r, t, truth_coverage, Decimal("0"))
+    return _make_metrics(Decimal("1"), Decimal("1"), r, t, truth_coverage, Decimal("0"))
 
 
 @SETTINGS
@@ -132,7 +143,7 @@ def small_real_residual_metrics(draw, correlator_measured):
         t = draw(st.decimals(min_value=Decimal("0"), max_value=r, places=4))
     else:
         r, t = None, None
-    return Metrics(d_cov, d_acc, r, t, truth_coverage, Decimal("0"))
+    return _make_metrics(d_cov, d_acc, r, t, truth_coverage, Decimal("0"))
 
 
 @SETTINGS
@@ -172,7 +183,7 @@ def pi1_route_metrics(draw):
     truth_coverage = draw(st.decimals(min_value=Decimal("0.97"), max_value=Decimal("1"), places=4))
     assume(d_cov * d_acc >= th.d_min)
     r, t = draw(correlator_pair())
-    return Metrics(d_cov, d_acc, r, t, truth_coverage, Decimal("0"))
+    return _make_metrics(d_cov, d_acc, r, t, truth_coverage, Decimal("0"))
 
 
 @SETTINGS
@@ -222,7 +233,7 @@ def test_t_greater_than_r_always_rejected(r, t):
     if t <= r:
         return
     with pytest.raises(ValueError):
-        Metrics(Decimal("1"), Decimal("1"), r, t, Decimal("1"), Decimal("0"))
+        _make_metrics(Decimal("1"), Decimal("1"), r, t, Decimal("1"), Decimal("0"))
 
 
 # --- latency.py -------------------------------------------------------------
@@ -395,3 +406,29 @@ def test_borderline_matches_an_independent_reimplementation_of_the_guard(m):
     across the narrowest region this bug was found in."""
     th = RUN_001
     assert decide(m, th).attribution is _independent_borderline(m, th)
+
+
+# --- attribution.py: Metrics sample-size validation (PI-16) ----------------
+
+
+@SETTINGS
+@given(st.integers(max_value=MIN_SAMPLE_SIZE - 1))
+def test_metrics_always_rejects_n_below_minimum(bad_n):
+    with pytest.raises(ValueError):
+        Metrics(Decimal("1"), Decimal("1"), None, None, Decimal("1"), Decimal("0"), bad_n, None)
+
+
+@SETTINGS
+@given(st.integers(max_value=MIN_RESIDUAL_SAMPLE_SIZE - 1))
+def test_metrics_always_rejects_n_residual_below_minimum(bad_n_residual):
+    with pytest.raises(ValueError):
+        Metrics(
+            Decimal("1"),
+            Decimal("0.995"),
+            Decimal("0.9"),
+            Decimal("0.8"),
+            Decimal("1"),
+            Decimal("0"),
+            MIN_SAMPLE_SIZE,
+            bad_n_residual,
+        )

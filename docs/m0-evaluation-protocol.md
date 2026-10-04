@@ -127,6 +127,11 @@ P1 - OBI direct
    direct_trace_coverage      D_cov  = fraction where OBI supplies a trace_id
    direct_trace_accuracy      D_acc  = fraction of THOSE that are correct (deterministic zone)
    direct_correct_coverage    D      = D_cov x D_acc
+   [amended, PI-16] D_cov/D_acc are ratios over `n` total attempts; `n` is a required field,
+   minimum reuses stability's own MIN_GT_OPS_PER_REP=10,000 -- the same decision metrics,
+   not a new number. A ratio with no denominator cannot be told apart from a single lucky
+   sample: `n=1, d_cov=1, d_acc=1` would otherwise fire the strongest verdict (A) on zero
+   statistical basis.
 
 P2 - Correlator (on the RESIDUAL, not the whole dataset)
    residual_fraction          F      = 1 - D
@@ -139,6 +144,11 @@ P2 - Correlator (on the RESIDUAL, not the whole dataset)
    [amended, PI-7] T <= R always, when both are measured: a correct top1 pick is, by
    construction, inside the candidate set R counts. T > R can only come from a
    measurement bug (diverging denominators) and is rejected, not scored.
+   [amended, PI-16] R/T are ratios over `n_residual` attempts, a smaller sample than `n`
+   (the residual is only `F` of the total). `n_residual` is required exactly when R/T are
+   measured (None otherwise, PI-6); minimum provisionally reuses the same 10,000, flagged
+   more conservative than may be necessary for this smaller population -- no independent
+   justification exists yet for a smaller number.
    residual_MRR
    candidate_size_p50/p95/p99 (diagnostic)
 

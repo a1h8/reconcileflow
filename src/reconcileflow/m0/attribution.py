@@ -15,8 +15,18 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
+from reconcileflow.m0.stability import MIN_GT_OPS_PER_REP
+
 _ONE = Decimal(1)
 _ZERO = Decimal(0)
+
+# Reusing stability's own minimum (PI-16): these are the same decision
+# metrics that gate requires >= 10,000 ops/rep for, not a new number.
+MIN_SAMPLE_SIZE = MIN_GT_OPS_PER_REP
+# Provisional, more conservative than may be necessary for the residual --
+# a structurally smaller population (only F of the total) -- but no
+# independent justification exists yet for a smaller number (PI-16).
+MIN_RESIDUAL_SAMPLE_SIZE = MIN_GT_OPS_PER_REP
 
 
 class RunStatus(Enum):
@@ -102,6 +112,11 @@ class Metrics:
     t: Decimal | None  # residual_top1_accuracy; None = correlator not measured (PI-6)
     truth_coverage: Decimal  # GT1 + GT2 + GT3
     oracle_capture_failure: Decimal  # probe defect, share of all traffic
+    # Sample sizes (PI-16): a ratio with no denominator cannot be told apart
+    # from a single lucky sample. No defaults, same reasoning as
+    # Thresholds.q_acceptable_min -- never silently omitted.
+    n: int  # total attempts behind d_cov/d_acc/truth_coverage/oracle_capture_failure
+    n_residual: int | None  # residual attempts behind r/t; None iff r/t are None
 
     def __post_init__(self) -> None:
         for name in ("d_cov", "d_acc", "truth_coverage", "oracle_capture_failure"):
@@ -118,6 +133,15 @@ class Metrics:
             raise ValueError(f"t ({self.t}) cannot exceed r ({self.r}): T <= R always")
         if self.oracle_capture_failure > self.unresolved:
             raise ValueError("oracle_capture_failure cannot exceed the unresolved zone")
+        if self.n < MIN_SAMPLE_SIZE:
+            raise ValueError(f"n ({self.n}) is below the minimum sample size {MIN_SAMPLE_SIZE}")
+        if (self.r is None) != (self.n_residual is None):
+            raise ValueError("n_residual must be set iff r/t are measured")
+        if self.n_residual is not None and self.n_residual < MIN_RESIDUAL_SAMPLE_SIZE:
+            raise ValueError(
+                f"n_residual ({self.n_residual}) is below the minimum "
+                f"{MIN_RESIDUAL_SAMPLE_SIZE}"
+            )
 
     @property
     def unresolved(self) -> Decimal:

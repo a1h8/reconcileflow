@@ -24,6 +24,7 @@
 | PI-13 | GAP | medium | RESOLVED (2026-10-02) |
 | PI-14 | GAP | high | RESOLVED (2026-10-02) |
 | PI-15 | GAP | high | RESOLVED (2026-10-02) |
+| PI-16 | GAP | high | RESOLVED, thresholds PROVISIONAL (2026-10-03) |
 
 ---
 
@@ -287,3 +288,25 @@ specific wording; PI-10's tightening stays in place as defense-in-depth on the n
 classification. Implemented in `attribution.py`; tests in `tests/test_m0.py` reproducing both
 exact cases. Full working notes:
 `docs/target/m0-pi15-perturbation-ignores-cross-metric-invariants.md`.
+
+## PI-16: `Metrics` carries no sample size — the strongest verdict needs none to fire (RESOLVED, thresholds PROVISIONAL)
+
+**Symptom.** `Metrics(d_cov=1, d_acc=1, ...)` from a single lucky request (`1/1`) produces
+`Attribution.A` — the protocol's strongest, most committing verdict — with zero statistical
+basis. Nothing in `Metrics` carries how many observations its ratios were computed over.
+`stability.py` already has this concept for repetitions (`MIN_GT_OPS_PER_REP=10,000`);
+`latency.py` has it for signals (`MIN_SIGNALS=100`, PI-8). `attribution.py` had nothing
+analogous.
+
+**Cause.** `d_cov`/`d_acc`/`r`/`t`/`truth_coverage`/`oracle_capture_failure` are reported as bare
+ratios with no denominator anywhere in `Metrics`.
+
+**Decision (2026-10-03).** Two new required fields, no defaults: `n` (total attempts behind
+`d_cov`/`d_acc`/`truth_coverage`/`oracle_capture_failure`) and `n_residual` (residual attempts
+behind `r`/`t` — `None` iff `r`/`t` are `None`, PI-6). `Metrics.__post_init__` rejects either
+below its minimum. `n`'s minimum reuses `stability.MIN_GT_OPS_PER_REP=10,000` (the same decision
+metrics, not a new number). `n_residual`'s minimum provisionally reuses the same `10,000`,
+explicitly flagged more conservative than may be necessary for the structurally smaller residual
+population — no independent justification exists yet for a smaller number. No new `RunStatus`: a
+raised exception at construction, the same layer PI-7 already fails at. Full working notes:
+`docs/target/m0-pi16-metrics-missing-sample-size.md`.

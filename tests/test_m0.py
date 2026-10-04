@@ -5,6 +5,8 @@ from decimal import Decimal
 import pytest
 
 from reconcileflow.m0.attribution import (
+    MIN_RESIDUAL_SAMPLE_SIZE,
+    MIN_SAMPLE_SIZE,
     RUN_001,
     Attribution,
     Metrics,
@@ -17,16 +19,25 @@ from reconcileflow.m0.stability import Repetition, Stability, assess
 
 D = Decimal
 TH = RUN_001
+_UNSET = object()  # distinct from an explicit None, which PI-16's tests need to pass through
 
 
-def metrics(d_cov="1", d_acc="1", r="1", t="1", coverage="1", capture="0"):
+def metrics(d_cov="1", d_acc="1", r="1", t="1", coverage="1", capture="0", n=_UNSET, n_residual=_UNSET):
+    r_value = D(r) if r is not None else None
+    t_value = D(t) if t is not None else None
+    if n is _UNSET:
+        n = MIN_SAMPLE_SIZE
+    if n_residual is _UNSET:
+        n_residual = MIN_RESIDUAL_SAMPLE_SIZE if r_value is not None else None
     return Metrics(
         D(d_cov),
         D(d_acc),
-        D(r) if r is not None else None,
-        D(t) if t is not None else None,
+        r_value,
+        t_value,
         D(coverage),
         D(capture),
+        n,
+        n_residual,
     )
 
 
@@ -127,6 +138,37 @@ def test_bad_q_acceptable_min_can_no_longer_launder_a_catastrophic_ranking():
     clean A. Now construction itself is rejected."""
     with pytest.raises(ValueError):
         Thresholds(q_acceptable_min=D("-1"))
+
+
+# --- PI-16: Metrics has no way to express sample size ----------------------
+
+
+def test_metrics_rejects_n_below_minimum():
+    with pytest.raises(ValueError):
+        metrics(n=MIN_SAMPLE_SIZE - 1)
+
+
+def test_metrics_rejects_n_residual_below_minimum():
+    with pytest.raises(ValueError):
+        metrics(r="0.9", t="0.8", n_residual=MIN_RESIDUAL_SAMPLE_SIZE - 1)
+
+
+def test_metrics_rejects_n_residual_set_without_correlator():
+    with pytest.raises(ValueError):
+        metrics(r=None, t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
+
+
+def test_metrics_rejects_missing_n_residual_when_correlator_measured():
+    with pytest.raises(ValueError):
+        metrics(r="0.9", t="0.8", n_residual=None)
+
+
+def test_single_lucky_request_can_no_longer_fire_the_strongest_verdict():
+    """Before PI-16: d_cov=1, d_acc=1 from a single request (n=1) produced
+    Attribution.A, the protocol's strongest verdict, with zero statistical
+    basis. Now construction itself is rejected."""
+    with pytest.raises(ValueError):
+        metrics(n=1)
 
 
 # --- PI-7: T <= R invariant ------------------------------------------------
