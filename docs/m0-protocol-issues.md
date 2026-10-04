@@ -27,6 +27,7 @@
 | PI-16 | GAP | high | RESOLVED, thresholds PROVISIONAL (2026-10-03) |
 | PI-17 | GAP | medium | RESOLVED (2026-10-04) |
 | PI-18 | GAP | low | RESOLVED (2026-10-04) |
+| PI-19 | GAP | medium | RESOLVED (2026-10-04) |
 
 ---
 
@@ -347,3 +348,20 @@ measurement could produce — the same shape as PI-6/PI-16/PI-17, found while im
 **Decision (2026-10-04).** `Metrics.__post_init__` rejects `r` and `t` disagreeing on
 None-ness. Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working notes:
 `docs/target/m0-pi18-r-t-not-coupled.md`.
+
+## PI-19: `Repetition` ratios can be mathematically impossible given their own sample size (RESOLVED)
+
+**Symptom.** `Repetition(metrics={"d": Decimal("0.33333")}, deterministic_gt_ops=10000)` is
+accepted, but `0.33333 * 10000 = 3333.3` is not an integer -- this ratio could not have come from
+any real repetition with that many deterministic GT ops.
+
+**Cause.** `metrics` and `deterministic_gt_ops` are independent fields with no consistency check
+between them, the same "two things that should move together, tracked separately" shape as
+PI-9/PI-15/PI-17/PI-18 -- here in `stability.Repetition`, the sibling dataclass PI-17 never
+touched.
+
+**Decision (2026-10-04).** `_achievable` (PI-17) moves from `attribution.py` to `stability.py`
+(the direction `attribution.py` already imports constants across, not the reverse) and is applied
+in `Repetition.__post_init__` against `deterministic_gt_ops`. Implemented in `stability.py`;
+tests in `tests/test_m0.py`. Full working notes:
+`docs/target/m0-pi19-repetition-ratio-sample-size-mismatch.md`.

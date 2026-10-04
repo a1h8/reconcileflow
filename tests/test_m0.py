@@ -391,6 +391,20 @@ def test_bad_repeated_metric_can_no_longer_launder_a_fake_stable():
         [Repetition({"d": D("150")}, 10_000) for _ in range(5)]
 
 
+# --- PI-19: Repetition's ratios must be achievable against their own ops --
+
+
+def test_repetition_rejects_an_unachievable_metric():
+    """0.33333 * 10_000 = 3333.3 -- not an integer, so this ratio could not
+    have come from any real repetition with 10,000 deterministic GT ops."""
+    with pytest.raises(ValueError):
+        Repetition({"d": D("0.33333")}, 10_000)
+
+
+def test_repetition_accepts_an_achievable_metric():
+    Repetition({"d": D("0.9601")}, 10_000)
+
+
 # --- PI-9: stability gate must not trust reps[0] for which metrics exist --
 
 

@@ -389,6 +389,11 @@ unchecked regardless of how unstable it was. Every repetition in a group must tr
 nonempty metric set; the fixed-seed and variable-seed groups must track the same set as each
 other. A mismatch is rejected, not silently resolved by trusting the first repetition.
 
+**[amended, PI-19]** Each repetition's metrics are ratios over `deterministic_gt_ops` attempts,
+the same relationship PI-17 enforces between `attribution.Metrics`'s ratios and `n`/`n_residual`.
+A metric value that could not have come from any integer count of `deterministic_gt_ops` attempts
+is rejected at construction, not merely range-checked (PI-13).
+
 ---
 
 ## 4. Latencies: three distinct latencies, skew-corrected

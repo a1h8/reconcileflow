@@ -5,7 +5,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
 MIN_REPS = 5
@@ -14,6 +14,33 @@ MIN_GT_OPS_PER_REP = 10_000
 MAX_SD = Decimal("0.015")  # 1.5 points
 _ZERO = Decimal(0)
 _ONE = Decimal(1)
+
+
+def _achievable(value: Decimal, denominator: int) -> bool:
+    """Is ``value`` exactly ``k / denominator`` for some integer ``k``, at
+    ``value``'s own expressed decimal precision (PI-17)?
+
+    Not a tolerance in the usual sense: no epsilon is invented. A value
+    honestly rounded from a real count will reproduce itself exactly when
+    the nearest candidate count is divided back out and re-rounded to the
+    same number of places; one that could never have come from any integer
+    count (e.g. ``0.12345`` at ``n=10_000``, implying ``1234.5`` events)
+    will not.
+
+    Lives here, not in ``attribution.py``, so both ``attribution.Metrics``
+    (PI-17) and ``Repetition`` (PI-19) can use it without a circular import:
+    ``attribution.py`` already imports constants from this module, not the
+    other way around.
+    """
+    if denominator == 0:
+        return True  # nothing to check against -- a population of zero
+    exponent = value.as_tuple().exponent
+    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    quantum = Decimal(1).scaleb(-places)
+    k = (value * denominator).to_integral_value(rounding=ROUND_HALF_EVEN)
+    if not (_ZERO <= k <= denominator):
+        return False
+    return (k / denominator).quantize(quantum) == value
 
 
 class Stability(Enum):
@@ -40,6 +67,15 @@ class Repetition:
                 raise ValueError(f"metric {name!r} must be a fraction in [0, 1], got {value}")
         if self.deterministic_gt_ops < 0:
             raise ValueError("deterministic_gt_ops cannot be negative")
+        # PI-19: a ratio must be achievable as an integer count of its own
+        # repetition's sample size, the same relationship PI-17 enforces on
+        # attribution.Metrics against n/n_residual.
+        for name, value in self.metrics.items():
+            if not _achievable(value, self.deterministic_gt_ops):
+                raise ValueError(
+                    f"metric {name!r} ({value}) is not achievable as "
+                    f"k/deterministic_gt_ops={self.deterministic_gt_ops}"
+                )
 
 
 def _metric_names(reps: Sequence[Repetition]) -> frozenset[str]:

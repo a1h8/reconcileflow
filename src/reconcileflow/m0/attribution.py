@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
-from reconcileflow.m0.stability import MIN_GT_OPS_PER_REP
+from reconcileflow.m0.stability import MIN_GT_OPS_PER_REP, _achievable
 
 _ONE = Decimal(1)
 _ZERO = Decimal(0)
@@ -96,28 +96,6 @@ class Thresholds:
 # Run #001 thresholds. ``q_acceptable_min`` = 0.90 is provisional (issue PI-3): it
 # mirrors the E >= 90% bar of category B and must be frozen before the run.
 RUN_001 = Thresholds(q_acceptable_min=Decimal("0.90"))
-
-
-def _achievable(value: Decimal, denominator: int) -> bool:
-    """Is ``value`` exactly ``k / denominator`` for some integer ``k``, at
-    ``value``'s own expressed decimal precision (PI-17)?
-
-    Not a tolerance in the usual sense: no epsilon is invented. A value
-    honestly rounded from a real count will reproduce itself exactly when
-    the nearest candidate count is divided back out and re-rounded to the
-    same number of places; one that could never have come from any integer
-    count (e.g. ``0.12345`` at ``n=10_000``, implying ``1234.5`` events)
-    will not.
-    """
-    if denominator == 0:
-        return True  # nothing to check against -- a population of zero
-    exponent = value.as_tuple().exponent
-    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
-    quantum = Decimal(1).scaleb(-places)
-    k = (value * denominator).to_integral_value(rounding=ROUND_HALF_EVEN)
-    if not (_ZERO <= k <= denominator):
-        return False
-    return (k / denominator).quantize(quantum) == value
 
 
 @dataclass(frozen=True, slots=True)

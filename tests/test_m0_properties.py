@@ -30,11 +30,10 @@ from reconcileflow.m0.attribution import (
     Metrics,
     RunStatus,
     Thresholds,
-    _achievable,
     decide,
 )
 from reconcileflow.m0.latency import MIN_SIGNALS, LatencyVerdict, gate
-from reconcileflow.m0.stability import Repetition, assess
+from reconcileflow.m0.stability import Repetition, _achievable, assess
 
 SETTINGS = settings(max_examples=500, deadline=None)
 
@@ -42,7 +41,7 @@ SETTINGS = settings(max_examples=500, deadline=None)
 def _snap(value: Decimal, denominator: int) -> Decimal:
     """Round `value` to the nearest achievable k/denominator (PI-17):
     independently-drawn Decimals essentially never satisfy
-    attribution._achievable on their own (confirmed: every hand-picked
+    stability._achievable on their own (confirmed: every hand-picked
     strategy below failed immediately once PI-17 landed). Snapping after
     the fact, rather than redesigning every strategy to draw integer
     counts from scratch, keeps each strategy's own targeting of narrow
@@ -483,7 +482,7 @@ def test_metrics_always_rejects_n_residual_below_minimum(bad_n_residual):
         )
 
 
-# --- attribution.py: _achievable (PI-17) -----------------------------------
+# --- stability.py: _achievable (PI-17, moved from attribution.py by PI-19) -
 
 
 @st.composite
