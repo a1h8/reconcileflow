@@ -148,6 +148,10 @@ class Metrics:
             value = getattr(self, name)
             if value is not None and not _ZERO <= value <= _ONE:
                 raise ValueError(f"{name} must be a fraction in [0, 1], or None if not measured")
+        if (self.r is None) != (self.t is None):
+            # Both come from the same correlator run on the same residual
+            # (PI-18) -- no real procedure measures one without the other.
+            raise ValueError("r and t must both be measured or both be None")
         if self.r is not None and self.t is not None and self.t > self.r:
             # A correct top1 pick is, by construction, inside the candidate
             # set R counts -- T > R can only come from a measurement bug

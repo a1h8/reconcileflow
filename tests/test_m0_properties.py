@@ -105,12 +105,10 @@ maybe_fraction = st.one_of(st.none(), _fractions)
 
 @st.composite
 def correlator_pair(draw):
-    """r, t with t <= r enforced -- the only relationship Metrics permits."""
+    """r, t with t <= r and both-or-neither None enforced (PI-7, PI-18) --
+    the only relationship Metrics permits."""
     r = draw(maybe_fraction)
-    if r is None:
-        t = draw(maybe_fraction)
-    else:
-        t = draw(st.one_of(st.none(), st.decimals(min_value=Decimal("0"), max_value=r, places=4)))
+    t = None if r is None else draw(st.decimals(min_value=Decimal("0"), max_value=r, places=4))
     return r, t
 
 

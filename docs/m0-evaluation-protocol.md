@@ -153,6 +153,9 @@ P2 - Correlator (on the RESIDUAL, not the whole dataset)
    measured (None otherwise, PI-6); minimum provisionally reuses the same 10,000, flagged
    more conservative than may be necessary for this smaller population -- no independent
    justification exists yet for a smaller number.
+   [amended, PI-18] R and T must be None together or measured together -- both come from
+   the same correlator run on the same residual; no real procedure produces one without
+   the other.
    [amended, PI-17] R and T must each be achievable as k/n_residual for some integer k
    (same precision-derived check as D_cov). Unlike D_acc, T is not nested inside R's own
    count -- both are fractions of the same residual population directly.

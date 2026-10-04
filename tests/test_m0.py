@@ -200,6 +200,24 @@ def test_metrics_rejects_an_unachievable_r():
         metrics(r="0.33333", t="0.1", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
+# --- PI-18: r and t are not coupled to each other's presence --------------
+
+
+def test_metrics_rejects_r_set_with_t_none():
+    with pytest.raises(ValueError):
+        metrics(r="0.9", t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
+
+
+def test_metrics_rejects_t_set_with_r_none():
+    with pytest.raises(ValueError):
+        metrics(r=None, t="0.9", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
+
+
+def test_metrics_accepts_both_none_or_both_measured():
+    metrics(r=None, t=None, n_residual=None)
+    metrics(r="0.9", t="0.8", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
+
+
 # --- PI-7: T <= R invariant ------------------------------------------------
 
 
@@ -212,11 +230,6 @@ def test_t_greater_than_r_is_rejected():
 
 def test_t_equal_to_r_is_accepted():
     assert verdict(d_acc="0.995", r="0.5", t="0.5") is Attribution.A_WITH_WEAK_RESIDUAL
-
-
-def test_t_greater_than_r_with_r_none_is_not_rejected():
-    """Nothing to compare against when the correlator wasn't measured (PI-6)."""
-    assert verdict(d_cov="0.7", r=None, t="0.95") is Attribution.CORRELATOR_NOT_MEASURED
 
 
 # --- PI-6: r/t have no way to express "not measured" ---------------------

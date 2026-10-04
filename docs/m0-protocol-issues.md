@@ -26,6 +26,7 @@
 | PI-15 | GAP | high | RESOLVED (2026-10-02) |
 | PI-16 | GAP | high | RESOLVED, thresholds PROVISIONAL (2026-10-03) |
 | PI-17 | GAP | medium | RESOLVED (2026-10-04) |
+| PI-18 | GAP | low | RESOLVED (2026-10-04) |
 
 ---
 
@@ -331,3 +332,18 @@ axes).
 genuinely has no sub-population to check `D_acc` against); to `r`/`t` against `n_residual` when
 measured. Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working notes:
 `docs/target/m0-pi17-ratio-sample-size-mismatch.md`.
+
+## PI-18: `R` and `T` are not coupled to each other's presence (RESOLVED)
+
+**Symptom.** `Metrics(r=0.9, t=None, ...)` is accepted. `R` and `T` are both computed from the
+same correlator run on the same residual — there is no real procedure that measures one without
+the other. Does not currently produce a wrong verdict (`_classify` already routes to
+`CORRELATOR_NOT_MEASURED` whenever either is `None`), but the data layer allows a state no real
+measurement could produce — the same shape as PI-6/PI-16/PI-17, found while implementing PI-17
+(`n_residual` is coupled to `r`'s None-ness, but nothing couples `r` to `t`'s).
+
+**Cause.** Only `n_residual`'s None-ness is tied to `r` (PI-16); nothing ties `r` to `t` directly.
+
+**Decision (2026-10-04).** `Metrics.__post_init__` rejects `r` and `t` disagreeing on
+None-ness. Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working notes:
+`docs/target/m0-pi18-r-t-not-coupled.md`.
