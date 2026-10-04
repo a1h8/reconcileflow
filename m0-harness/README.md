@@ -1292,3 +1292,38 @@ volume levels that made the bug clearly visible on the pre-fix commit. It does
 not by itself establish whether a correlator is still needed for other
 reasons (`ground-truth-eval-plane-v3.md`'s thesis 2, combinability) — that
 question does not depend on this specific OBI bug, fixed or not.
+
+## `cmd/join` could report D_acc > 100% — the same key-collision lesson, found again (2026-10-04)
+
+The "Lesson" above (load-gen and fake-upstream each assign `generation`
+independently, so a recycled 5-tuple can desync between them) was fixed
+operationally (one `fake-upstream` per cell) but never checked for in
+`cmd/join` itself. `(conn_key, stream_id)` is exactly the key that
+desync can collide on, and `join`'s code assumed it unique on both sides
+without checking.
+
+**Confirmed empirically**, not just reasoned about: one `load-gen` record and
+two `fake-upstream` records sharing the same `(conn_key, stream_id)` (both
+equal to the expected `trace_id`) produced `expected=1 joined=2 matched=2
+D_acc=2.0000` and `join_misses=-1` — an accuracy over 100% and a negative
+miss count, both impossible for what these numbers are supposed to measure.
+A collision on the `load-gen` side has the opposite failure mode: the
+`expectedByKey` map silently keeps only the last of the colliding records,
+so the others are dropped without a trace rather than counted as misses.
+
+**Fix.** `join` now rejects a duplicate `(conn_key, stream_id)` on either
+side with an explicit error naming the key, instead of letting the
+collision silently overwrite (load-gen side) or double-count (fake-upstream
+side). Extracted into a standalone `join()` function (previously inlined in
+`main`) so this is covered by `cmd/join/main_test.go`, including the exact
+repro above.
+
+**Does this retroactively change any number already in this README?**
+Unverified, honestly: the small-n witness cells (n=500) above have no basis
+to collide and stand as reported. The `n=10000, c=200` "sustained load"
+cell, 369 misses, `D_acc=0.9631`, is exactly the regime this collision needs
+(sustained port churn, confirmed generation desync between the two sides) —
+and its underlying JSONL logs were not retained to re-run through the fixed
+`join` now. That figure should be read as a lower bound on the fallback
+tier's degradation at that scale, not re-stated as exact, until re-measured
+with this fix in place.
