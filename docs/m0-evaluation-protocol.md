@@ -132,6 +132,10 @@ P1 - OBI direct
    not a new number. A ratio with no denominator cannot be told apart from a single lucky
    sample: `n=1, d_cov=1, d_acc=1` would otherwise fire the strongest verdict (A) on zero
    statistical basis.
+   [amended, PI-17] D_cov/truth_coverage/oracle_capture_failure must each be achievable as
+   k/n for some integer k, at their own expressed precision -- not an invented tolerance,
+   see attribution.py's `_achievable`. D_acc's real denominator is the D_cov-implied count
+   (round(D_cov * n)), not n itself; vacuously unconstrained when that count is 0.
 
 P2 - Correlator (on the RESIDUAL, not the whole dataset)
    residual_fraction          F      = 1 - D
@@ -149,6 +153,9 @@ P2 - Correlator (on the RESIDUAL, not the whole dataset)
    measured (None otherwise, PI-6); minimum provisionally reuses the same 10,000, flagged
    more conservative than may be necessary for this smaller population -- no independent
    justification exists yet for a smaller number.
+   [amended, PI-17] R and T must each be achievable as k/n_residual for some integer k
+   (same precision-derived check as D_cov). Unlike D_acc, T is not nested inside R's own
+   count -- both are fractions of the same residual population directly.
    residual_MRR
    candidate_size_p50/p95/p99 (diagnostic)
 

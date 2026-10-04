@@ -171,6 +171,35 @@ def test_single_lucky_request_can_no_longer_fire_the_strongest_verdict():
         metrics(n=1)
 
 
+# --- PI-17: ratios must be achievable as an integer count of their own n --
+
+
+def test_metrics_rejects_an_unachievable_d_cov():
+    """0.12345 * 10000 = 1234.5 "correct" requests -- not an integer, so
+    this ratio could not have come from any real run."""
+    with pytest.raises(ValueError):
+        metrics(d_cov="0.12345", n=MIN_SAMPLE_SIZE)
+
+
+def test_metrics_accepts_a_legitimately_rounded_ratio():
+    """1234 / 10001 = 0.12338766..., rounded to 4 places as 0.1234 -- a
+    real, honest measurement, not a typo. d_acc=1 makes it its own
+    D_cov-implied count."""
+    metrics(d_cov="0.1234", d_acc="1", n=10001, r=None, t=None)
+
+
+def test_d_cov_zero_leaves_d_acc_unconstrained():
+    """D_cov = 0 (OBI never supplied a trace_id) has no sub-population to
+    check D_acc against -- vacuously accepted regardless of D_acc's value,
+    the same reasoning PI-6 applies when the residual itself is empty."""
+    metrics(d_cov="0", d_acc="0.5", r=None, t=None)
+
+
+def test_metrics_rejects_an_unachievable_r():
+    with pytest.raises(ValueError):
+        metrics(r="0.33333", t="0.1", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
+
+
 # --- PI-7: T <= R invariant ------------------------------------------------
 
 

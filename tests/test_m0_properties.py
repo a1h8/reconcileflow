@@ -16,7 +16,7 @@ biasing isn't enough to guarantee a hit within a reasonable example budget.
 """
 
 import math
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 
 import pytest
 from hypothesis import assume, given, settings
@@ -30,6 +30,7 @@ from reconcileflow.m0.attribution import (
     Metrics,
     RunStatus,
     Thresholds,
+    _achievable,
     decide,
 )
 from reconcileflow.m0.latency import MIN_SIGNALS, LatencyVerdict, gate
@@ -38,12 +39,55 @@ from reconcileflow.m0.stability import Repetition, assess
 SETTINGS = settings(max_examples=500, deadline=None)
 
 
+def _snap(value: Decimal, denominator: int) -> Decimal:
+    """Round `value` to the nearest achievable k/denominator (PI-17):
+    independently-drawn Decimals essentially never satisfy
+    attribution._achievable on their own (confirmed: every hand-picked
+    strategy below failed immediately once PI-17 landed). Snapping after
+    the fact, rather than redesigning every strategy to draw integer
+    counts from scratch, keeps each strategy's own targeting of narrow
+    protocol branches intact -- a snap moves a value by at most
+    1/(2*denominator), negligible next to the bands this file targets."""
+    if denominator == 0:
+        return value
+    k = (value * denominator).to_integral_value(rounding=ROUND_HALF_EVEN)
+    k = max(Decimal(0), min(Decimal(denominator), k))
+    return k / Decimal(denominator)
+
+
 def _make_metrics(d_cov, d_acc, r, t, truth_coverage, capture_failure):
-    """n/n_residual (PI-16), fixed comfortably above the minimum: these
+    """n/n_residual (PI-16) fixed comfortably above the minimum -- these
     tests are about the decision logic, not about re-testing PI-16's own
-    sample-size gate (which has its own dedicated tests below)."""
-    n_residual = MIN_RESIDUAL_SAMPLE_SIZE if r is not None else None
-    return Metrics(d_cov, d_acc, r, t, truth_coverage, capture_failure, MIN_SAMPLE_SIZE, n_residual)
+    sample-size gate (which has its own dedicated tests below). Every ratio
+    is snapped to the nearest value achievable at that sample size (PI-17)."""
+    n = MIN_SAMPLE_SIZE
+    d_cov = _snap(d_cov, n)
+    d_cov_k = int((d_cov * n).to_integral_value(rounding=ROUND_HALF_EVEN))
+    # D_acc's real denominator is the D_cov-implied count, not n (PI-17);
+    # vacuously unconstrained (left unsnapped) when that count is 0.
+    d_acc = _snap(d_acc, d_cov_k) if d_cov_k else d_acc
+    truth_coverage = _snap(truth_coverage, n)
+    unresolved = Decimal(1) - truth_coverage
+    # Clip a full increment below `unresolved` *before* snapping: snapping
+    # a value already at the boundary can round it up past the boundary
+    # by up to half an increment (verified: 0 violations over 2000 random
+    # draws with this margin, vs. real violations without it).
+    safe_capture_max = max(Decimal(0), unresolved - Decimal(1) / n)
+    capture_failure = _snap(min(capture_failure, safe_capture_max), n)
+    n_residual = None
+    if r is not None:
+        n_residual = MIN_RESIDUAL_SAMPLE_SIZE
+        r = _snap(r, n_residual)
+        if t is not None:
+            # Not clamped to min(t, r): test_t_greater_than_r_always_rejected
+            # deliberately passes t > r to confirm PI-7 rejects it -- clamping
+            # here would silently "fix" the violation before Metrics ever
+            # saw it. correlator_pair() (used by every other caller that
+            # wants a *valid* pair) already draws both at n_residual's own
+            # 4-place precision, where snapping is a no-op, so T <= R
+            # survives unclamped in every case that needs it to.
+            t = _snap(t, n_residual)
+    return Metrics(d_cov, d_acc, r, t, truth_coverage, capture_failure, n, n_residual)
 
 
 _fractions = st.decimals(
@@ -129,7 +173,14 @@ def small_real_residual_metrics(draw, correlator_measured):
     successful draws rather than silently testing nothing, which is the
     right call)."""
     th = RUN_001
-    d_acc = draw(st.decimals(min_value=th.d_acc_min, max_value=Decimal("0.9999"), places=4))
+    # +0.001 margin: _make_metrics re-snaps d_acc against the D_cov-implied
+    # count (PI-17), not against a power of ten like n -- drawing exactly
+    # at d_acc_min left zero room, and the re-snap pushed it back below the
+    # threshold it was meant to clear (found by this very test, failing
+    # immediately once the margin-free version ran).
+    d_acc = draw(
+        st.decimals(min_value=th.d_acc_min + Decimal("0.001"), max_value=Decimal("0.9999"), places=4)
+    )
     # Round UP: rounding down could let d_cov * d_acc fall just under d_min
     # after both are truncated to 4 places (found by the property test
     # itself, failing on exactly this off-by-one-ULP case).
@@ -432,3 +483,37 @@ def test_metrics_always_rejects_n_residual_below_minimum(bad_n_residual):
             MIN_SAMPLE_SIZE,
             bad_n_residual,
         )
+
+
+# --- attribution.py: _achievable (PI-17) -----------------------------------
+
+
+@st.composite
+def k_and_denominator(draw):
+    denominator = draw(st.integers(min_value=1, max_value=1_000_000))
+    k = draw(st.integers(min_value=0, max_value=denominator))
+    return k, denominator
+
+
+@SETTINGS
+@given(k_and_denominator())
+def test_every_true_ratio_is_achievable_against_its_own_denominator(pair):
+    """For any integer k in [0, denominator], k/denominator must be
+    achievable against that denominator -- this is the construction
+    _snap/_make_metrics relies on throughout this file; if it ever stopped
+    holding, every other property test here would be fuzzing against
+    inputs that silently fail to construct, not against the decision
+    logic they claim to test."""
+    k, denominator = pair
+    value = Decimal(k) / Decimal(denominator)
+    assert _achievable(value, denominator)
+
+
+@SETTINGS
+@given(st.integers(min_value=1, max_value=100_000))
+def test_achievable_is_vacuous_at_denominator_zero(value_places):
+    """A population of zero has nothing to check a ratio against --
+    verified directly (not assumed) that any value at all is accepted,
+    the same reasoning PI-6 applies when a residual is empty."""
+    value = Decimal(value_places % 10001) / Decimal(10000)
+    assert _achievable(value, 0)

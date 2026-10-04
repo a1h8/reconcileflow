@@ -25,6 +25,7 @@
 | PI-14 | GAP | high | RESOLVED (2026-10-02) |
 | PI-15 | GAP | high | RESOLVED (2026-10-02) |
 | PI-16 | GAP | high | RESOLVED, thresholds PROVISIONAL (2026-10-03) |
+| PI-17 | GAP | medium | RESOLVED (2026-10-04) |
 
 ---
 
@@ -310,3 +311,23 @@ explicitly flagged more conservative than may be necessary for the structurally 
 population — no independent justification exists yet for a smaller number. No new `RunStatus`: a
 raised exception at construction, the same layer PI-7 already fails at. Full working notes:
 `docs/target/m0-pi16-metrics-missing-sample-size.md`.
+
+## PI-17: ratios can be mathematically impossible given their own sample size (RESOLVED)
+
+**Symptom.** `Metrics(d_cov=0.12345, n=10000, ...)` is accepted, but `0.12345 * 10000 = 1234.5`
+"correct" requests — not an integer, so this ratio could not have come from any real run. A
+direct consequence of PI-16: this check was not expressible before `n`/`n_residual` existed.
+
+**Cause.** Ratios and their sample sizes are independent fields with no consistency check
+between them — the same "two things that should move together, tracked separately" shape as
+PI-9 (repetitions and their metric names) and PI-15 (`D` and `D_acc` as independent perturbation
+axes).
+
+**Decision (2026-10-04).** A precision-derived achievability check (no invented epsilon): round
+`value * denominator` to the nearest integer `k`, then confirm `k / denominator`, rounded back to
+`value`'s own decimal precision, reproduces `value` exactly. Applied to
+`d_cov`/`truth_coverage`/`oracle_capture_failure` against `n`; to `d_acc` against the
+`D_cov`-implied count (`round(d_cov * n)`), vacuously true when that count is `0` (`D_cov=0`
+genuinely has no sub-population to check `D_acc` against); to `r`/`t` against `n_residual` when
+measured. Implemented in `attribution.py`; tests in `tests/test_m0.py`. Full working notes:
+`docs/target/m0-pi17-ratio-sample-size-mismatch.md`.

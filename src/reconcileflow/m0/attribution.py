@@ -12,7 +12,7 @@ borderline band is an inclusive comparison, and binary floats would misplace
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
 from reconcileflow.m0.stability import MIN_GT_OPS_PER_REP
@@ -98,6 +98,28 @@ class Thresholds:
 RUN_001 = Thresholds(q_acceptable_min=Decimal("0.90"))
 
 
+def _achievable(value: Decimal, denominator: int) -> bool:
+    """Is ``value`` exactly ``k / denominator`` for some integer ``k``, at
+    ``value``'s own expressed decimal precision (PI-17)?
+
+    Not a tolerance in the usual sense: no epsilon is invented. A value
+    honestly rounded from a real count will reproduce itself exactly when
+    the nearest candidate count is divided back out and re-rounded to the
+    same number of places; one that could never have come from any integer
+    count (e.g. ``0.12345`` at ``n=10_000``, implying ``1234.5`` events)
+    will not.
+    """
+    if denominator == 0:
+        return True  # nothing to check against -- a population of zero
+    exponent = value.as_tuple().exponent
+    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    quantum = Decimal(1).scaleb(-places)
+    k = (value * denominator).to_integral_value(rounding=ROUND_HALF_EVEN)
+    if not (_ZERO <= k <= denominator):
+        return False
+    return (k / denominator).quantize(quantum) == value
+
+
 @dataclass(frozen=True, slots=True)
 class Metrics:
     """Measurements of one run (protocol §2).
@@ -142,6 +164,32 @@ class Metrics:
                 f"n_residual ({self.n_residual}) is below the minimum "
                 f"{MIN_RESIDUAL_SAMPLE_SIZE}"
             )
+        # PI-17: a ratio must be achievable as an integer count of its own
+        # sample size -- not merely in [0, 1], and not merely measured over
+        # enough attempts (PI-16), but actually reachable from some k/n.
+        for name in ("d_cov", "truth_coverage", "oracle_capture_failure"):
+            value = getattr(self, name)
+            if not _achievable(value, self.n):
+                raise ValueError(f"{name} ({value}) is not achievable as k/n={self.n}")
+        # D_acc's real denominator is the D_cov-implied count, not n itself
+        # (it is "the fraction of THOSE D_cov-covered attempts that are
+        # correct") -- vacuously unconstrained when that count is 0.
+        d_cov_count = int((self.d_cov * self.n).to_integral_value(rounding=ROUND_HALF_EVEN))
+        if not _achievable(self.d_acc, d_cov_count):
+            raise ValueError(
+                f"d_acc ({self.d_acc}) is not achievable as k/{d_cov_count} (D_cov-implied)"
+            )
+        if self.n_residual is not None:
+            for name in ("r", "t"):
+                value = getattr(self, name)
+                # r/t are not coupled to each other's None-ness (only
+                # n_residual is tied to r) -- a pre-existing characteristic
+                # of PI-6, not something PI-17 is scoped to revisit. Skip
+                # the achievability check for whichever of the two is None.
+                if value is not None and not _achievable(value, self.n_residual):
+                    raise ValueError(
+                        f"{name} ({value}) is not achievable as k/n_residual={self.n_residual}"
+                    )
 
     @property
     def unresolved(self) -> Decimal:
