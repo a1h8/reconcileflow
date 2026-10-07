@@ -62,7 +62,10 @@ def _pair_reject_reason(
         return RejectReason.DATE_OUT_OF_WINDOW
     if abs(left.amount - right.amount) > amount_tolerance(left.amount, tol):
         return RejectReason.AMOUNT_OUT_OF_TOLERANCE
-    return None
+    # Unreachable while M2 runs on every block: a free pair inside both bounds
+    # is always matched. Guarded by test_every_pair_of_an_unmatched_record_
+    # carries_a_reason rather than by coverage.
+    return None  # pragma: no cover
 
 
 def _reconcile_block(

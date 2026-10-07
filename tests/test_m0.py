@@ -112,6 +112,16 @@ def test_metrics_reject_non_fractions():
         metrics(d_acc="99")
 
 
+def test_f_and_e_follow_the_protocol_definitions():
+    """F = 1 - D and E = D + (1 - D) * T (protocol section 3); E is undefined
+    without a correlator measurement rather than defaulted."""
+    m = metrics(d_cov="0.9", d_acc="0.9", r="0.8", t="0.5")
+    assert m.d == D("0.81")
+    assert m.f == D("0.19")
+    assert m.e == D("0.81") + D("0.19") * D("0.5")
+    assert metrics(r=None, t=None).e is None
+
+
 def test_metrics_reject_non_fraction_r():
     """r/t have their own range check (they may be None), separate from the
     always-measured fields above."""
