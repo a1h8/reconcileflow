@@ -16,6 +16,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from reconcileflow import Record, RuleId, Tolerance, reconcile
+from reconcileflow.engine import blocking_key
 from reconcileflow.rules import amount_tolerance
 
 amounts = st.decimals(
@@ -226,7 +227,10 @@ def test_every_pair_of_an_unmatched_record_carries_a_reason(lefts, rights, tol):
     for left in lefts:
         if left.id in matched:
             continue
-        block = [r for r in rights if r.account == left.account]
+        # The engine's own blocking key, not a re-derivation of it: pairs in
+        # different blocks are never compared, and are not expected to carry
+        # a pair-level reason (the left one gets NO_CANDIDATE instead).
+        block = [r for r in rights if blocking_key(r) == blocking_key(left)]
         assert len(block) <= tol.max_block_candidates  # pair detail only for bounded blocks
         for right in block:
             assert (left.id, right.id) in explained

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"debug/elf"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -180,6 +179,9 @@ func TestParseFlags(t *testing.T) {
 	if cfg != (config{binPath: "/bin/fu", objPath: "bpf/probe.o", outPath: "x.jsonl", symbol: "pkg.(*T).M"}) {
 		t.Fatalf("cfg = %+v", cfg)
 	}
+	if cfg, _ := parseFlags([]string{"-binary", "/bin/fu"}); cfg.symbol != autoSymbol {
+		t.Fatalf("default -symbol = %q, want %q", cfg.symbol, autoSymbol)
+	}
 	if _, err := parseFlags(nil); err == nil {
 		t.Fatal("missing -binary accepted")
 	}
@@ -239,7 +241,7 @@ func TestRunHappyPathWritesEventsAndForwardsTheTarget(t *testing.T) {
 // 0: its "events recorded" line would otherwise read as a clean result.
 func TestRunFailsWhenEventsAreLostInUserspace(t *testing.T) {
 	out, _ := withRunSeams(t, scriptedStep{raw: make([]byte, 3)})
-	err := run([]string{"-binary", "/bin/fu", "-out", out})
+	err := run([]string{"-binary", "/bin/fu", "-symbol", "pkg.F", "-out", out})
 	if err == nil || !strings.Contains(err.Error(), "1 undecodable") {
 		t.Fatalf("run() = %v", err)
 	}
@@ -261,7 +263,7 @@ func TestRunReportsEachWiringFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			out, _ := withRunSeams(t)
 			tc.break_()
-			if err := run([]string{"-binary", "/bin/fu", "-out", out}); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if err := run([]string{"-binary", "/bin/fu", "-symbol", "pkg.F", "-out", out}); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("run() = %v, want %q", err, tc.want)
 			}
 		})
@@ -270,7 +272,7 @@ func TestRunReportsEachWiringFailure(t *testing.T) {
 	t.Run("output", func(t *testing.T) {
 		withRunSeams(t)
 		bad := filepath.Join(t.TempDir(), "missing-dir", "out.jsonl")
-		if err := run([]string{"-binary", "/bin/fu", "-out", bad}); err == nil || !strings.Contains(err.Error(), "create output") {
+		if err := run([]string{"-binary", "/bin/fu", "-symbol", "pkg.F", "-out", bad}); err == nil || !strings.Contains(err.Error(), "create output") {
 			t.Fatalf("run() = %v", err)
 		}
 	})
@@ -283,6 +285,14 @@ func TestRunReportsEachWiringFailure(t *testing.T) {
 		}
 	})
 
+	t.Run("unresolvable auto symbol fails before touching the kernel", func(t *testing.T) {
+		withRunSeams(t)
+		removeMemlock = func() error { t.Fatal("reached removeMemlock"); return nil }
+		if err := run([]string{"-binary", filepath.Join(t.TempDir(), "absent")}); err == nil || !strings.Contains(err.Error(), "resolve -symbol auto") {
+			t.Fatalf("run() = %v", err)
+		}
+	})
+
 	t.Run("-h is not an error", func(t *testing.T) {
 		withRunSeams(t)
 		if err := run([]string{"-h"}); err != nil {
@@ -291,11 +301,11 @@ func TestRunReportsEachWiringFailure(t *testing.T) {
 	})
 }
 
-// The default symbol is a Go-internal path (net/http/internal/http2) that
-// has moved between Go releases; if a toolchain upgrade renames it, the
-// uprobe cannot attach. Checked against a freshly built fake-upstream, the
-// binary this probe is pointed at.
-func TestDefaultSymbolExistsInFakeUpstream(t *testing.T) {
+// The HTTP/2 dispatch symbol's name depends on the Go version that built
+// the traced binary (CI's go.mod-pinned 1.22 and a local 1.27 differ):
+// "auto" must resolve against a fake-upstream built by whatever toolchain
+// runs this test.
+func TestAutoSymbolResolvesInFakeUpstream(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not on PATH")
 	}
@@ -303,23 +313,22 @@ func TestDefaultSymbolExistsInFakeUpstream(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, "../fake-upstream").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
-	cfg, err := parseFlags([]string{"-binary", bin})
+	got, err := resolveSymbol(bin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := elf.Open(bin)
+	t.Logf("resolved to %s", got)
+}
+
+func TestResolveSymbolFailsLoudly(t *testing.T) {
+	if _, err := resolveSymbol(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("resolved a symbol in a missing file")
+	}
+	self, err := os.Executable() // a Go test binary with no HTTP/2 server
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	syms, err := f.Symbols()
-	if err != nil {
-		t.Fatal(err)
+	if got, err := resolveSymbol(self); err == nil {
+		t.Fatalf("resolved %q in a binary that serves no HTTP/2", got)
 	}
-	for _, s := range syms {
-		if s.Name == cfg.symbol && elf.ST_TYPE(s.Info) == elf.STT_FUNC {
-			return
-		}
-	}
-	t.Fatalf("default -symbol %q is not a function in fake-upstream", cfg.symbol)
 }

@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"debug/elf"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -87,9 +88,8 @@ func parseFlags(args []string) (config, error) {
 	binPath := fs.String("binary", "", "path to the traced Go executable (must match the running process's own binary)")
 	objPath := fs.String("obj", "bpf/probe.o", "compiled BPF object")
 	outPath := fs.String("out", "http-signal.jsonl", "output JSONL path")
-	// The symbol the 2026-09-25 README result was measured on: per that
-	// section, (*serverHandler).ServeHTTP never fired on HTTP/2 traffic.
-	symbol := fs.String("symbol", "net/http/internal/http2.(*serverConn).runHandler", "Go symbol to uprobe")
+	symbol := fs.String("symbol", autoSymbol, "Go symbol to uprobe; \"auto\" picks the HTTP/2 "+
+		"request-dispatch entry present in -binary (its name depends on the Go version that built it)")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -97,6 +97,44 @@ func parseFlags(args []string) (config, error) {
 		return config{}, errors.New("-binary is required")
 	}
 	return config{binPath: *binPath, objPath: *objPath, outPath: *outPath, symbol: *symbol}, nil
+}
+
+const autoSymbol = "auto"
+
+// http2DispatchSymbols is HTTP/2's per-request dispatch entry, newest Go
+// first: Go 1.27 has it under net/http/internal/http2, Go 1.22 still bundles
+// it into net/http (both checked with go tool nm on a built fake-upstream).
+// The 2026-09-25 README result was measured on this entry point because
+// net/http.(*serverHandler).ServeHTTP reportedly never fired on HTTP/2.
+var http2DispatchSymbols = []string{
+	"net/http/internal/http2.(*serverConn).runHandler",
+	"net/http.(*http2serverConn).runHandler",
+}
+
+// resolveSymbol returns the first http2DispatchSymbols entry that is a
+// function in the ELF binary at path -- the binary the uprobe attaches to.
+func resolveSymbol(path string) (string, error) {
+	f, err := elf.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	syms, err := f.Symbols()
+	if err != nil {
+		return "", err
+	}
+	present := make(map[string]bool, len(syms))
+	for _, s := range syms {
+		if elf.ST_TYPE(s.Info) == elf.STT_FUNC {
+			present[s.Name] = true
+		}
+	}
+	for _, name := range http2DispatchSymbols {
+		if present[name] {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("none of %v is a function in %s", http2DispatchSymbols, path)
 }
 
 func main() {
@@ -112,6 +150,13 @@ func run(args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+
+	if cfg.symbol == autoSymbol {
+		if cfg.symbol, err = resolveSymbol(cfg.binPath); err != nil {
+			return fmt.Errorf("resolve -symbol auto: %w", err)
+		}
+		log.Printf("-symbol auto resolved to %s", cfg.symbol)
 	}
 
 	if err := removeMemlock(); err != nil {

@@ -1381,10 +1381,22 @@ reports a uprobe on `net/http/internal/http2.(*serverConn).runHandler`,
 because `net/http.(*serverHandler).ServeHTTP` never fired on HTTP/2 traffic.
 The loader's default was still `ServeHTTP`, and the exact command used was
 not recorded, so re-running with defaults would not reproduce that
-measurement. The default is now `runHandler`. Both symbols exist in a
-`fake-upstream` built with Go 1.27.1, so which one fires on HTTP/2 is a
-runtime question this change does not settle: **unverified until re-run
-with `sudo`**. A test now checks the default is a function symbol in a
+measurement. The default is now `-symbol auto`, which picks HTTP/2's
+`runHandler` in the traced binary and logs the choice: its name depends on
+the Go version that built that binary —
+`net/http/internal/http2.(*serverConn).runHandler` with Go 1.27.1,
+`net/http.(*http2serverConn).runHandler` with Go 1.22 (what CI installs from
+`go.mod`). A first fix hard-coded the 1.27 name; its own test failed in CI
+on 1.22, which is how this surfaced. Both `runHandler` and `ServeHTTP` exist
+in either build, so which one fires on HTTP/2 is a runtime question this
+change does not settle: **unverified until re-run with `sudo`**.
+`scripts/compare-probe-symbols.sh` (run from `m0-harness/` as
+your normal user; it builds everything, records a manifest of hashes and
+versions, then calls `sudo` itself) measures both symbols under identical
+conditions: a no-traffic negative control and two independent cells of
+2000 HTTP/2 requests each, counting only events from each cell's own
+`fake-upstream` PID. Its orchestration was checked against a stub probe;
+the real measurement is still to be run. A test now checks the default is a function symbol in a
 freshly built `fake-upstream`, since that internal package path has moved
 between Go releases.
 
