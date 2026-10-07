@@ -1327,3 +1327,44 @@ and its underlying JSONL logs were not retained to re-run through the fixed
 `join` now. That figure should be read as a lower bound on the fallback
 tier's degradation at that scale, not re-stated as exact, until re-measured
 with this fix in place.
+
+## Cross-binary tests: the two halves of the oracle agree, and `join` cannot score them (2026-10-04)
+
+Until now `internal/oracle` and `fake-upstream` had no tests, and nothing
+checked that `load-gen` and `fake-upstream` — which each derive
+`(conn_key, stream_id)` independently, from opposite ends of the socket —
+actually produce the same key for the same request. `trace_id`, which both
+sides see, is used as the referee. Three real-pipeline runs, 300 requests
+each, repeated on two separate occasions with the same outcome:
+
+| Run | Negotiated | Connections | `conn_key` agrees | `(conn_key, stream_id)` agrees | `join` |
+|---|---|---|---|---|---|
+| Positive control (`-pool=false`) | HTTP/2 | 300 | 300/300 | 300/300 | refuses |
+| Positive control, `-require-http2=false` | HTTP/2 | 300 | 300/300 | 300/300 | refuses |
+| Pooled (default) | HTTP/2 | 1 | 300/300 | 4/300 | refuses |
+
+- **The fallback-tier key agrees across binaries** whenever a connection
+  carries one request: the positive-control witness works.
+- **Ordinals do not survive multiplexing**: `fake-upstream` numbers a request
+  on handler entry, `load-gen` on completion, and the injected latency
+  reorders them. This is the documented reason `join` refuses HTTP/2
+  (`docs/m0-demo-readiness.md` §2), now measured rather than argued.
+- **`join` cannot score any run of the current harness**, including the
+  positive control above. `-require-http2=false` does not downgrade the
+  client — `fake-upstream` always offers `h2` — so no schema-v2 record is
+  ever HTTP/1.1. This is consistent with `join` being a historical
+  diagnostic; it means the D_acc figures earlier in this README cannot be
+  re-measured with `join` as it stands.
+
+One measurement artifact of our own, caught before it was reported: a first
+attempt reused a single `fake-upstream` and truncated its log between runs
+with `: >`. The server kept writing at its old file offset (the log is not
+opened `O_APPEND`), leaving a run of NUL bytes that `join` then rejected as
+unparseable. Each run now gets its own `fake-upstream` process.
+
+These checks are now tests: `cmd/fake-upstream/main_test.go` builds both
+binaries and asserts full key agreement on the positive control, `conn_key`
+agreement only on a pooled run (ordinal agreement is timing-dependent), and
+that `join` still refuses the real output. Five mutants of `fake-upstream`
+(swapped tuple order, zero-based ordinals, a global generation counter, the
+wrong `traceparent` field, a misreported body size) all fail these tests.

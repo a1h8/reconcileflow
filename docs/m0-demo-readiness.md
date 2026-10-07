@@ -74,7 +74,10 @@ Implemented in this slice:
 
 - `load-gen` explicitly enables HTTP/2 attempts despite its custom TLS configuration.
   It requires HTTP/2 by default and records `protocol` and TLS `negotiated_protocol`.
-  `-require-http2=false` permits a separately labelled HTTP/1.1 diagnostic.
+  `-require-http2=false` permits a separately labelled HTTP/1.1 diagnostic: it stops
+  flagging a non-HTTP/2 response as a failure, but does not downgrade the client.
+  Against `fake-upstream`, which always offers `h2`, it still negotiates HTTP/2
+  (measured 2026-10-04); an HTTP/1.1 run needs an HTTP/1.1-only server.
 - Every logical request attempt produces a schema-v2 record, including request-build,
   transport, body-read, protocol and HTTP status failures. Requests have a bounded
   `-timeout` (default 30s). Redirects are not followed. Failed requests and output
