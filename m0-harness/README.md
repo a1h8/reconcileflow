@@ -1368,3 +1368,45 @@ agreement only on a pooled run (ordinal agreement is timing-dependent), and
 that `join` still refuses the real output. Five mutants of `fake-upstream`
 (swapped tuple order, zero-based ordinals, a global generation counter, the
 wrong `traceparent` field, a misreported body size) all fail these tests.
+
+## `http-signal-probe`: default symbol, event accounting, and a regression test that did not test (2026-10-07)
+
+Three corrections found while bringing `cmd/http-signal-probe` under test
+(it had none). None was re-measured on the kernel — that needs root, which
+this pass did not have — so the 2026-09-25 result above is not re-confirmed
+here, only the code around it.
+
+**The default `-symbol` was not the one measured.** The 2026-09-25 section
+reports a uprobe on `net/http/internal/http2.(*serverConn).runHandler`,
+because `net/http.(*serverHandler).ServeHTTP` never fired on HTTP/2 traffic.
+The loader's default was still `ServeHTTP`, and the exact command used was
+not recorded, so re-running with defaults would not reproduce that
+measurement. The default is now `runHandler`. Both symbols exist in a
+`fake-upstream` built with Go 1.27.1, so which one fires on HTTP/2 is a
+runtime question this change does not settle: **unverified until re-run
+with `sudo`**. A test now checks the default is a function symbol in a
+freshly built `fake-upstream`, since that internal package path has moved
+between Go releases.
+
+**"events recorded" could overstate what was written.** The loop counted
+each event before writing it and discarded the write error, and skipped
+undecodable samples without counting them. The 2026-09-25 "2005 events
+recorded, 0 reserve failures" reading rested on that counter. It now counts
+only records actually written, reports undecodable samples and write
+failures separately, and exits nonzero if either is nonzero. A sample whose
+size is not exactly `struct http_event` is now rejected instead of decoded.
+
+**`strong-tier-probe`'s shutdown regression test did not catch the
+regression.** The 2026-09-23 bug was comparing the reader's error to
+`ringbuf.ErrClosed` with `==`; the real reader wraps it. Every test scripted
+the bare sentinel (which `==` also matches), and the fake reader returned
+`ErrClosed` once its script ran out, which ended the loop anyway. A mutant
+restoring `==` passed. The test now scripts the wrapped error and counts
+reads past the script; the mutant fails. `strong-tier-probe` still discards
+write errors (`_ = enc.Encode(...)`); not changed here.
+
+`http-signal-probe` now mirrors `strong-tier-probe`'s testable structure
+(`run()`, injectable `cilium/ebpf` entry points, `runLoop`, `decodeRecord`):
+91% statement coverage without a kernel. Six mutants (old counting, no size
+check, PID from the thread half of `pid_tgid`, exit 0 on loss, `==` on
+`ErrClosed`, `-binary` check skipped) fail its tests.

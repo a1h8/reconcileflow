@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -218,8 +219,9 @@ func TestLogDrops(t *testing.T) {
 // scriptedReader is a ringbufReader fed a fixed sequence of (record, error)
 // steps — lets runLoop's control flow be tested without a kernel ring buffer.
 type scriptedReader struct {
-	steps []scriptedStep
-	i     int
+	steps    []scriptedStep
+	i        int
+	overread int // reads past the script: runLoop missed its shutdown signal
 }
 
 type scriptedStep struct {
@@ -230,7 +232,9 @@ type scriptedStep struct {
 func (s *scriptedReader) Read() (ringbuf.Record, error) {
 	if s.i >= len(s.steps) {
 		// Safety net against a mis-scripted test hanging forever: once the
-		// script runs out, behave as if the caller closed the reader.
+		// script runs out, behave as if the caller closed the reader. Counted,
+		// because this fallback also masks a loop that ignored the real one.
+		s.overread++
 		return ringbuf.Record{}, ringbuf.ErrClosed
 	}
 	step := s.steps[s.i]
@@ -305,6 +309,19 @@ func TestRunLoop(t *testing.T) {
 		}
 		if out.Len() != 0 {
 			t.Errorf("encoded output = %q, want nothing encoded for a malformed sample", out.String())
+		}
+	})
+
+	// The real reader returns fmt.Errorf("ringbuffer: %w", ErrClosed); every
+	// other subtest scripts the bare sentinel, which an == comparison would
+	// also match. Regression test for the 2026-09-23 shutdown bug.
+	t.Run("a wrapped ErrClosed shuts down on the first read", func(t *testing.T) {
+		enc, _ := newEncoder()
+		rd := &scriptedReader{steps: []scriptedStep{{err: fmt.Errorf("ringbuffer: %w", ringbuf.ErrClosed)}}}
+		logOut := captureLog(t, func() { runLoop(rd, nil, enc, "boot-id-x") })
+
+		if rd.overread != 0 || strings.Contains(logOut, "ring buffer read error") {
+			t.Errorf("wrapped ErrClosed treated as a read error (overread=%d), log = %q", rd.overread, logOut)
 		}
 	})
 

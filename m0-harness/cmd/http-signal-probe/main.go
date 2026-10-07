@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -37,55 +38,114 @@ type Record struct {
 	TimestampNS uint64 `json:"timestamp_ns"`
 }
 
-func main() {
-	binPath := flag.String("binary", "", "path to the traced Go executable (must match the running process's own binary)")
-	objPath := flag.String("obj", "bpf/probe.o", "compiled BPF object")
-	outPath := flag.String("out", "http-signal.jsonl", "output JSONL path")
-	symbol := flag.String("symbol", "net/http.(*serverHandler).ServeHTTP", "Go symbol to uprobe")
-	flag.Parse()
+// closer is the one method run() needs from an attached uprobe -- the same
+// narrowing as cmd/strong-tier-probe (link.Link is sealed, so a test fake
+// cannot implement it).
+type closer interface {
+	Close() error
+}
 
+// Seams over the cilium/ebpf entry points, same pattern as
+// cmd/strong-tier-probe: each defaults to the real call, tests reassign and
+// restore them to run the whole wiring in run() without a kernel or CAP_BPF.
+var (
+	removeMemlock      = rlimit.RemoveMemlock
+	loadCollectionSpec = ebpf.LoadCollectionSpec
+	newCollection      = ebpf.NewCollection
+	attachUprobe       = func(binPath, symbol string, p *ebpf.Program) (closer, error) {
+		ex, err := link.OpenExecutable(binPath)
+		if err != nil {
+			return nil, fmt.Errorf("open executable %s: %w", binPath, err)
+		}
+		return ex.Uprobe(symbol, p, nil)
+	}
+	newRingbufReader = func(m *ebpf.Map) (ringbufReaderCloser, error) { return ringbuf.NewReader(m) }
+)
+
+type ringbufReader interface {
+	Read() (ringbuf.Record, error)
+}
+
+type ringbufReaderCloser interface {
+	ringbufReader
+	Close() error
+}
+
+type dropCounter interface {
+	Lookup(key, valueOut interface{}) error
+}
+
+type config struct {
+	binPath string
+	objPath string
+	outPath string
+	symbol  string
+}
+
+func parseFlags(args []string) (config, error) {
+	fs := flag.NewFlagSet("http-signal-probe", flag.ContinueOnError)
+	binPath := fs.String("binary", "", "path to the traced Go executable (must match the running process's own binary)")
+	objPath := fs.String("obj", "bpf/probe.o", "compiled BPF object")
+	outPath := fs.String("out", "http-signal.jsonl", "output JSONL path")
+	// The symbol the 2026-09-25 README result was measured on: per that
+	// section, (*serverHandler).ServeHTTP never fired on HTTP/2 traffic.
+	symbol := fs.String("symbol", "net/http/internal/http2.(*serverConn).runHandler", "Go symbol to uprobe")
+	if err := fs.Parse(args); err != nil {
+		return config{}, err
+	}
 	if *binPath == "" {
-		log.Fatal("-binary is required")
+		return config{}, errors.New("-binary is required")
 	}
+	return config{binPath: *binPath, objPath: *objPath, outPath: *outPath, symbol: *symbol}, nil
+}
 
-	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatalf("remove memlock rlimit: %v", err)
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		log.Fatal(err)
 	}
+}
 
-	spec, err := ebpf.LoadCollectionSpec(*objPath)
+func run(args []string) error {
+	cfg, err := parseFlags(args)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil // -h: usage already printed, as flag.ExitOnError did before
+	}
 	if err != nil {
-		log.Fatalf("load collection spec from %s: %v", *objPath, err)
+		return err
 	}
 
-	coll, err := ebpf.NewCollection(spec)
+	if err := removeMemlock(); err != nil {
+		return fmt.Errorf("remove memlock rlimit: %w", err)
+	}
+
+	spec, err := loadCollectionSpec(cfg.objPath)
 	if err != nil {
-		log.Fatalf("load collection into kernel (needs CAP_BPF/root): %v", err)
+		return fmt.Errorf("load collection spec from %s: %w", cfg.objPath, err)
+	}
+
+	coll, err := newCollection(spec)
+	if err != nil {
+		return fmt.Errorf("load collection into kernel (needs CAP_BPF/root): %w", err)
 	}
 	defer coll.Close()
 
-	ex, err := link.OpenExecutable(*binPath)
+	up, err := attachUprobe(cfg.binPath, cfg.symbol, coll.Programs["on_serve_http"])
 	if err != nil {
-		log.Fatalf("open executable %s: %v", *binPath, err)
-	}
-
-	up, err := ex.Uprobe(*symbol, coll.Programs["on_serve_http"], nil)
-	if err != nil {
-		log.Fatalf("attach uprobe %s: %v", *symbol, err)
+		return fmt.Errorf("attach uprobe %s: %w", cfg.symbol, err)
 	}
 	defer up.Close()
 
-	rd, err := ringbuf.NewReader(coll.Maps["events"])
+	rd, err := newRingbufReader(coll.Maps["events"])
 	if err != nil {
-		log.Fatalf("open ring buffer reader: %v", err)
+		return fmt.Errorf("open ring buffer reader: %w", err)
 	}
 	defer rd.Close()
 
-	out, err := os.Create(*outPath)
+	out, err := os.Create(cfg.outPath)
 	if err != nil {
-		log.Fatalf("create output: %v", err)
+		return fmt.Errorf("create output: %w", err)
 	}
 	defer out.Close()
-	enc := json.NewEncoder(out)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -94,39 +154,75 @@ func main() {
 		rd.Close()
 	}()
 
-	log.Printf("http-signal-probe attached (%s in %s), writing to %s", *symbol, *binPath, *outPath)
+	log.Printf("http-signal-probe attached (%s in %s), writing to %s", cfg.symbol, cfg.binPath, cfg.outPath)
 
-	var ev httpEvent
-	var count uint64
+	var drops dropCounter
+	if m := coll.Maps["drops"]; m != nil {
+		drops = m // typed-nil guard, as in cmd/strong-tier-probe
+	}
+	st := runLoop(rd, drops, json.NewEncoder(out))
+	if st.decodeFailures != 0 || st.writeFailures != 0 {
+		return fmt.Errorf("events lost in userspace: %d undecodable, %d not written", st.decodeFailures, st.writeFailures)
+	}
+	return nil
+}
+
+// loopStats separates what reached the output file from what was read but
+// lost on the way: the "zero loss" claim rests on the first number, and it
+// must not silently include the other two.
+type loopStats struct {
+	recorded       uint64
+	decodeFailures uint64
+	writeFailures  uint64
+}
+
+func runLoop(rd ringbufReader, drops dropCounter, enc *json.Encoder) loopStats {
+	var st loopStats
 	for {
-		rec, err := rd.Read()
+		raw, err := rd.Read()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) {
-				logDrops(coll.Maps["drops"])
-				log.Printf("shutting down, events recorded: %d", count)
-				return
+				if drops != nil {
+					logDrops(drops)
+				}
+				log.Printf("shutting down, events recorded: %d, undecodable: %d, write failures: %d",
+					st.recorded, st.decodeFailures, st.writeFailures)
+				return st
 			}
 			log.Printf("ring buffer read error: %v", err)
 			continue
 		}
 
-		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &ev); err != nil {
+		rec, err := decodeRecord(raw.RawSample)
+		if err != nil {
+			st.decodeFailures++
 			log.Printf("decode ring buffer record: %v", err)
 			continue
 		}
-
-		count++
-		_ = enc.Encode(Record{
-			PID:         uint32(ev.PidTgid >> 32),
-			TimestampNS: ev.TimestampNS,
-		})
+		if err := enc.Encode(rec); err != nil {
+			st.writeFailures++
+			log.Printf("write record: %v", err)
+			continue
+		}
+		st.recorded++
 	}
 }
 
-func logDrops(m *ebpf.Map) {
-	if m == nil {
-		return
+// decodeRecord is the only place httpEvent's wire layout and Record's JSON
+// shape meet. A sample of the wrong size means probe.c and httpEvent have
+// drifted apart; it is rejected, not truncated or zero-padded into a record.
+func decodeRecord(raw []byte) (Record, error) {
+	var ev httpEvent
+	if want := binary.Size(ev); len(raw) != want {
+		return Record{}, fmt.Errorf("sample is %d bytes, struct http_event is %d", len(raw), want)
 	}
+	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
+		return Record{}, err
+	}
+	return Record{PID: uint32(ev.PidTgid >> 32), TimestampNS: ev.TimestampNS}, nil
+}
+
+func logDrops(m dropCounter) {
 	var n uint64
 	if err := m.Lookup(uint32(0), &n); err != nil {
 		log.Printf("read drop counter: %v", err)
