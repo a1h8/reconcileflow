@@ -9,6 +9,7 @@ order in which records arrive, no decision can be defended and replaying proves
 nothing.
 """
 
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -83,10 +84,13 @@ def related_rights(draw, lefts: list[Record], tol: Tolerance):
             split_amounts = [left.amount]
         for j, amount in enumerate(split_amounts):
             shift = draw(st.integers(min_value=-tol.date_days - 1, max_value=tol.date_days + 1))
+            # replace(), not Record(): a derived record inherits every field
+            # that decides its block (account, and currency once records carry
+            # one), or it lands in a block its source never sees.
             rights.append(
-                Record(
+                replace(
+                    left,
                     id=f"D{i}.{j}",
-                    account=left.account,
                     amount=amount,
                     value_date=left.value_date + timedelta(days=shift),
                     reference=draw(references),
