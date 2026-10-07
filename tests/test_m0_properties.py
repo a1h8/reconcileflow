@@ -521,3 +521,15 @@ def test_achievable_is_vacuous_at_denominator_zero(value_places):
     the same reasoning PI-6 applies when a residual is empty."""
     value = Decimal(value_places % 10001) / Decimal(10000)
     assert _achievable(value, 0)
+
+
+@SETTINGS
+@given(st.integers(min_value=1, max_value=1_000_000), st.integers(min_value=1, max_value=100))
+def test_ratio_outside_unit_interval_is_never_achievable(denominator, excess):
+    """No count k in [0, denominator] yields a ratio above 1 or below 0.
+    Metrics and Repetition range-check before calling _achievable, so this
+    branch is only reachable by calling the helper directly -- tested here
+    so a future caller that skips the range check is still covered."""
+    over = Decimal(1) + Decimal(excess) / Decimal(100)
+    assert not _achievable(over, denominator)
+    assert not _achievable(-over, denominator)

@@ -112,6 +112,20 @@ def test_metrics_reject_non_fractions():
         metrics(d_acc="99")
 
 
+def test_metrics_reject_non_fraction_r():
+    """r/t have their own range check (they may be None), separate from the
+    always-measured fields above."""
+    with pytest.raises(ValueError, match="r must be a fraction"):
+        metrics(r="1.5")
+
+
+def test_capture_failure_cannot_exceed_the_unresolved_zone():
+    """Capture failures are a subset of the unresolved attempts: 2% of them
+    cannot fit inside a 1% unresolved zone."""
+    with pytest.raises(ValueError, match="cannot exceed the unresolved zone"):
+        metrics(coverage="0.99", capture="0.02")
+
+
 # --- PI-12: Thresholds has no validation, unlike Metrics -------------------
 
 
@@ -208,6 +222,13 @@ def test_d_cov_zero_leaves_d_acc_unconstrained():
     check D_acc against -- vacuously accepted regardless of D_acc's value,
     the same reasoning PI-6 applies when the residual itself is empty."""
     metrics(d_cov="0", d_acc="0.5", r=None, t=None)
+
+
+def test_metrics_rejects_d_acc_unachievable_against_its_d_cov_count():
+    """D_acc's denominator is the D_cov-implied count (5000 here), not n:
+    0.3333 * 5000 = 1666.5 correct attempts, which no real run produces."""
+    with pytest.raises(ValueError, match="D_cov-implied"):
+        metrics(d_cov="0.5", d_acc="0.3333", n=MIN_SAMPLE_SIZE)
 
 
 def test_metrics_rejects_an_unachievable_r():
