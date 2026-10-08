@@ -1,12 +1,14 @@
 # M0 harness
 
-> **Current status (2026-09-29):** see [demo readiness and next steps](../docs/m0-demo-readiness.md).
+> **Current status (2026-09-30):** see [demo readiness and next steps](../docs/m0-demo-readiness.md).
 > The sections below are an experimental history, not a current certification.
 > New runs explicitly attempt HTTP/2, record the negotiated protocol and retain
 > failed requests. Earlier direct runs did not verify HTTP/2 negotiation.
 > `stream_id` is a local ordinal, not a protocol stream ID; the legacy join is
-> not a GT2 oracle. OBI PR #3587 targets the reported multiplexing bug; its
-> post-merge evaluation remains pending.
+> not a GT2 oracle. OBI PR #3587 (the reported multiplexing bug) merged
+> 2026-09-29 and its post-merge before/after comparison is done — see
+> ["OBI PR #3587 merged"](#obi-pr-3587-merged--beforeafter-measurement-on-our-own-topology-2026-09-30)
+> below.
 
 First runnable slice of the Correlation Evaluation Harness
 (`docs/target/ground-truth-eval-plane-v3.md`, `docs/target/m0-evaluation-run-001.md` §0.1).
@@ -963,8 +965,10 @@ construction, regardless of what OBI's specific bug turns out to be?
 **`cmd/http-signal-probe`** tests exactly this, deliberately narrow: a single
 uprobe on `net/http/internal/http2.(*serverConn).runHandler` (Go's HTTP/2
 request-dispatch entry point — not `net/http.(*serverHandler).ServeHTTP`,
-which only fires for HTTP/1.1 and silently never triggers on H2 traffic, a
-real dead-end hit and fixed during this POC), emitting `{pid, timestamp_ns}`
+which never triggered on H2 traffic, a real dead-end hit during this POC;
+see the 2026-10-08 correction below: that symbol is a wrapper nothing calls
+directly, and the value method `serverHandler.ServeHTTP` does fire on
+HTTP/2), emitting `{pid, timestamp_ns}`
 straight to a ring buffer. No map beyond that ring buffer and a drop
 counter. It does not read `traceparent` — decoding a Go `http.Header` map
 from eBPF is the genuinely hard, multi-month part of what OBI does, out of
@@ -1215,3 +1219,249 @@ deliberately not pursued this session.
   noise from load-profile sensitivity the way §3 intends.
 - No k8s deployment yet — OBI and the harness both ran as local processes over
   `localhost`, not the DaemonSet/sidecar topology OBI supports in production.
+
+## OBI PR #3587 merged — before/after measurement on our own topology (2026-09-30)
+
+[OBI PR #3587](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3587)
+merged 2026-09-29T09:18:34Z (merge commit `335c1c9eac0d908193609aca66fb3205240fb0ac`,
+parent `5016ad0019229860483c9e0e541ca7179c3bb6b6`). `docs/m0-demo-readiness.md` §1
+called for pinning the actual merged commit and comparing old/corrected OBI on
+the same workload once available — this is that comparison.
+
+**Both commits built from source, same toolchain, on purpose.** No downloaded
+binary is a valid stand-in here: the last tagged release (`v0.13.0`) is 248
+commits behind the merge, and OBI's `main`/`nightly` image tags are rolling —
+both had already moved past the pre-merge commit by the time this ran, so no
+registry has an artifact for it anymore. Building both commits with the
+identical toolchain (Go 1.27.1, clang 21.1.8) isolates exactly the PR's diff
+and removes build environment as a confound.
+
+**Topology rebuilt from scratch.** Nothing from earlier sessions' Traefik setup
+persisted on disk (gitignored, ad hoc). Reconstructed the same 2-hop shape that
+originally produced the 999/2000 cliff and the concurrency-sweep table above:
+`load-gen` → Traefik v3.7.13 (pooled HTTP/2 backend connection) → `fake-upstream`,
+plus a `/broken` route (a Traefik middleware stripping `traceparent` on the way
+to `fake-upstream`) as a negative control.
+
+**Scoring method: per-request identity at three hops independently**, via
+`analyze_run.py` (`-truth-in-path` on `load-gen`) — Traefik inbound
+(`traefik:48736`), Traefik outbound on its pooled backend connection
+(`127.0.0.1:8443:8443`), `fake-upstream` inbound (`fake-upstream:8443`) — scored
+as correct / swapped to another real, known `trace_id` / self-authored. Events
+were attributed to their run by the request's own `trace_id` (globally unique
+across all cells, verified collision-free before scoring), not by an
+obi.log before/after line-count marker — the line-marker approach used
+earlier in this README is known to leak a few boundary events across a
+flush-timing race (see the fallback-tier join-miss lesson above); keying on
+identity instead eliminates that artifact class rather than tolerating it.
+
+**Result:**
+
+| Concurrency | `old` (`5016ad00`) correct | `new` (`335c1c9e`) correct |
+|---|---|---|
+| c=20 (5 reps) | 94.1–97.4%, mean 96.2–96.3%, SD 0.008–0.011 | **100.000%**, SD 0.000 |
+| c=50 | 90.9–95.1% | **100.000%** |
+| c=100 | 80.1–84.0% | **100.000%** |
+| c=200 / n=10000 (2 reps) | 83.7–89.0% | **100.000%** |
+
+`old`'s errors are dominated by `wrong_known_trace` — not a missing trace_id,
+but OBI attributing a request's traceparent to a *different*, real,
+concurrently in-flight request — and the rate worsens monotonically with
+concurrency (7–28 swaps/1000 at c=20 up to 445–728 swaps/10000 at c=200,
+i.e. the swap fraction itself grows, not just the absolute count). `new`
+produced zero swaps and zero self-authored events at every concurrency level
+tested, c=20 through c=200: 103,000 hop-observations total, none wrong.
+
+The c=20 SD is under this repo's own `stability.assess()` threshold
+(`MAX_SD=0.015`) on both binaries, so that gap is `STABLE`, not noise. The
+c=200 point is 2 reps, not 5 — enough to see the old/new gap is not a fluke
+(same direction and order of magnitude as the c=20→100 progression already
+established), not enough to claim a formal stability verdict at that specific
+scale.
+
+**Negative control held on both binaries.** The `/broken` route's
+`fake-upstream` hop reads 0% correct / 100% self-authored on `old` and on
+`new` alike — the header is genuinely gone before the backend sees it in both
+cases, which is the point: it confirms the measurement did not go blind after
+the OBI upgrade. Traefik's own two hops on that route (upstream of where the
+header actually gets stripped) track each binary's clean-route rate, as
+expected.
+
+**What this does and does not settle.** This confirms, independently of
+upstream's own fix description, that PR #3587 eliminates the per-stream
+traceparent misattribution on this harness's own topology, at concurrency and
+volume levels that made the bug clearly visible on the pre-fix commit. It does
+not by itself establish whether a correlator is still needed for other
+reasons (`ground-truth-eval-plane-v3.md`'s thesis 2, combinability) — that
+question does not depend on this specific OBI bug, fixed or not.
+
+## `cmd/join` could report D_acc > 100% — the same key-collision lesson, found again (2026-10-04)
+
+The "Lesson" above (load-gen and fake-upstream each assign `generation`
+independently, so a recycled 5-tuple can desync between them) was fixed
+operationally (one `fake-upstream` per cell) but never checked for in
+`cmd/join` itself. `(conn_key, stream_id)` is exactly the key that
+desync can collide on, and `join`'s code assumed it unique on both sides
+without checking.
+
+**Confirmed empirically**, not just reasoned about: one `load-gen` record and
+two `fake-upstream` records sharing the same `(conn_key, stream_id)` (both
+equal to the expected `trace_id`) produced `expected=1 joined=2 matched=2
+D_acc=2.0000` and `join_misses=-1` — an accuracy over 100% and a negative
+miss count, both impossible for what these numbers are supposed to measure.
+A collision on the `load-gen` side has the opposite failure mode: the
+`expectedByKey` map silently keeps only the last of the colliding records,
+so the others are dropped without a trace rather than counted as misses.
+
+**Fix.** `join` now rejects a duplicate `(conn_key, stream_id)` on either
+side with an explicit error naming the key, instead of letting the
+collision silently overwrite (load-gen side) or double-count (fake-upstream
+side). Extracted into a standalone `join()` function (previously inlined in
+`main`) so this is covered by `cmd/join/main_test.go`, including the exact
+repro above.
+
+**Does this retroactively change any number already in this README?**
+Unverified, honestly: the small-n witness cells (n=500) above have no basis
+to collide and stand as reported. The `n=10000, c=200` "sustained load"
+cell, 369 misses, `D_acc=0.9631`, is exactly the regime this collision needs
+(sustained port churn, confirmed generation desync between the two sides) —
+and its underlying JSONL logs were not retained to re-run through the fixed
+`join` now. That figure should be read as a lower bound on the fallback
+tier's degradation at that scale, not re-stated as exact, until re-measured
+with this fix in place.
+
+## Cross-binary tests: the two halves of the oracle agree, and `join` cannot score them (2026-10-04)
+
+Until now `internal/oracle` and `fake-upstream` had no tests, and nothing
+checked that `load-gen` and `fake-upstream` — which each derive
+`(conn_key, stream_id)` independently, from opposite ends of the socket —
+actually produce the same key for the same request. `trace_id`, which both
+sides see, is used as the referee. Three real-pipeline runs, 300 requests
+each, repeated on two separate occasions with the same outcome:
+
+| Run | Negotiated | Connections | `conn_key` agrees | `(conn_key, stream_id)` agrees | `join` |
+|---|---|---|---|---|---|
+| Positive control (`-pool=false`) | HTTP/2 | 300 | 300/300 | 300/300 | refuses |
+| Positive control, `-require-http2=false` | HTTP/2 | 300 | 300/300 | 300/300 | refuses |
+| Pooled (default) | HTTP/2 | 1 | 300/300 | 4/300 | refuses |
+
+- **The fallback-tier key agrees across binaries** whenever a connection
+  carries one request: the positive-control witness works.
+- **Ordinals do not survive multiplexing**: `fake-upstream` numbers a request
+  on handler entry, `load-gen` on completion, and the injected latency
+  reorders them. This is the documented reason `join` refuses HTTP/2
+  (`docs/m0-demo-readiness.md` §2), now measured rather than argued.
+- **`join` cannot score any run of the current harness**, including the
+  positive control above. `-require-http2=false` does not downgrade the
+  client — `fake-upstream` always offers `h2` — so no schema-v2 record is
+  ever HTTP/1.1. This is consistent with `join` being a historical
+  diagnostic; it means the D_acc figures earlier in this README cannot be
+  re-measured with `join` as it stands.
+
+One measurement artifact of our own, caught before it was reported: a first
+attempt reused a single `fake-upstream` and truncated its log between runs
+with `: >`. The server kept writing at its old file offset (the log is not
+opened `O_APPEND`), leaving a run of NUL bytes that `join` then rejected as
+unparseable. Each run now gets its own `fake-upstream` process.
+
+These checks are now tests: `cmd/fake-upstream/main_test.go` builds both
+binaries and asserts full key agreement on the positive control, `conn_key`
+agreement only on a pooled run (ordinal agreement is timing-dependent), and
+that `join` still refuses the real output. Five mutants of `fake-upstream`
+(swapped tuple order, zero-based ordinals, a global generation counter, the
+wrong `traceparent` field, a misreported body size) all fail these tests.
+
+## `http-signal-probe`: default symbol, event accounting, and a regression test that did not test (2026-10-07)
+
+Three corrections found while bringing `cmd/http-signal-probe` under test
+(it had none). None was re-measured on the kernel — that needs root, which
+this pass did not have — so the 2026-09-25 result above is not re-confirmed
+here, only the code around it.
+
+**The default `-symbol` was not the one measured.** The 2026-09-25 section
+reports a uprobe on `net/http/internal/http2.(*serverConn).runHandler`,
+because `net/http.(*serverHandler).ServeHTTP` never fired on HTTP/2 traffic.
+The loader's default was still `ServeHTTP`, and the exact command used was
+not recorded, so re-running with defaults would not reproduce that
+measurement. The default is now `-symbol auto`, which picks HTTP/2's
+`runHandler` in the traced binary and logs the choice: its name depends on
+the Go version that built that binary —
+`net/http/internal/http2.(*serverConn).runHandler` with Go 1.27.1,
+`net/http.(*http2serverConn).runHandler` with Go 1.22 (what CI installs from
+`go.mod`). A first fix hard-coded the 1.27 name; its own test failed in CI
+on 1.22, which is how this surfaced. Both `runHandler` and `ServeHTTP` exist
+in either build, so which one fires on HTTP/2 is a runtime question this
+change does not settle: **unverified until re-run with `sudo`**.
+`scripts/compare-probe-symbols.sh` (run from `m0-harness/` as
+your normal user; it builds everything, records a manifest of hashes and
+versions, then calls `sudo` itself) measures both symbols under identical
+conditions: a no-traffic negative control and two independent cells of
+2000 HTTP/2 requests each, counting only events from each cell's own
+`fake-upstream` PID. Its orchestration was checked against a stub probe.
+A test now checks the default is a function symbol in a
+freshly built `fake-upstream`, since that internal package path has moved
+between Go releases.
+
+**First CI run (2026-10-08, Go 1.22.12, kernel 6.17, run 37833527155).**
+Negative controls recorded 0 events and no ring-buffer reserve failed.
+`runHandler` recorded 2003 and 2000 events for 2 × 2000 successful HTTP/2
+requests; `(*serverHandler).ServeHTTP` recorded 0 in both cells. So
+`runHandler` fires about once per HTTP/2 request, re-confirming the
+2026-09-25 choice with a recorded command and manifest. The 3 extra events
+are unexplained: `load-gen` and `fake-upstream` both logged exactly 2000
+requests, and their timing does not single them out. One untested candidate
+is a stack-growth restart re-executing the probed entry instruction; until
+that is ruled out, treat `runHandler` counts as an upper bound on requests,
+not an exact one-to-one count.
+
+**The ServeHTTP zero does not show what it was read as.** Disassembling that
+run's own `fake-upstream` (`go tool objdump`) finds no direct call to
+`(*serverHandler).ServeHTTP`, a compiler-generated pointer-receiver wrapper,
+in either protocol: HTTP/1's `conn.serve` and HTTP/2's
+`initALPNRequest.ServeHTTP` both call the value method
+`serverHandler.ServeHTTP`, the one OBI hooks. The zero therefore says nothing
+specific to HTTP/2, and the claim above that this symbol "only fires for
+HTTP/1.1" is unsupported. The script now also probes
+`serverHandler.ServeHTTP`; the prediction, recorded before that run, was about
+one event per HTTP/2 request.
+
+**Second CI run (2026-10-08, same versions, run 37834630706): prediction
+confirmed.** For 2 × 2000 successful HTTP/2 requests, with negative controls
+at 0 and no reserve failure:
+
+| symbol | events per cell |
+|---|---|
+| `(*http2serverConn).runHandler` | 2006, 2003 |
+| `(*serverHandler).ServeHTTP` (wrapper) | 0, 0 |
+| `serverHandler.ServeHTTP` (value method) | 2001, 2001 |
+
+Both `runHandler` and the value method fire about once per HTTP/2 request;
+the wrapper never fires. "ServeHTTP does not fire on HTTP/2" was an artefact
+of probing the wrapper. Every cell overcounts slightly (+1 to +6, ≤ 0.3%)
+while `load-gen` and `fake-upstream` each logged exactly 2000 requests; the
+cause is not established, so per-request counts from either symbol are an
+upper bound. HTTP/1 was not measured: `fake-upstream` always negotiates
+HTTP/2.
+
+**"events recorded" could overstate what was written.** The loop counted
+each event before writing it and discarded the write error, and skipped
+undecodable samples without counting them. The 2026-09-25 "2005 events
+recorded, 0 reserve failures" reading rested on that counter. It now counts
+only records actually written, reports undecodable samples and write
+failures separately, and exits nonzero if either is nonzero. A sample whose
+size is not exactly `struct http_event` is now rejected instead of decoded.
+
+**`strong-tier-probe`'s shutdown regression test did not catch the
+regression.** The 2026-09-23 bug was comparing the reader's error to
+`ringbuf.ErrClosed` with `==`; the real reader wraps it. Every test scripted
+the bare sentinel (which `==` also matches), and the fake reader returned
+`ErrClosed` once its script ran out, which ended the loop anyway. A mutant
+restoring `==` passed. The test now scripts the wrapped error and counts
+reads past the script; the mutant fails. `strong-tier-probe` still discards
+write errors (`_ = enc.Encode(...)`); not changed here.
+
+`http-signal-probe` now mirrors `strong-tier-probe`'s testable structure
+(`run()`, injectable `cilium/ebpf` entry points, `runLoop`, `decodeRecord`):
+91% statement coverage without a kernel. Six mutants (old counting, no size
+check, PID from the thread half of `pid_tgid`, exit 0 on loss, `==` on
+`ErrClosed`, `-binary` check skipped) fail its tests.

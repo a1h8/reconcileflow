@@ -178,3 +178,20 @@ def test_counters_are_consistent(count):
 
     assert result.counters["records_left"] == count
     assert result.counters.get("unmatched_left", 0) == count
+
+
+def test_business_key_is_stable_across_a_break_becoming_a_match():
+    """The identity a revision chain hangs on (J3 supersession).
+
+    When a late counterpart turns a break into a match, both decisions must
+    share a business key -- so the match can supersede the break -- while
+    their fingerprints differ, so the transition is seen.
+    """
+    left = rec("B1", "100.00", 11)
+    before = reconcile([left], [])
+    after = reconcile([left], [rec("L1", "100.00", 11)])
+
+    (brk,) = before.rejects
+    (match,) = after.matches
+    assert brk.business_key == match.business_key == "B1"
+    assert brk.fingerprint != match.fingerprint
