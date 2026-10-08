@@ -102,7 +102,9 @@ attribution. No claim of a completed A/B/C regime is made by this slice.
 For step 5, the earlier roughly 90% specialized duration result and the library's
 65–70% bucket result came from different conditions. They are not yet a controlled
 algorithm comparison. Overlapping rank windows failed to improve the latter;
-this does not settle elapsed-time windows or signal quality.
+this does not settle elapsed-time windows or signal quality. The 65–70% figure
+also predates a duration-parsing fix in `m0-harness/correlate_by_duration.py`
+and cannot be re-run; that script's docstring bounds the possible effect.
 
 Also, `Match.score` is a deterministic ranking score, not calibrated probability.
 `max_block_candidates` bounds M3 enumeration; it does not prevent M0–M2 from

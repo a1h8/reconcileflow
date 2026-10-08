@@ -1103,8 +1103,12 @@ line rather than hand-written fixtures: an `HTTP`/`HTTPClient` line with an
 empty route, method or `traceparent` is valid printer output but does not
 match the regex, and was skipped without trace, leaving the denominator
 instead of invalidating the run. The script now counts such lines and exits 1.
-The table below predates that check: it assumes none were present in its
-windows, which was not verified at the time.
+The table below predates that check, and its raw logs were not kept, so it
+cannot be re-run. Its own counts still bound the effect: every
+fake-upstream denominator is 300, the number of requests sent, so no request's
+event on that hop was lost to the regex (barring an exact cancellation by
+duplicate events). The Traefik 0% cells were published without counts and
+cannot be checked this way.
 
 Five levels, `c` = 2/5/10/20/50, held at `n=300` each, load-gen through
 Traefik → `fake-upstream`, one continuous OBI session (never restarted; OBI's
@@ -1185,6 +1189,11 @@ label, which is identical "traefik" for both hops):**
 | Upstream inbound (gateway → upstream, real port 9081) | HTTP | **49.7%** (149/300) |
 | Upstream outbound (upstream → fake-upstream, :8443) | HTTPClient | **49.7%** (149/300) |
 | fake-upstream inbound (final hop) | HTTP | 51.3% (154/300) |
+
+The three counted rows have denominator 300, the number of requests sent, so
+`analyze_multihop.py` silently skipping unreadable lines (since fixed, see the
+dose-response section) lost no request event on those hops. The two gateway
+0% rows were published without counts and cannot be checked this way.
 
 **Two things read together, one solid, one open.** Upstream's outbound rate
 exactly matching its own inbound rate (both 49.7%) is consistent with OBI

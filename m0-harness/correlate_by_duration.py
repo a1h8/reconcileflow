@@ -52,6 +52,15 @@ warrants. Calls `rules.m2_tolerant()` (the same scoring formula) and
 greedy resolution globally across all windows' pooled candidates in this
 script -- reuses the engine's real scoring/ordering primitives without
 touching `engine.py` itself.
+
+The T figures above were measured before this script read sub-millisecond or
+composite Go durations ("850µs", "1m2.5s"); such events were skipped without
+trace. Their raw logs were not kept and their observed-event counts were not
+recorded, so the figures cannot be re-run or checked. Under profile C, at most
+~0.13% of requests last under 1ms, so a 300-request window has at most a ~32%
+chance of containing one. Because pairing is by rank, one such skip in bucket
+mode costs about one pair per later bucket. Treat the figures as historical,
+not as results of the current script.
 """
 
 from __future__ import annotations
