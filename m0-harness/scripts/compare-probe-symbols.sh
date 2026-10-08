@@ -7,6 +7,12 @@
 # net/http.(*serverHandler).ServeHTTP reportedly never fired on HTTP/2, but
 # the exact command was not recorded. This script records it.
 #
+# Two ServeHTTP symbols exist. (*serverHandler).ServeHTTP is the
+# compiler-generated pointer-receiver wrapper: go tool objdump finds no
+# direct call to it, in HTTP/1 (conn.serve) or HTTP/2 (initALPNRequest).
+# Both call the value method serverHandler.ServeHTTP, which OBI hooks.
+# Measuring both separates "does not fire on HTTP/2" from "never called".
+#
 # Run as your normal user, from m0-harness/:
 #   scripts/compare-probe-symbols.sh
 # Phase 1 (your user) builds every binary and probe.o from the committed
@@ -26,6 +32,7 @@ set -euo pipefail
 # http2DispatchSymbols in cmd/http-signal-probe); phase 1 looks it up in the
 # fake-upstream it built and passes both names to phase 2.
 SERVE_HTTP="net/http.(*serverHandler).ServeHTTP"
+SERVE_HTTP_VALUE="net/http.serverHandler.ServeHTTP"
 N=${N:-2000}
 CONCURRENCY=${CONCURRENCY:-100}
 REPEATS=${REPEATS:-2}
@@ -50,6 +57,9 @@ build() {
 	RUN_HANDLER=$(go tool nm "$RUN_DIR/bin/fake-upstream" |
 		awk '$2 == "T" && $3 ~ /serverConn\)\.runHandler$/ && !found { found = $3 } END { print found }')
 	[[ -n $RUN_HANDLER ]] || die "no HTTP/2 runHandler symbol in the built fake-upstream"
+	go tool nm "$RUN_DIR/bin/fake-upstream" |
+		awk -v s="$SERVE_HTTP_VALUE" '$2 == "T" && $3 == s { found = 1 } END { exit !found }' ||
+		die "no $SERVE_HTTP_VALUE in the built fake-upstream"
 
 	clang -target bpf -D__TARGET_ARCH_x86 -I"$bpf" -I"$bpf/vendor" \
 		-g -O2 -c "$bpf/probe.c" -o "$RUN_DIR/bin/probe.o"
@@ -61,7 +71,7 @@ build() {
 		echo "clang: $(clang --version | head -1)"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "N=$N CONCURRENCY=$CONCURRENCY REPEATS=$REPEATS"
-		echo "symbols: $RUN_HANDLER | $SERVE_HTTP"
+		echo "symbols: $RUN_HANDLER | $SERVE_HTTP | $SERVE_HTTP_VALUE"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
@@ -126,7 +136,7 @@ measure() {
 		tee "$RUN_DIR/results.tsv"
 	[[ -n ${RUN_HANDLER:-} ]] || die "RUN_HANDLER unset: start from phase 1"
 	local i=0
-	for symbol in "$RUN_HANDLER" "$SERVE_HTTP"; do
+	for symbol in "$RUN_HANDLER" "$SERVE_HTTP" "$SERVE_HTTP_VALUE"; do
 		i=$((i + 1))
 		cell "$RUN_DIR/s$i-negative" "$symbol" 0
 		for r in $(seq 1 "$REPEATS"); do

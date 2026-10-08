@@ -1395,10 +1395,34 @@ your normal user; it builds everything, records a manifest of hashes and
 versions, then calls `sudo` itself) measures both symbols under identical
 conditions: a no-traffic negative control and two independent cells of
 2000 HTTP/2 requests each, counting only events from each cell's own
-`fake-upstream` PID. Its orchestration was checked against a stub probe;
-the real measurement is still to be run. A test now checks the default is a function symbol in a
+`fake-upstream` PID. Its orchestration was checked against a stub probe.
+A test now checks the default is a function symbol in a
 freshly built `fake-upstream`, since that internal package path has moved
 between Go releases.
+
+**First CI run (2026-10-08, Go 1.22.12, kernel 6.17, run 37833527155).**
+Negative controls recorded 0 events and no ring-buffer reserve failed.
+`runHandler` recorded 2003 and 2000 events for 2 × 2000 successful HTTP/2
+requests; `(*serverHandler).ServeHTTP` recorded 0 in both cells. So
+`runHandler` fires about once per HTTP/2 request, re-confirming the
+2026-09-25 choice with a recorded command and manifest. The 3 extra events
+are unexplained: `load-gen` and `fake-upstream` both logged exactly 2000
+requests, and their timing does not single them out. One untested candidate
+is a stack-growth restart re-executing the probed entry instruction; until
+that is ruled out, treat `runHandler` counts as an upper bound on requests,
+not an exact one-to-one count.
+
+**The ServeHTTP zero does not show what it was read as.** Disassembling that
+run's own `fake-upstream` (`go tool objdump`) finds no direct call to
+`(*serverHandler).ServeHTTP`, a compiler-generated pointer-receiver wrapper,
+in either protocol: HTTP/1's `conn.serve` and HTTP/2's
+`initALPNRequest.ServeHTTP` both call the value method
+`serverHandler.ServeHTTP`, the one OBI hooks. The zero therefore says nothing
+specific to HTTP/2, and the claim above that this symbol "only fires for
+HTTP/1.1" is unsupported. The script now also probes
+`serverHandler.ServeHTTP`; the prediction, recorded before that run, is about
+one event per HTTP/2 request. Until it runs, this is a reading of machine
+code, not a measurement.
 
 **"events recorded" could overstate what was written.** The loop counted
 each event before writing it and discarded the write error, and skipped
