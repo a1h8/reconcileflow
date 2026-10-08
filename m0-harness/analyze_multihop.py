@@ -47,8 +47,19 @@ def analyze(lines: list[str], ground_truth: set[str]) -> dict[tuple[str, str, st
     return counts
 
 
-if __name__ == "__main__":
-    obi_log, gt_jsonl, start, end = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+def count_unparsed(lines: list[str]) -> int:
+    """HTTP/HTTPClient events OBI_LINE cannot read: an empty route, method or
+    traceparent is valid printer output but does not match. They would
+    otherwise vanish from the denominator instead of invalidating the run."""
+    return sum(
+        1
+        for line in lines
+        if ("HTTP(subType=" in line or "HTTPClient(subType=" in line) and not OBI_LINE.match(line)
+    )
+
+
+def main(argv: list[str]) -> int:
+    obi_log, gt_jsonl, start, end = argv[0], argv[1], int(argv[2]), int(argv[3])
     with open(obi_log) as f:
         lines = f.readlines()[start:end]
     gt = load_ground_truth(gt_jsonl)
@@ -57,3 +68,12 @@ if __name__ == "__main__":
     for (svc, event, dest), (total, bad) in sorted(counts.items(), key=lambda kv: -kv[1][0]):
         pct = 100 * bad / total if total else 0
         print(f"{svc:10s} {event:12s} -> {dest:22s} total={total:5d} self_authored={bad:5d} ({pct:.1f}%)")
+    unparsed = count_unparsed(lines)
+    if unparsed:
+        print(f"INVALID: {unparsed} HTTP/HTTPClient lines not parsed", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

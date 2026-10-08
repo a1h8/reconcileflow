@@ -1098,6 +1098,13 @@ the first regex cut `traceparent=[...]` off at its first `]`, not realizing
 the field itself contains a nested bracket (the parent-id's flags suffix),
 truncating every trace_id and reporting 100% self-authored on a hand-verified
 correct run — caught immediately because 100% was implausible, not left in.
+A quieter gap was found later, by testing against OBI's own golden printer
+line rather than hand-written fixtures: an `HTTP`/`HTTPClient` line with an
+empty route, method or `traceparent` is valid printer output but does not
+match the regex, and was skipped without trace, leaving the denominator
+instead of invalidating the run. The script now counts such lines and exits 1.
+The table below predates that check: it assumes none were present in its
+windows, which was not verified at the time.
 
 Five levels, `c` = 2/5/10/20/50, held at `n=300` each, load-gen through
 Traefik → `fake-upstream`, one continuous OBI session (never restarted; OBI's
