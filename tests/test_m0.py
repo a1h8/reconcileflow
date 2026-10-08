@@ -108,7 +108,7 @@ def test_irrelevant_metric_near_its_threshold_is_not_borderline():
 
 
 def test_metrics_reject_non_fractions():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"d_acc must be a fraction"):
         metrics(d_acc="99")
 
 
@@ -140,16 +140,16 @@ def test_capture_failure_cannot_exceed_the_unresolved_zone():
 
 
 def test_thresholds_reject_out_of_range_fraction():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"q_acceptable_min must be a fraction"):
         Thresholds(q_acceptable_min=D("-1"))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"d_min must be a fraction"):
         Thresholds(q_acceptable_min=D("0.90"), d_min=D("-1"))
 
 
 def test_thresholds_reject_zero_or_negative_band():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"borderline_band must be a positive fraction"):
         Thresholds(q_acceptable_min=D("0.90"), borderline_band=D("0"))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"borderline_band must be a positive fraction"):
         Thresholds(q_acceptable_min=D("0.90"), borderline_band=D("-0.02"))
 
 
@@ -160,7 +160,7 @@ def test_run_001_itself_still_constructs_cleanly():
 def test_bad_q_acceptable_min_can_no_longer_launder_a_catastrophic_ranking():
     """Before PI-12: q_acceptable_min=-1 turned a Q=1.2% ranking into a
     clean A. Now construction itself is rejected."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"q_acceptable_min must be a fraction"):
         Thresholds(q_acceptable_min=D("-1"))
 
 
@@ -171,7 +171,7 @@ def test_thresholds_reject_zero_r_min():
     """r_min=0 is individually a legal fraction in [0, 1] (PI-12's original
     check), but _q() divides by r whenever r >= r_min -- only safe if r_min
     itself is > 0."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"r_min must be a positive fraction"):
         Thresholds(q_acceptable_min=D("0.90"), r_min=D("0"))
 
 
@@ -183,22 +183,22 @@ def test_run_001_r_min_still_constructs_cleanly():
 
 
 def test_metrics_rejects_n_below_minimum():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"below the minimum sample size"):
         metrics(n=MIN_SAMPLE_SIZE - 1)
 
 
 def test_metrics_rejects_n_residual_below_minimum():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"n_residual \(\d+\) is below the minimum"):
         metrics(r="0.9", t="0.8", n_residual=MIN_RESIDUAL_SAMPLE_SIZE - 1)
 
 
 def test_metrics_rejects_n_residual_set_without_correlator():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"n_residual must be set iff"):
         metrics(r=None, t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
 def test_metrics_rejects_missing_n_residual_when_correlator_measured():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"n_residual must be set iff"):
         metrics(r="0.9", t="0.8", n_residual=None)
 
 
@@ -206,7 +206,7 @@ def test_single_lucky_request_can_no_longer_fire_the_strongest_verdict():
     """Before PI-16: d_cov=1, d_acc=1 from a single request (n=1) produced
     Attribution.A, the protocol's strongest verdict, with zero statistical
     basis. Now construction itself is rejected."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"n \(1\) is below the minimum sample size"):
         metrics(n=1)
 
 
@@ -216,7 +216,7 @@ def test_single_lucky_request_can_no_longer_fire_the_strongest_verdict():
 def test_metrics_rejects_an_unachievable_d_cov():
     """0.12345 * 10000 = 1234.5 "correct" requests -- not an integer, so
     this ratio could not have come from any real run."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"d_cov \(0\.12345\) is not achievable"):
         metrics(d_cov="0.12345", n=MIN_SAMPLE_SIZE)
 
 
@@ -242,7 +242,7 @@ def test_metrics_rejects_d_acc_unachievable_against_its_d_cov_count():
 
 
 def test_metrics_rejects_an_unachievable_r():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"r \(0\.33333\) is not achievable"):
         metrics(r="0.33333", t="0.1", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
@@ -250,12 +250,12 @@ def test_metrics_rejects_an_unachievable_r():
 
 
 def test_metrics_rejects_r_set_with_t_none():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"r and t must both be measured"):
         metrics(r="0.9", t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
 def test_metrics_rejects_t_set_with_r_none():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"r and t must both be measured"):
         metrics(r=None, t="0.9", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
@@ -270,7 +270,7 @@ def test_metrics_accepts_both_none_or_both_measured():
 def test_t_greater_than_r_is_rejected():
     """A correct top1 pick is, by construction, inside the candidate set R
     counts -- T > R can only come from a measurement bug."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"cannot exceed r"):
         metrics(r="0.85", t="0.95")
 
 
