@@ -387,6 +387,54 @@ def test_a_is_not_borderline_via_impossible_r_perturbation():
     assert result.attribution is Attribution.A
 
 
+
+# --- thresholds are inclusive, read on `nominal` --------------------------
+# At a threshold `attribution` is BORDERLINE whichever way the comparison
+# goes; only `nominal` shows which side the point estimate falls on.
+
+
+def test_capture_failure_exactly_at_its_maximum_is_still_valid():
+    assert decide(metrics(capture="0.01", coverage="0.99"), TH).run is RunStatus.VALID
+
+
+def test_truth_coverage_exactly_at_its_minimum_is_valid():
+    assert decide(metrics(coverage="0.95"), TH).run is RunStatus.VALID
+
+
+@pytest.mark.parametrize(
+    "kw,expected",
+    [
+        # D_acc exactly at 99%: still the A branch.
+        ({"d_acc": "0.99"}, Attribution.A),
+        # Q = T / R exactly at q_acceptable_min (90%).
+        ({"d_acc": "0.995", "r": "1", "t": "0.9"}, Attribution.A),
+        # R exactly at r_min: Q is defined (Q = 1 here).
+        ({"d_acc": "0.995", "r": "0.8", "t": "0.8"}, Attribution.A),
+        # R exactly at r_min in the F > 5% branch: not NEEDS_DIFFERENT_MECHANISM.
+        ({"d_cov": "0.9", "r": "0.8", "t": "0.5"}, Attribution.B_HYBRID),
+        # E = 0.5 + 0.5 * 0.8 exactly at e_min.
+        ({"d_cov": "0.5", "r": "1", "t": "0.8"}, Attribution.B_HYBRID),
+    ],
+    ids=["d_acc", "q", "q-defined-at-r_min", "r", "e"],
+)
+def test_decision_thresholds_are_inclusive(kw, expected):
+    assert decide(metrics(**kw), TH).nominal is expected
+
+
+def test_thresholds_accept_both_ends_of_their_range():
+    """[0, 1] for plain fractions, (0, 1] for r_min and the bands."""
+    Thresholds(q_acceptable_min=D("0"), d_min=D("1"), r_min=D("1"), borderline_band=D("1"))
+
+
+def test_skipping_an_impossible_perturbation_still_checks_the_other_side():
+    """r=0.79, t=0.78: moving r down by 2 points gives t > r, impossible
+    (PI-15), so it is skipped. Moving r up to 0.81 is possible and turns
+    NEEDS_DIFFERENT_MECHANISM into B_HYBRID (E = 0.6 + 0.4 * 0.78 = 0.912):
+    that alone must make the run BORDERLINE."""
+    result = decide(metrics(d_cov="0.6", r="0.79", t="0.78"), TH)
+    assert result.nominal is Attribution.NEEDS_DIFFERENT_MECHANISM
+    assert result.attribution is Attribution.BORDERLINE
+
 def rep(value, ops=10_000):
     return Repetition({"d": D(value)}, ops)
 
