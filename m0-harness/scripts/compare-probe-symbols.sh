@@ -45,8 +45,10 @@ build() {
 	for f in "$bpf/vmlinux.h" "$bpf/vendor/bpf/bpf_helpers.h"; do
 		[[ -f $f ]] || die "missing $f -- see README \"Building\" (same steps, http-signal-probe paths)"
 	done
+	# awk reads all of nm's output: exiting early would SIGPIPE nm and fail
+	# the pipeline under pipefail.
 	RUN_HANDLER=$(go tool nm "$RUN_DIR/bin/fake-upstream" |
-		awk '$2 == "T" && $3 ~ /serverConn\)\.runHandler$/ { print $3; exit }')
+		awk '$2 == "T" && $3 ~ /serverConn\)\.runHandler$/ && !found { found = $3 } END { print found }')
 	[[ -n $RUN_HANDLER ]] || die "no HTTP/2 runHandler symbol in the built fake-upstream"
 
 	clang -target bpf -D__TARGET_ARCH_x86 -I"$bpf" -I"$bpf/vendor" \
