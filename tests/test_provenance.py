@@ -2,7 +2,7 @@
 
 import sqlite3
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -200,3 +200,59 @@ def test_changed_canonical_and_run_are_detected(tmp_path):
         db.execute("UPDATE reconciliation_runs SET data='{}'")
     with ProvenanceStore(path) as store, pytest.raises(ValueError, match="integrity"):
         store.run(run.run_id)
+
+
+@pytest.mark.parametrize(
+    "fields,reason",
+    [
+        ({"account": ""}, "nonempty"),
+        ({"value_date": datetime(2026, 9, 28, tzinfo=UTC)}, "without time"),
+        ({"amount": Decimal("NaN")}, "finite Decimal"),
+        ({"amount": 100.0}, "finite Decimal"),
+    ],
+)
+def test_canonical_creation_rejects_invalid_fields(fields, reason):
+    valid = {
+        "account": "ACCOUNT",
+        "amount": Decimal("100"),
+        "value_date": date(2026, 9, 28),
+        "currency": "EUR",
+    }
+    with pytest.raises(ValueError, match=reason):
+        CanonicalRecord.create("raw", "/locator", "adapter", "normalizer", **{**valid, **fields})
+
+
+@pytest.mark.parametrize("payload,source", [(PAYLOAD, ""), (PAYLOAD.decode(), "bank")])
+def test_capture_rejects_missing_source_or_non_bytes(tmp_path, payload, source):
+    with ProvenanceStore(tmp_path / "raw.sqlite") as store, pytest.raises(ValueError):
+        store.capture(payload, source=source)
+
+
+def test_unknown_identities_raise_key_error_and_runs_need_an_engine_version(tmp_path):
+    with ProvenanceStore(tmp_path / "raw.sqlite") as store:
+        for lookup in (store.raw_event, store.canonical_record, store.run):
+            with pytest.raises(KeyError):
+                lookup("unknown")
+        with pytest.raises(ValueError, match="engine_version"):
+            store.reconcile([], [], engine_version="")
+
+
+def test_resaving_over_a_tampered_canonical_is_detected(tmp_path):
+    path = tmp_path / "raw.sqlite"
+    with ProvenanceStore(path) as store:
+        records = ingest(store, PAYLOAD, source="bank")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE canonical_records SET data='{}'")
+    with ProvenanceStore(path) as store, pytest.raises(ValueError, match="collision"):
+        store.save_records(records)
+
+
+def test_canonical_moved_to_another_raw_event_is_detected(tmp_path):
+    path = tmp_path / "raw.sqlite"
+    with ProvenanceStore(path) as store:
+        record = ingest(store, PAYLOAD, source="bank")[0]
+        other = store.capture(b"other", source="bank")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE canonical_records SET raw_id=?", (other.raw_event_id,))
+    with ProvenanceStore(path) as store, pytest.raises(ValueError, match="identity mismatch"):
+        store.canonical_record(record.record.id)
