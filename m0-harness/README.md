@@ -965,8 +965,10 @@ construction, regardless of what OBI's specific bug turns out to be?
 **`cmd/http-signal-probe`** tests exactly this, deliberately narrow: a single
 uprobe on `net/http/internal/http2.(*serverConn).runHandler` (Go's HTTP/2
 request-dispatch entry point — not `net/http.(*serverHandler).ServeHTTP`,
-which only fires for HTTP/1.1 and silently never triggers on H2 traffic, a
-real dead-end hit and fixed during this POC), emitting `{pid, timestamp_ns}`
+which never triggered on H2 traffic, a real dead-end hit during this POC;
+see the 2026-10-08 correction below: that symbol is a wrapper nothing calls
+directly, and the value method `serverHandler.ServeHTTP` does fire on
+HTTP/2), emitting `{pid, timestamp_ns}`
 straight to a ring buffer. No map beyond that ring buffer and a drop
 counter. It does not read `traceparent` — decoding a Go `http.Header` map
 from eBPF is the genuinely hard, multi-month part of what OBI does, out of
@@ -1420,9 +1422,26 @@ in either protocol: HTTP/1's `conn.serve` and HTTP/2's
 `serverHandler.ServeHTTP`, the one OBI hooks. The zero therefore says nothing
 specific to HTTP/2, and the claim above that this symbol "only fires for
 HTTP/1.1" is unsupported. The script now also probes
-`serverHandler.ServeHTTP`; the prediction, recorded before that run, is about
-one event per HTTP/2 request. Until it runs, this is a reading of machine
-code, not a measurement.
+`serverHandler.ServeHTTP`; the prediction, recorded before that run, was about
+one event per HTTP/2 request.
+
+**Second CI run (2026-10-08, same versions, run 37834630706): prediction
+confirmed.** For 2 × 2000 successful HTTP/2 requests, with negative controls
+at 0 and no reserve failure:
+
+| symbol | events per cell |
+|---|---|
+| `(*http2serverConn).runHandler` | 2006, 2003 |
+| `(*serverHandler).ServeHTTP` (wrapper) | 0, 0 |
+| `serverHandler.ServeHTTP` (value method) | 2001, 2001 |
+
+Both `runHandler` and the value method fire about once per HTTP/2 request;
+the wrapper never fires. "ServeHTTP does not fire on HTTP/2" was an artefact
+of probing the wrapper. Every cell overcounts slightly (+1 to +6, ≤ 0.3%)
+while `load-gen` and `fake-upstream` each logged exactly 2000 requests; the
+cause is not established, so per-request counts from either symbol are an
+upper bound. HTTP/1 was not measured: `fake-upstream` always negotiates
+HTTP/2.
 
 **"events recorded" could overstate what was written.** The loop counted
 each event before writing it and discarded the write error, and skipped

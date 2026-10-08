@@ -105,7 +105,9 @@ const autoSymbol = "auto"
 // first: Go 1.27 has it under net/http/internal/http2, Go 1.22 still bundles
 // it into net/http (both checked with go tool nm on a built fake-upstream).
 // The 2026-09-25 README result was measured on this entry point because
-// net/http.(*serverHandler).ServeHTTP reportedly never fired on HTTP/2.
+// net/http.(*serverHandler).ServeHTTP never fired on HTTP/2. That symbol is
+// a pointer-receiver wrapper nothing calls directly; the value method
+// serverHandler.ServeHTTP does fire per HTTP/2 request (README, 2026-10-08).
 var http2DispatchSymbols = []string{
 	"net/http/internal/http2.(*serverConn).runHandler",
 	"net/http.(*http2serverConn).runHandler",
