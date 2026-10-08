@@ -51,6 +51,7 @@ def records(draw, prefix: str, max_size: int = 6):
             amount=draw(amounts),
             value_date=draw(value_dates),
             reference=draw(references),
+            currency=draw(st.sampled_from([None, "EUR", "USD"])),
         )
         for i in range(size)
     ]
@@ -269,3 +270,13 @@ def test_distinct_decisions_have_distinct_fingerprints(lefts, rights, tol):
 
     by_fingerprint = {d.fingerprint: d for d in decisions}
     assert len(by_fingerprint) == len(set(decisions))
+
+
+@SETTINGS
+@given(records("L"), records("R"), tolerances)
+def test_matches_never_cross_currencies(lefts, rights, tol):
+    left_by_id = {r.id: r for r in lefts}
+    right_by_id = {r.id: r for r in rights}
+    for match in reconcile(lefts, rights, tol).matches:
+        currency = left_by_id[match.left_id].currency
+        assert all(right_by_id[key].currency == currency for key in match.right_ids)

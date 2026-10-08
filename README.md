@@ -10,9 +10,11 @@ and be able to replay every decision.
 
 ## Status
 
-**Milestone 1 of 5 — matching semantics, in memory.** No streaming, no
-persistent state, no event time, no real data. What is here is tested; what is
-not is listed under [Roadmap](#roadmap).
+**J1 matching semantics implemented; J2 local provenance now available for a narrow
+CAMT.053.001.08 profile.** The engine stays in memory and side-effect free;
+the optional provenance layer stores source bytes, normalised inputs and results
+in SQLite. No streaming or real customer data. See the
+[provenance contract and demo](docs/provenance.md) for supported input and limitations.
 
 ## What it is
 
@@ -103,7 +105,7 @@ match costs vastly more than a reported break.**
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest      # 23 tests: 15 example cases, 8 properties
+.venv/bin/python -m pytest      # engine, property, provenance and harness tests
 .venv/bin/ruff check .
 ```
 
@@ -195,12 +197,14 @@ is ever finished.
 *Done when:* permutation invariance of the inputs is verified by a property
 test. ✔
 
-**J2 — Provenance**
+**J2 — Provenance** · *local entry-level slice implemented*
 `RawEvent` persisted **before** normalisation, payload intact;
 `CanonicalRecord` carrying `adapter_version` and `normalizer_version`. A single
 adapter: **CAMT.053** — ISO 20022, public samples, a format that does not move
-every six months. The adapter contract is documented; the catalogue is not, and
-is not planned.
+every six months. The [adapter contract](docs/provenance.md) limits this first
+implementation to booked entry-level CAMT.053.001.08 records with explicit value
+dates; it does not claim general CAMT support or full XSD validation. The adapter
+catalogue is not planned.
 *Done when:* a matching decision can be traced back to the bytes received from
 the provider, with no gap in the chain.
 

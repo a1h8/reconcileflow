@@ -31,7 +31,8 @@ def blocking_key(record: Record) -> BlockKey:
     window exists: a ±3 day window straddles month boundaries. Finer blocking
     (by amount bucket, say) is a subject in itself — see Splink's blocking.
     """
-    return (record.account,)
+    # Legacy records without a currency stay in their own block. No FX matching.
+    return (record.account,) if record.currency is None else (record.account, record.currency)
 
 
 def _candidate_order(match: Match) -> tuple:
@@ -184,9 +185,7 @@ def reconcile(
     counters["records_left"] = len(left)
     counters["records_right"] = len(right)
 
-    blocks: dict[BlockKey, tuple[list[Record], list[Record]]] = defaultdict(
-        lambda: ([], [])
-    )
+    blocks: dict[BlockKey, tuple[list[Record], list[Record]]] = defaultdict(lambda: ([], []))
     for record in left:
         blocks[blocking_key(record)][0].append(record)
     for record in right:

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture. No customer or bank data. -->
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>LAB-MESSAGE</MsgId><CreDtTm>2026-09-29T00:00:00Z</CreDtTm></GrpHdr>
+    <Stmt>
+      <Id>LAB-STATEMENT</Id>
+      <CreDtTm>2026-09-29T00:00:00Z</CreDtTm>
+      <Acct><Id><Othr><Id>LAB-ACCOUNT</Id></Othr></Id><Ccy>EUR</Ccy></Acct>
+      <Bal>
+        <Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp>
+        <Amt Ccy="EUR">100.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>
+        <Dt><Dt>2026-09-28</Dt></Dt>
+      </Bal>
+      <Ntry>
+        <NtryRef>LAB-ENTRY</NtryRef>
+        <Amt Ccy="EUR">100.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Sts><Cd>BOOK</Cd></Sts>
+        <BookgDt><Dt>2026-09-29</Dt></BookgDt>
+        <ValDt><Dt>2026-09-28</Dt></ValDt>
+        <BkTxCd><Prtry><Cd>LAB-CREDIT</Cd></Prtry></BkTxCd>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>
