@@ -52,6 +52,15 @@ warrants. Calls `rules.m2_tolerant()` (the same scoring formula) and
 greedy resolution globally across all windows' pooled candidates in this
 script -- reuses the engine's real scoring/ordering primitives without
 touching `engine.py` itself.
+
+The T figures above were measured before this script read sub-millisecond or
+composite Go durations ("850µs", "1m2.5s"); such events were skipped without
+trace. Their raw logs were not kept and their observed-event counts were not
+recorded, so the figures cannot be re-run or checked. Under profile C, at most
+~0.13% of requests last under 1ms, so a 300-request window has at most a ~32%
+chance of containing one. Because pairing is by rank, one such skip in bucket
+mode costs about one pair per later bucket. Treat the figures as historical,
+not as results of the current script.
 """
 
 from __future__ import annotations
@@ -69,15 +78,26 @@ from reconcileflow.rules import m2_tolerant
 _PLACEHOLDER_DATE = date(2000, 1, 1)
 
 OBI_LINE = re.compile(
-    r"^\S+ \S+ \((?P<dur>[0-9.]+)(?P<unit>ms|s)\[.*?\) (?P<event>\w+)\(subType=\d+\) "
+    r"^\S+ \S+ \((?P<dur>(?:[0-9.]+(?:ns|µs|us|ms|s|m|h))+)\[.*?\) (?P<event>\w+)\(subType=\d+\) "
     r"(?P<status>\d+) \S+ \S+\(\S*\) \[.*?\]->\[.*?\] .*?svc=\[(?P<svc>\S+) \S+\] "
     r"traceparent=\[\d{2}-(?P<tid>[0-9a-f]{32})-"
 )
 
 
-def _duration_ns(value: str, unit: str) -> int:
-    factor = 1_000_000 if unit == "ms" else 1_000_000_000
-    return int(round(float(value) * factor))
+# OBI prints Go's time.Duration.String(): "850µs", "41.5ms", "1m2.5s".
+_UNIT_NS = {"ns": 1, "µs": 1_000, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
+_UNIT_NS |= {"m": 60 * _UNIT_NS["s"], "h": 3600 * _UNIT_NS["s"]}
+_DURATION_PART = re.compile(r"([0-9.]+)(ns|µs|us|ms|s|m|h)")
+
+
+def _duration_ns(text: str) -> int:
+    return int(sum(Decimal(v) * _UNIT_NS[u] for v, u in _DURATION_PART.findall(text)))
+
+
+def count_unparsed(lines: list[str]) -> int:
+    """HTTP events OBI_LINE cannot read. Pairing is by rank, so each one lost
+    shifts every later observation against its true counterpart."""
+    return sum(1 for line in lines if "HTTP(subType=" in line and not OBI_LINE.match(line))
 
 
 def load_traefik_inbound(obi_log: str, start: int, end: int) -> list[tuple[int, str]]:
@@ -89,7 +109,7 @@ def load_traefik_inbound(obi_log: str, start: int, end: int) -> list[tuple[int, 
         m = OBI_LINE.match(line)
         if not m or m.group("event") != "HTTP" or m.group("svc") != "traefik":
             continue
-        out.append((_duration_ns(m.group("dur"), m.group("unit")), m.group("tid")))
+        out.append((_duration_ns(m.group("dur")), m.group("tid")))
     return out
 
 
@@ -115,7 +135,9 @@ def _sorted_sides(obi_log: str, load_gen_jsonl: str, start: int, end: int):
     return rows, observed
 
 
-def run(obi_log: str, load_gen_jsonl: str, start: int, end: int, tol: Tolerance, bucket: int) -> None:
+def run(
+    obi_log: str, load_gen_jsonl: str, start: int, end: int, tol: Tolerance, bucket: int
+) -> tuple[int, int]:
     rows, observed = _sorted_sides(obi_log, load_gen_jsonl, start, end)
     lefts = [
         Record(
@@ -151,11 +173,12 @@ def run(obi_log: str, load_gen_jsonl: str, start: int, end: int, tol: Tolerance,
         f"correct={correct}/{len(result.matches) if result.matches else 0} "
         f"(T={100 * correct / total_left:.1f}% of all left records)"
     )
+    return len(result.matches), correct
 
 
 def run_sliding(
     obi_log: str, load_gen_jsonl: str, start: int, end: int, tol: Tolerance, window: int
-) -> None:
+) -> tuple[int, int]:
     """Genuine overlapping ±window candidate generation, resolved globally.
 
     Each left record's candidates are the ``2*window+1`` right records nearest
@@ -202,12 +225,13 @@ def run_sliding(
         f"matched={matched}/{total_left} correct={correct}/{matched if matched else 0} "
         f"(T={100 * correct / total_left:.1f}% of all left records)"
     )
+    return matched, correct
 
 
-if __name__ == "__main__":
-    obi_log, load_gen_jsonl, start, end = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
-    mode = sys.argv[5] if len(sys.argv) > 5 else "bucket"
-    param = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+def main(argv: list[str]) -> int:
+    obi_log, load_gen_jsonl, start, end = argv[0], argv[1], int(argv[2]), int(argv[3])
+    mode = argv[4] if len(argv) > 4 else "bucket"
+    param = int(argv[5]) if len(argv) > 5 else 0
     for abs_ns in (500_000, 1_000_000, 2_000_000, 5_000_000):
         # max_aggregate_size=1 disables M3: summing two durations together has
         # no meaning for this domain, unlike summing two amounts for a bundled
@@ -217,3 +241,13 @@ if __name__ == "__main__":
             run_sliding(obi_log, load_gen_jsonl, start, end, tol, param)
         else:
             run(obi_log, load_gen_jsonl, start, end, tol, param)
+    with open(obi_log) as f:
+        unparsed = count_unparsed(f.readlines()[start:end])
+    if unparsed:
+        print(f"INVALID: {unparsed} HTTP lines not parsed", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
