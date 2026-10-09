@@ -104,10 +104,9 @@ def _metric_names(reps: Sequence[Repetition]) -> frozenset[str]:
 
 
 def _worst_sd(reps: Sequence[Repetition]) -> Decimal:
-    return max(
-        Decimal(str(statistics.stdev(float(r.metrics[name]) for r in reps)))
-        for name in _metric_names(reps)
-    )
+    # Decimal in, Decimal out: through float, an SD of exactly MAX_SD landed
+    # on either side of it depending on the mean (PI-21).
+    return max(statistics.stdev(r.metrics[name] for r in reps) for name in _metric_names(reps))
 
 
 def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]) -> Stability:

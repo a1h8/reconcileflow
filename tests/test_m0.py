@@ -478,19 +478,19 @@ def test_repetition_rejects_out_of_range_metric():
     identically across reps would give SD = 0 -- STABLE -- invisible to a
     consistency check precisely because it IS consistent. Reject at
     construction instead."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^metric 'd' must be a fraction in \[0, 1\], got 150$"):
         Repetition({"d": D("150")}, 10_000)
 
 
 def test_repetition_rejects_negative_gt_ops():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^deterministic_gt_ops cannot be negative$"):
         Repetition({"d": D("0.96")}, -5)
 
 
 def test_bad_repeated_metric_can_no_longer_launder_a_fake_stable():
     """Before PI-13: five reps agreeing on d=150 reported STABLE. Now
     construction itself is rejected."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^metric 'd' must be a fraction"):
         [Repetition({"d": D("150")}, 10_000) for _ in range(5)]
 
 
@@ -500,12 +500,48 @@ def test_bad_repeated_metric_can_no_longer_launder_a_fake_stable():
 def test_repetition_rejects_an_unachievable_metric():
     """0.33333 * 10_000 = 3333.3 -- not an integer, so this ratio could not
     have come from any real repetition with 10,000 deterministic GT ops."""
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"^metric 'd' \(0\.33333\) is not achievable as k/deterministic_gt_ops=10000$",
+    ):
         Repetition({"d": D("0.33333")}, 10_000)
 
 
 def test_repetition_accepts_an_achievable_metric():
     Repetition({"d": D("0.9601")}, 10_000)
+
+
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_repetition_accepts_both_ends_of_a_fraction(value):
+    Repetition({"d": D(value)}, 10_000)
+
+
+def test_repetition_accepts_zero_gt_ops():
+    """Zero is not negative; the gate turns it into INSUFFICIENT later."""
+    Repetition({"d": D("0")}, 0)
+
+
+# --- PI-21: the SD limit is inclusive and computed without float noise -----
+
+
+def spread(mean, half_range="0.015"):
+    """Five reps whose sample SD is exactly ``half_range``: two at each end,
+    one at the mean, so the variance is 4h^2 / (5 - 1) = h^2."""
+    m, h = D(mean), D(half_range)
+    return [rep(v) for v in (m - h, m - h, m, m + h, m + h)]
+
+
+@pytest.mark.parametrize("mean", ["0.90", "0.95"])
+def test_sd_exactly_at_the_limit_is_stable(mean):
+    """Around 0.90 a float SD came out at 0.015000000000000013, around 0.95 at
+    0.014999999999999958: the same spread got opposite verdicts."""
+    assert assess(spread(mean), STEADY) is Stability.STABLE
+    assert assess(STEADY, spread(mean)) is Stability.STABLE
+
+
+def test_sd_just_over_the_limit_is_not_stable():
+    assert assess(spread("0.90", "0.0151"), STEADY) is Stability.EXTEND_TO_10
+    assert assess(STEADY, spread("0.90", "0.0151")) is Stability.STABLE_LOAD_SENSITIVE
 
 
 # --- PI-9: stability gate must not trust reps[0] for which metrics exist --
@@ -521,7 +557,10 @@ def test_metric_missing_from_first_rep_is_rejected_not_silently_stable():
         Repetition({"d": D("0.96"), "r": D("0.20")}, 10_000),
         Repetition({"d": D("0.96"), "r": D("0.95")}, 10_000),
     ]
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"^all repetitions in a group must track the same metrics, got \['d'\] vs \['d', 'r'\]$",
+    ):
         assess(reps, reps)
 
 
@@ -529,20 +568,28 @@ def test_extra_metric_in_first_rep_is_rejected_clearly():
     reps = [Repetition({"d": D("0.96"), "r": D("0.50")}, 10_000)] + [
         Repetition({"d": D("0.96")}, 10_000) for _ in range(4)
     ]
-    with pytest.raises(ValueError):
+    # reps[0] is the reference the others are compared to, so the message
+    # names its metrics first.
+    with pytest.raises(
+        ValueError,
+        match=r"^all repetitions in a group must track the same metrics, got \['d', 'r'\] vs \['d'\]$",
+    ):
         assess(reps, reps)
 
 
 def test_all_empty_metrics_is_rejected_clearly():
     reps = [Repetition({}, 10_000) for _ in range(5)]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^a repetition's metrics must be nonempty$"):
         assess(reps, reps)
 
 
 def test_fixed_and_variable_groups_must_track_the_same_metrics():
     fixed = STEADY
     variable = [Repetition({"d": D(v), "r": D("0.5")}, 10_000) for v in ("0.96",) * 5]
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"^fixed and variable seed groups must track the same metrics, got \['d'\] vs \['d', 'r'\]$",
+    ):
         assess(fixed, variable)
 
 
