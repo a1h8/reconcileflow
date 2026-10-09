@@ -1,6 +1,6 @@
 """M0 decision rules: one protocol clause per test."""
 
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 
 import pytest
 
@@ -132,7 +132,7 @@ def test_metrics_reject_non_fraction_r():
 def test_capture_failure_cannot_exceed_the_unresolved_zone():
     """Capture failures are a subset of the unresolved attempts: 2% of them
     cannot fit inside a 1% unresolved zone."""
-    with pytest.raises(ValueError, match="cannot exceed the unresolved zone"):
+    with pytest.raises(ValueError, match=r"^oracle_capture_failure cannot exceed the unresolved zone$"):
         metrics(coverage="0.99", capture="0.02")
 
 
@@ -193,12 +193,12 @@ def test_metrics_rejects_n_residual_below_minimum():
 
 
 def test_metrics_rejects_n_residual_set_without_correlator():
-    with pytest.raises(ValueError, match=r"n_residual must be set iff"):
+    with pytest.raises(ValueError, match=r"^n_residual must be set iff r/t are measured$"):
         metrics(r=None, t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
 def test_metrics_rejects_missing_n_residual_when_correlator_measured():
-    with pytest.raises(ValueError, match=r"n_residual must be set iff"):
+    with pytest.raises(ValueError, match=r"^n_residual must be set iff r/t are measured$"):
         metrics(r="0.9", t="0.8", n_residual=None)
 
 
@@ -243,6 +243,15 @@ def test_d_cov_implied_count_rounds_half_even_whatever_the_callers_context():
         metrics(d_cov="0.25", d_acc="0.000400000", n=10002, r=None, t=None)
 
 
+def test_verdict_does_not_depend_on_the_callers_precision():
+    """Rounded to three digits, the perturbed points behind BORDERLINE move:
+    the verdict flipped to B_HYBRID before decide() owned its context."""
+    m = metrics(d_cov="0.98", d_acc="0.7", r="1", t="0.7")
+    with localcontext(Context(prec=3)):
+        assert decide(m, TH).attribution is Attribution.BORDERLINE
+    assert decide(m, TH).attribution is Attribution.BORDERLINE
+
+
 def test_metrics_rejects_d_acc_unachievable_against_its_d_cov_count():
     """D_acc's denominator is the D_cov-implied count (5000 here), not n:
     0.3333 * 5000 = 1666.5 correct attempts, which no real run produces."""
@@ -259,12 +268,12 @@ def test_metrics_rejects_an_unachievable_r():
 
 
 def test_metrics_rejects_r_set_with_t_none():
-    with pytest.raises(ValueError, match=r"r and t must both be measured"):
+    with pytest.raises(ValueError, match=r"^r and t must both be measured or both be None$"):
         metrics(r="0.9", t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
 def test_metrics_rejects_t_set_with_r_none():
-    with pytest.raises(ValueError, match=r"r and t must both be measured"):
+    with pytest.raises(ValueError, match=r"^r and t must both be measured or both be None$"):
         metrics(r=None, t="0.9", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 

@@ -551,8 +551,9 @@ FOREIGN_CONTEXTS = [
     Context(rounding=ROUND_HALF_UP),
     Context(rounding=ROUND_CEILING),
     Context(prec=3),
+    Context(prec=2),
 ]
-FOREIGN_CONTEXT_IDS = ["ROUND_DOWN", "ROUND_HALF_UP", "ROUND_CEILING", "prec=3"]
+FOREIGN_CONTEXT_IDS = ["ROUND_DOWN", "ROUND_HALF_UP", "ROUND_CEILING", "prec=3", "prec=2"]
 
 
 def _in_context(context, build):
