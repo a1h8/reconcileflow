@@ -5,10 +5,10 @@ from __future__ import annotations
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from enum import Enum
 
-from reconcileflow.numeric import in_engine_context
+from reconcileflow.numeric import ENGINE_CONTEXT
 
 MIN_REPS = 5
 EXTENDED_REPS = 10
@@ -58,8 +58,11 @@ class Repetition:
     metrics: Mapping[str, Decimal]  # decision metrics, as fractions
     deterministic_gt_ops: int
 
-    @in_engine_context
     def __post_init__(self) -> None:
+        with localcontext(ENGINE_CONTEXT):
+            self._validate()
+
+    def _validate(self) -> None:
         # Same scrutiny Metrics and Thresholds already apply (PI-12, PI-13):
         # a systematic error -- the same wrong value every repetition --
         # gives SD = 0 and a confident STABLE verdict, invisible to a check
@@ -107,7 +110,6 @@ def _worst_sd(reps: Sequence[Repetition]) -> Decimal:
     )
 
 
-@in_engine_context
 def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]) -> Stability:
     """Between-run SD, decomposed by seed policy.
 
@@ -116,6 +118,11 @@ def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]
     variable-seed SD over a small fixed-seed SD is a different architectural
     conclusion, not instability.
     """
+    with localcontext(ENGINE_CONTEXT):
+        return _assess(fixed_seed, variable_seed)
+
+
+def _assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]) -> Stability:
     groups = (fixed_seed, variable_seed)
     if any(len(g) < MIN_REPS for g in groups) or any(
         r.deterministic_gt_ops < MIN_GT_OPS_PER_REP for g in groups for r in g

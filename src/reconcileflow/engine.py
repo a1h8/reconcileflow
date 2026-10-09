@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Sequence
+from decimal import localcontext
 
 from .models import Match, MatchResult, Record, Reject, RejectReason, RuleId, Tolerance
-from .numeric import in_engine_context
+from .numeric import ENGINE_CONTEXT
 from .rules import GENERATORS, amount_tolerance
 
 BlockKey = tuple[str, ...]
@@ -169,7 +170,6 @@ def _audit_unmatched(
             counters["unmatched_right"] += 1
 
 
-@in_engine_context
 def reconcile(
     left: Sequence[Record],
     right: Sequence[Record],
@@ -181,6 +181,15 @@ def reconcile(
     logs nothing, knows nothing about the network: the caller decides what to
     do with the audit trail and the metrics.
     """
+    with localcontext(ENGINE_CONTEXT):
+        return _reconcile(left, right, tol)
+
+
+def _reconcile(
+    left: Sequence[Record],
+    right: Sequence[Record],
+    tol: Tolerance | None = None,
+) -> MatchResult:
     tol = tol or Tolerance()
 
     counters: Counter = Counter()

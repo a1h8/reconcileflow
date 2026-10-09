@@ -48,6 +48,11 @@ Entry points, entered with `localcontext(ENGINE_CONTEXT)`:
 | `m0.attribution` | `Thresholds.__post_init__`, `Metrics.__post_init__`, `gate0`, `decide` |
 | `m0.stability` | `Repetition.__post_init__`, `assess` |
 
+Each entry point opens the context and delegates to an undecorated private
+function (`reconcile` → `_reconcile`, `__post_init__` → `_validate`, ...).
+Not a decorator: mutmut skips decorated functions entirely, so a decorator
+would silently take every entry point out of mutation testing.
+
 Private helpers (`_score`, `_achievable`, `_q`, ...) do not open their own
 context: they run inside the one their entry point opened. Explicit `rounding=`
 arguments already in the code stay; they are harmless and document intent.
