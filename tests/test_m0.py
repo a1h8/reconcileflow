@@ -1,6 +1,6 @@
 """M0 decision rules: one protocol clause per test."""
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 import pytest
 
@@ -232,6 +232,15 @@ def test_d_cov_zero_leaves_d_acc_unconstrained():
     check D_acc against -- vacuously accepted regardless of D_acc's value,
     the same reasoning PI-6 applies when the residual itself is empty."""
     metrics(d_cov="0", d_acc="0.5", r=None, t=None)
+
+
+def test_d_cov_implied_count_rounds_half_even_whatever_the_callers_context():
+    """0.25 * 10002 = 2500.5: half-even gives 2500, so d_acc = 1/2500 to
+    nine places is achievable. Rounding half-up would give 2501, where 1/2501
+    is 0.000399840 -- a verdict must not hinge on the caller's context."""
+    with localcontext() as ctx:
+        ctx.rounding = ROUND_HALF_UP
+        metrics(d_cov="0.25", d_acc="0.000400000", n=10002, r=None, t=None)
 
 
 def test_metrics_rejects_d_acc_unachievable_against_its_d_cov_count():

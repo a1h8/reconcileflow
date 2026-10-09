@@ -1,7 +1,7 @@
 """Example cases: one business intent per test."""
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal, localcontext
 
 import pytest
 
@@ -149,6 +149,25 @@ def test_rule_priority():
     by_left = {m.left_id: m for m in result.matches}
     assert by_left["L1"].rule is RuleId.M0_REFERENCE
     assert by_left["L1"].right_ids == ("R2",)
+
+
+@pytest.mark.parametrize("rounding", [None, ROUND_DOWN])
+def test_score_does_not_depend_on_the_callers_decimal_context(rounding):
+    """0.8 - 0.05 * 0.10/0.30 - 0.05 * 1/3 = 0.7666..., rounded half-even.
+
+    Same bytes on every run means the same bytes whatever rounding mode the
+    caller left in its own context.
+    """
+    with localcontext() as ctx:
+        if rounding is not None:
+            ctx.rounding = rounding
+        result = reconcile(
+            [rec("L1", "100.00", 1)],
+            [rec("R1", "100.10", 2)],
+            Tolerance(amount_abs=D("0.30"), date_days=3, max_aggregate_size=1),
+        )
+
+    assert result.matches[0].score == D("0.766667")
 
 
 def test_disjoint_blocks_do_not_mix():
