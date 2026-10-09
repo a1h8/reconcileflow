@@ -43,3 +43,7 @@ data/
 .jbeval/
 docs/target/positionnement.md
 docs/target/*
+
+# mutmut working copy and report (docs/mutation-testing.md)
+mutants/
+mutation-report.txt
