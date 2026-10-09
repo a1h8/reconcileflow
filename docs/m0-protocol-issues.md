@@ -383,3 +383,24 @@ tracked independently" shape as PI-9/PI-15/PI-17/PI-18/PI-19.
 `borderline_band`/`d_acc_band`: `Thresholds.__post_init__` now requires `0 < r_min <= 1`.
 `RUN_001`'s value (`0.80`) is unaffected. Implemented in `attribution.py`; tests in
 `tests/test_m0.py`. Full working notes: `docs/target/m0-pi20-r-min-zero-divides-by-zero.md`.
+
+## PI-21: float standard deviation misjudges the stability boundary (RESOLVED)
+
+**Symptom.** Five repetitions `0.885, 0.885, 0.900, 0.915, 0.915` have a between-run SD of
+exactly `0.015` -- the protocol's limit, "SD <= 1.5 points" (§ stability gate) -- yet
+`assess()` returned `EXTEND_TO_10` for them as the fixed-seed group, and
+`STABLE_LOAD_SENSITIVE` as the variable-seed group. The same spread around `0.95` returned
+`STABLE`. Identical SD, different verdict, depending only on the mean.
+
+**Cause.** `_worst_sd` converted every ratio to `float` before `statistics.stdev`, then back
+through `str()`. Binary floating point cannot represent these ratios exactly: the computed SD
+was `0.015000000000000013` around `0.90` and `0.014999999999999958` around `0.95`, landing on
+either side of `MAX_SD`. Found by mutation testing: `> MAX_SD` mutated to `>= MAX_SD` survived
+because no test could place an SD exactly on the boundary -- the float path made that
+boundary unreachable.
+
+**Decision (2026-10-09).** `statistics.stdev` runs on the `Decimal` ratios directly, under the
+library-owned decimal context (`docs/decimal-context.md`), so the SD of decimal inputs is
+computed in decimal arithmetic and the inclusive limit means what the protocol says. Published
+figures are unaffected: the recorded Gate stabilité run has SD `0.0` on both seed policies.
+Implemented in `stability.py`; tests in `tests/test_m0.py`.

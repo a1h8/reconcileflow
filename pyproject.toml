@@ -11,6 +11,9 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "coverage>=7.6"]
+# Pinned exactly: survivors and their ids depend on mutmut's operators, and
+# tools/mutation_check.py reads its internal diff helper.
+mutation = ["mutmut==3.8.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -33,6 +36,21 @@ precision = 1
 # A floor, not a target: raise it whenever coverage rises, never lower it to
 # make a change pass.
 fail_under = 98.9
+
+# docs/mutation-testing.md: run `mutmut run`, then `python tools/mutation_check.py`.
+[tool.mutmut]
+source_paths = [
+    "src/reconcileflow/rules.py",
+    "src/reconcileflow/engine.py",
+    "src/reconcileflow/m0/attribution.py",
+    "src/reconcileflow/m0/stability.py",
+]
+pytest_add_cli_args_test_selection = ["tests/"]
+# A fixed seed: property tests then kill the same mutants on every run.
+pytest_add_cli_args = ["-p", "no:cacheprovider", "--hypothesis-seed=0"]
+# src/ too: mutmut copies only source_paths, and the tests import the rest of
+# the package (adapters, models, provenance).
+also_copy = ["src/", "m0-harness/", "examples/"]
 
 [tool.ruff]
 src = ["src", "tests"]

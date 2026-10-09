@@ -5,8 +5,10 @@ from __future__ import annotations
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from enum import Enum
+
+from reconcileflow.numeric import ENGINE_CONTEXT
 
 MIN_REPS = 5
 EXTENDED_REPS = 10
@@ -57,6 +59,10 @@ class Repetition:
     deterministic_gt_ops: int
 
     def __post_init__(self) -> None:
+        with localcontext(ENGINE_CONTEXT):
+            self._validate()
+
+    def _validate(self) -> None:
         # Same scrutiny Metrics and Thresholds already apply (PI-12, PI-13):
         # a systematic error -- the same wrong value every repetition --
         # gives SD = 0 and a confident STABLE verdict, invisible to a check
@@ -98,10 +104,9 @@ def _metric_names(reps: Sequence[Repetition]) -> frozenset[str]:
 
 
 def _worst_sd(reps: Sequence[Repetition]) -> Decimal:
-    return max(
-        Decimal(str(statistics.stdev(float(r.metrics[name]) for r in reps)))
-        for name in _metric_names(reps)
-    )
+    # Decimal in, Decimal out: through float, an SD of exactly MAX_SD landed
+    # on either side of it depending on the mean (PI-21).
+    return max(statistics.stdev(r.metrics[name] for r in reps) for name in _metric_names(reps))
 
 
 def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]) -> Stability:
@@ -112,6 +117,11 @@ def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]
     variable-seed SD over a small fixed-seed SD is a different architectural
     conclusion, not instability.
     """
+    with localcontext(ENGINE_CONTEXT):
+        return _assess(fixed_seed, variable_seed)
+
+
+def _assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]) -> Stability:
     groups = (fixed_seed, variable_seed)
     if any(len(g) < MIN_REPS for g in groups) or any(
         r.deterministic_gt_ops < MIN_GT_OPS_PER_REP for g in groups for r in g

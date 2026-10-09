@@ -12,10 +12,11 @@ borderline band is an inclusive comparison, and binary floats would misplace
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from enum import Enum
 
 from reconcileflow.m0.stability import MIN_GT_OPS_PER_REP, _achievable
+from reconcileflow.numeric import ENGINE_CONTEXT
 
 _ONE = Decimal(1)
 _ZERO = Decimal(0)
@@ -73,6 +74,10 @@ class Thresholds:
     d_acc_band: Decimal = Decimal("0.005")
 
     def __post_init__(self) -> None:
+        with localcontext(ENGINE_CONTEXT):
+            self._validate()
+
+    def _validate(self) -> None:
         # Metrics validates its own fields; this is the same scrutiny applied
         # to the configuration side -- a pre-registered threshold is at least
         # as consequential as a bad measurement if it's wrong (PI-12).
@@ -121,6 +126,10 @@ class Metrics:
     n_residual: int | None  # residual attempts behind r/t; None iff r/t are None
 
     def __post_init__(self) -> None:
+        with localcontext(ENGINE_CONTEXT):
+            self._validate()
+
+    def _validate(self) -> None:
         for name in ("d_cov", "d_acc", "truth_coverage", "oracle_capture_failure"):
             if not _ZERO <= getattr(self, name) <= _ONE:
                 raise ValueError(f"{name} must be a fraction in [0, 1]")
@@ -202,6 +211,11 @@ def _q(r: Decimal, t: Decimal, th: Thresholds) -> Decimal | None:
 
 
 def gate0(m: Metrics, th: Thresholds) -> RunStatus:
+    with localcontext(ENGINE_CONTEXT):
+        return _gate0(m, th)
+
+
+def _gate0(m: Metrics, th: Thresholds) -> RunStatus:
     if m.oracle_capture_failure > th.capture_failure_max:
         return RunStatus.NULL
     if m.truth_coverage < th.truth_coverage_min:
@@ -280,6 +294,11 @@ def decide(m: Metrics, th: Thresholds) -> Decision:
     by comparing each metric to its own threshold, so a metric that cannot
     change the outcome (E when D already clears 95%) does not trigger it.
     """
+    with localcontext(ENGINE_CONTEXT):
+        return _decide(m, th)
+
+
+def _decide(m: Metrics, th: Thresholds) -> Decision:
     status = gate0(m, th)
     if status is not RunStatus.VALID:
         return Decision(status, None, None, False)

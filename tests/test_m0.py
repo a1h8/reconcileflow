@@ -1,6 +1,6 @@
 """M0 decision rules: one protocol clause per test."""
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 
 import pytest
 
@@ -132,7 +132,7 @@ def test_metrics_reject_non_fraction_r():
 def test_capture_failure_cannot_exceed_the_unresolved_zone():
     """Capture failures are a subset of the unresolved attempts: 2% of them
     cannot fit inside a 1% unresolved zone."""
-    with pytest.raises(ValueError, match="cannot exceed the unresolved zone"):
+    with pytest.raises(ValueError, match=r"^oracle_capture_failure cannot exceed the unresolved zone$"):
         metrics(coverage="0.99", capture="0.02")
 
 
@@ -193,12 +193,12 @@ def test_metrics_rejects_n_residual_below_minimum():
 
 
 def test_metrics_rejects_n_residual_set_without_correlator():
-    with pytest.raises(ValueError, match=r"n_residual must be set iff"):
+    with pytest.raises(ValueError, match=r"^n_residual must be set iff r/t are measured$"):
         metrics(r=None, t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
 def test_metrics_rejects_missing_n_residual_when_correlator_measured():
-    with pytest.raises(ValueError, match=r"n_residual must be set iff"):
+    with pytest.raises(ValueError, match=r"^n_residual must be set iff r/t are measured$"):
         metrics(r="0.9", t="0.8", n_residual=None)
 
 
@@ -234,6 +234,24 @@ def test_d_cov_zero_leaves_d_acc_unconstrained():
     metrics(d_cov="0", d_acc="0.5", r=None, t=None)
 
 
+def test_d_cov_implied_count_rounds_half_even_whatever_the_callers_context():
+    """0.25 * 10002 = 2500.5: half-even gives 2500, so d_acc = 1/2500 to
+    nine places is achievable. Rounding half-up would give 2501, where 1/2501
+    is 0.000399840 -- a verdict must not hinge on the caller's context."""
+    with localcontext() as ctx:
+        ctx.rounding = ROUND_HALF_UP
+        metrics(d_cov="0.25", d_acc="0.000400000", n=10002, r=None, t=None)
+
+
+def test_verdict_does_not_depend_on_the_callers_precision():
+    """Rounded to three digits, the perturbed points behind BORDERLINE move:
+    the verdict flipped to B_HYBRID before decide() owned its context."""
+    m = metrics(d_cov="0.98", d_acc="0.7", r="1", t="0.7")
+    with localcontext(Context(prec=3)):
+        assert decide(m, TH).attribution is Attribution.BORDERLINE
+    assert decide(m, TH).attribution is Attribution.BORDERLINE
+
+
 def test_metrics_rejects_d_acc_unachievable_against_its_d_cov_count():
     """D_acc's denominator is the D_cov-implied count (5000 here), not n:
     0.3333 * 5000 = 1666.5 correct attempts, which no real run produces."""
@@ -250,12 +268,12 @@ def test_metrics_rejects_an_unachievable_r():
 
 
 def test_metrics_rejects_r_set_with_t_none():
-    with pytest.raises(ValueError, match=r"r and t must both be measured"):
+    with pytest.raises(ValueError, match=r"^r and t must both be measured or both be None$"):
         metrics(r="0.9", t=None, n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
 def test_metrics_rejects_t_set_with_r_none():
-    with pytest.raises(ValueError, match=r"r and t must both be measured"):
+    with pytest.raises(ValueError, match=r"^r and t must both be measured or both be None$"):
         metrics(r=None, t="0.9", n_residual=MIN_RESIDUAL_SAMPLE_SIZE)
 
 
@@ -469,19 +487,19 @@ def test_repetition_rejects_out_of_range_metric():
     identically across reps would give SD = 0 -- STABLE -- invisible to a
     consistency check precisely because it IS consistent. Reject at
     construction instead."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^metric 'd' must be a fraction in \[0, 1\], got 150$"):
         Repetition({"d": D("150")}, 10_000)
 
 
 def test_repetition_rejects_negative_gt_ops():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^deterministic_gt_ops cannot be negative$"):
         Repetition({"d": D("0.96")}, -5)
 
 
 def test_bad_repeated_metric_can_no_longer_launder_a_fake_stable():
     """Before PI-13: five reps agreeing on d=150 reported STABLE. Now
     construction itself is rejected."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^metric 'd' must be a fraction"):
         [Repetition({"d": D("150")}, 10_000) for _ in range(5)]
 
 
@@ -491,12 +509,56 @@ def test_bad_repeated_metric_can_no_longer_launder_a_fake_stable():
 def test_repetition_rejects_an_unachievable_metric():
     """0.33333 * 10_000 = 3333.3 -- not an integer, so this ratio could not
     have come from any real repetition with 10,000 deterministic GT ops."""
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"^metric 'd' \(0\.33333\) is not achievable as k/deterministic_gt_ops=10000$",
+    ):
         Repetition({"d": D("0.33333")}, 10_000)
 
 
 def test_repetition_accepts_an_achievable_metric():
     Repetition({"d": D("0.9601")}, 10_000)
+
+
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_repetition_accepts_both_ends_of_a_fraction(value):
+    Repetition({"d": D(value)}, 10_000)
+
+
+def test_repetition_accepts_zero_gt_ops():
+    """Zero is not negative; the gate turns it into INSUFFICIENT later."""
+    Repetition({"d": D("0")}, 0)
+
+
+# --- PI-21: the SD limit is inclusive and computed without float noise -----
+
+
+def spread(mean, half_range="0.015"):
+    """Five reps whose sample SD is exactly ``half_range``: two at each end,
+    one at the mean, so the variance is 4h^2 / (5 - 1) = h^2."""
+    m, h = D(mean), D(half_range)
+    return [rep(v) for v in (m - h, m - h, m, m + h, m + h)]
+
+
+@pytest.mark.parametrize("mean", ["0.90", "0.95"])
+def test_sd_exactly_at_the_limit_is_stable(mean):
+    """Around 0.90 a float SD came out at 0.015000000000000013, around 0.95 at
+    0.014999999999999958: the same spread got opposite verdicts."""
+    assert assess(spread(mean), STEADY) is Stability.STABLE
+    assert assess(STEADY, spread(mean)) is Stability.STABLE
+
+
+def test_sd_just_over_the_limit_is_not_stable():
+    assert assess(spread("0.90", "0.0151"), STEADY) is Stability.EXTEND_TO_10
+    assert assess(STEADY, spread("0.90", "0.0151")) is Stability.STABLE_LOAD_SENSITIVE
+
+
+def test_stability_verdict_does_not_depend_on_the_callers_precision():
+    """Now that the SD is a Decimal, it is computed in a decimal context: at
+    two digits, 0.0151 would round to the limit and pass."""
+    fixed = spread("0.90", "0.0151")  # built outside: 0.90 - 0.0151 is 0.88 at prec=2
+    with localcontext(Context(prec=2)):
+        assert assess(fixed, STEADY) is Stability.EXTEND_TO_10
 
 
 # --- PI-9: stability gate must not trust reps[0] for which metrics exist --
@@ -512,7 +574,10 @@ def test_metric_missing_from_first_rep_is_rejected_not_silently_stable():
         Repetition({"d": D("0.96"), "r": D("0.20")}, 10_000),
         Repetition({"d": D("0.96"), "r": D("0.95")}, 10_000),
     ]
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"^all repetitions in a group must track the same metrics, got \['d'\] vs \['d', 'r'\]$",
+    ):
         assess(reps, reps)
 
 
@@ -520,20 +585,28 @@ def test_extra_metric_in_first_rep_is_rejected_clearly():
     reps = [Repetition({"d": D("0.96"), "r": D("0.50")}, 10_000)] + [
         Repetition({"d": D("0.96")}, 10_000) for _ in range(4)
     ]
-    with pytest.raises(ValueError):
+    # reps[0] is the reference the others are compared to, so the message
+    # names its metrics first.
+    with pytest.raises(
+        ValueError,
+        match=r"^all repetitions in a group must track the same metrics, got \['d', 'r'\] vs \['d'\]$",
+    ):
         assess(reps, reps)
 
 
 def test_all_empty_metrics_is_rejected_clearly():
     reps = [Repetition({}, 10_000) for _ in range(5)]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^a repetition's metrics must be nonempty$"):
         assess(reps, reps)
 
 
 def test_fixed_and_variable_groups_must_track_the_same_metrics():
     fixed = STEADY
     variable = [Repetition({"d": D(v), "r": D("0.5")}, 10_000) for v in ("0.96",) * 5]
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"^fixed and variable seed groups must track the same metrics, got \['d'\] vs \['d', 'r'\]$",
+    ):
         assess(fixed, variable)
 
 
