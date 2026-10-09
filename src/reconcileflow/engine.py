@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from collections.abc import Sequence
 
 from .models import Match, MatchResult, Record, Reject, RejectReason, RuleId, Tolerance
+from .numeric import in_engine_context
 from .rules import GENERATORS, amount_tolerance
 
 BlockKey = tuple[str, ...]
@@ -168,6 +169,7 @@ def _audit_unmatched(
             counters["unmatched_right"] += 1
 
 
+@in_engine_context
 def reconcile(
     left: Sequence[Record],
     right: Sequence[Record],

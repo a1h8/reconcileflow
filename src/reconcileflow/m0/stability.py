@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
+from reconcileflow.numeric import in_engine_context
+
 MIN_REPS = 5
 EXTENDED_REPS = 10
 MIN_GT_OPS_PER_REP = 10_000
@@ -56,6 +58,7 @@ class Repetition:
     metrics: Mapping[str, Decimal]  # decision metrics, as fractions
     deterministic_gt_ops: int
 
+    @in_engine_context
     def __post_init__(self) -> None:
         # Same scrutiny Metrics and Thresholds already apply (PI-12, PI-13):
         # a systematic error -- the same wrong value every repetition --
@@ -104,6 +107,7 @@ def _worst_sd(reps: Sequence[Repetition]) -> Decimal:
     )
 
 
+@in_engine_context
 def assess(fixed_seed: Sequence[Repetition], variable_seed: Sequence[Repetition]) -> Stability:
     """Between-run SD, decomposed by seed policy.
 

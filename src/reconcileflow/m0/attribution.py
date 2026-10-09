@@ -16,6 +16,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
 from reconcileflow.m0.stability import MIN_GT_OPS_PER_REP, _achievable
+from reconcileflow.numeric import in_engine_context
 
 _ONE = Decimal(1)
 _ZERO = Decimal(0)
@@ -72,6 +73,7 @@ class Thresholds:
     # make even a perfect D_acc borderline (protocol issue PI-2).
     d_acc_band: Decimal = Decimal("0.005")
 
+    @in_engine_context
     def __post_init__(self) -> None:
         # Metrics validates its own fields; this is the same scrutiny applied
         # to the configuration side -- a pre-registered threshold is at least
@@ -120,6 +122,7 @@ class Metrics:
     n: int  # total attempts behind d_cov/d_acc/truth_coverage/oracle_capture_failure
     n_residual: int | None  # residual attempts behind r/t; None iff r/t are None
 
+    @in_engine_context
     def __post_init__(self) -> None:
         for name in ("d_cov", "d_acc", "truth_coverage", "oracle_capture_failure"):
             if not _ZERO <= getattr(self, name) <= _ONE:
@@ -201,6 +204,7 @@ def _q(r: Decimal, t: Decimal, th: Thresholds) -> Decimal | None:
     return t / r if r >= th.r_min else None
 
 
+@in_engine_context
 def gate0(m: Metrics, th: Thresholds) -> RunStatus:
     if m.oracle_capture_failure > th.capture_failure_max:
         return RunStatus.NULL
@@ -272,6 +276,7 @@ class Decision:
     borderline_checked: bool
 
 
+@in_engine_context
 def decide(m: Metrics, th: Thresholds) -> Decision:
     """Gate 0, then the attribution verdict.
 

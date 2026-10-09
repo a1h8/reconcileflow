@@ -16,7 +16,16 @@ biasing isn't enough to guarantee a hit within a reasonable example budget.
 """
 
 import math
-from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
+from dataclasses import replace
+from decimal import (
+    ROUND_CEILING,
+    ROUND_DOWN,
+    ROUND_HALF_EVEN,
+    ROUND_HALF_UP,
+    Context,
+    Decimal,
+    localcontext,
+)
 
 import pytest
 from hypothesis import assume, given, settings
@@ -533,3 +542,69 @@ def test_ratio_outside_unit_interval_is_never_achievable(denominator, excess):
     over = Decimal(1) + Decimal(excess) / Decimal(100)
     assert not _achievable(over, denominator)
     assert not _achievable(-over, denominator)
+
+
+# --- The caller's decimal context is not an input (docs/decimal-context.md) --
+
+FOREIGN_CONTEXTS = [
+    Context(rounding=ROUND_DOWN),
+    Context(rounding=ROUND_HALF_UP),
+    Context(rounding=ROUND_CEILING),
+    Context(prec=3),
+]
+FOREIGN_CONTEXT_IDS = ["ROUND_DOWN", "ROUND_HALF_UP", "ROUND_CEILING", "prec=3"]
+
+
+def _in_context(context, build):
+    with localcontext(context):
+        try:
+            return build()
+        except (ArithmeticError, ValueError) as error:
+            return f"{type(error).__name__}: {error}"
+
+
+@st.composite
+def reported_ratio(draw):
+    """k/n as a report would print it: rounded to 2-4 places. Most of these
+    sit a hair above or below k/n, which is what a truncating context trips on."""
+    n = draw(st.integers(min_value=MIN_SAMPLE_SIZE, max_value=MIN_SAMPLE_SIZE + 5_000))
+    k = draw(st.integers(min_value=0, max_value=n))
+    places = draw(st.integers(min_value=2, max_value=4))
+    ratio = (Decimal(k) / Decimal(n)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)
+    return ratio, n
+
+
+@pytest.mark.parametrize("context", FOREIGN_CONTEXTS, ids=FOREIGN_CONTEXT_IDS)
+@SETTINGS
+@given(reported_ratio())
+def test_metrics_validation_does_not_depend_on_the_callers_decimal_context(context, drawn):
+    ratio, n = drawn
+
+    def build():
+        return Metrics(ratio, Decimal(1), None, None, Decimal(1), Decimal(0), n, None)
+
+    assert _in_context(context, build) == _in_context(None, build)
+
+
+@pytest.mark.parametrize("context", FOREIGN_CONTEXTS, ids=FOREIGN_CONTEXT_IDS)
+@SETTINGS
+@given(reported_ratio())
+def test_repetition_validation_does_not_depend_on_the_callers_decimal_context(context, drawn):
+    ratio, n = drawn
+
+    def build():
+        return Repetition({"d": ratio}, n)
+
+    assert _in_context(context, build) == _in_context(None, build)
+
+
+@pytest.mark.parametrize("context", FOREIGN_CONTEXTS, ids=FOREIGN_CONTEXT_IDS)
+@SETTINGS
+@given(metrics())
+def test_decision_does_not_depend_on_the_callers_decimal_context(context, m):
+    """replace() re-runs validation, so construction is under test too."""
+
+    def build():
+        return decide(replace(m), RUN_001)
+
+    assert _in_context(context, build) == _in_context(None, build)

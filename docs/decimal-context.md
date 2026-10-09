@@ -1,6 +1,6 @@
 # Decimal context
 
-**Status:** spec, not yet implemented.
+**Status:** implemented in `reconcileflow.numeric`.
 
 ## Problem
 
