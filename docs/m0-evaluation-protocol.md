@@ -127,12 +127,38 @@ P1 - OBI direct
    direct_trace_coverage      D_cov  = fraction where OBI supplies a trace_id
    direct_trace_accuracy      D_acc  = fraction of THOSE that are correct (deterministic zone)
    direct_correct_coverage    D      = D_cov x D_acc
+   [amended, PI-16] D_cov/D_acc are ratios over `n` total attempts; `n` is a required field,
+   minimum reuses stability's own MIN_GT_OPS_PER_REP=10,000 -- the same decision metrics,
+   not a new number. A ratio with no denominator cannot be told apart from a single lucky
+   sample: `n=1, d_cov=1, d_acc=1` would otherwise fire the strongest verdict (A) on zero
+   statistical basis.
+   [amended, PI-17] D_cov/truth_coverage/oracle_capture_failure must each be achievable as
+   k/n for some integer k, at their own expressed precision -- not an invented tolerance,
+   see attribution.py's `_achievable`. D_acc's real denominator is the D_cov-implied count
+   (round(D_cov * n)), not n itself; vacuously unconstrained when that count is 0.
 
 P2 - Correlator (on the RESIDUAL, not the whole dataset)
    residual_fraction          F      = 1 - D
    residual_candidate_recall  R      = P(true_trace in candidate_set | residual)
    residual_top1_accuracy     T      = P(top1 correct | residual, deterministic zone)
    ranking_efficiency         Q      = T / R   [DEFINED ONLY IF R >= 80%, see 3.1]
+   [amended, PI-6] R and T are UNDEFINED, not zero, when the correlator was not run on
+   this dataset -- distinct from "measured and found to be zero." See §3.2's
+   CORRELATOR_NOT_MEASURED outcome and §3.3's borderline_checked.
+   [amended, PI-7] T <= R always, when both are measured: a correct top1 pick is, by
+   construction, inside the candidate set R counts. T > R can only come from a
+   measurement bug (diverging denominators) and is rejected, not scored.
+   [amended, PI-16] R/T are ratios over `n_residual` attempts, a smaller sample than `n`
+   (the residual is only `F` of the total). `n_residual` is required exactly when R/T are
+   measured (None otherwise, PI-6); minimum provisionally reuses the same 10,000, flagged
+   more conservative than may be necessary for this smaller population -- no independent
+   justification exists yet for a smaller number.
+   [amended, PI-18] R and T must be None together or measured together -- both come from
+   the same correlator run on the same residual; no real procedure produces one without
+   the other.
+   [amended, PI-17] R and T must each be achievable as k/n_residual for some integer k
+   (same precision-derived check as D_cov). Unlike D_acc, T is not nested inside R's own
+   count -- both are fractions of the same residual population directly.
    residual_MRR
    candidate_size_p50/p95/p99 (diagnostic)
 
@@ -180,43 +206,83 @@ Below that, Q is not computed and the decision rests on R alone (NEEDS branch).
 
 ### 3.2 The five outcomes: a mutually exclusive, exhaustive partition
 
+**[amended, PI-6, tightened PI-10]** A new root gate precedes the tree below:
+`F == 0` (`D_cov == 1 AND D_acc == 1` — not `D == 1` alone, see PI-10)
+short-circuits straight to `A`, without ever reading `R`/`T` — an empty
+residual leaves nothing for the §3.3 veto to act on. Wherever the original
+tree already reads `R`/`T` (the `Q` computation, and the `R < 80%` check), a
+run where the correlator was never measured returns `CORRELATOR_NOT_MEASURED`
+rather than guessing.
+
 ```
-                  D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3% ?
-                    /                                        \
-                 YES                                          NO
-                  |                                            |
-        residual quality good?                        D >= 95% ? (D_acc or
-        (R >= 80% AND Q acceptable)                    unresolved failed)
-          /            \                                 /          \
-       YES              NO                            YES            NO   (F > 5%)
-        |                |                             |              |
-        v                v                             v          R < 80% ?
-        A       A_WITH_WEAK_RESIDUAL          NEEDS_DIFFERENT      /        \
-                (weak tail <= 5%,               _MECHANISM      YES          NO
-                 made visible)                  [amended, PI-1]  |            |
-                                                                 v        E >= 90% ?
-                                                       NEEDS_DIFFERENT     /      \
-                                                          _MECHANISM     YES       NO
-                                                                          |         |
-                                                                          v         v
-                                                                          B         C
-                                                                             SCORING_REQUIRED
+                   F == 0  (D_cov == 1 AND D_acc == 1) ?
+                           /                     \
+                        YES                        NO
+                         |                          |
+                         v                    [tree below]
+                         A
+               (no residual exists;
+                R/T never consulted)
+
+
+   [reached only when F > 0]
+
+              D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3% ?
+                /                                              \
+             YES                                                NO
+              |                                                  |
+       R AND T measured?                                D >= 95% ?  (D_acc or
+        /            \                                   unresolved failed)
+      NO              YES                                  /          \
+       |                |                                YES           NO   (F > 5%)
+       v         residual quality good?           NEEDS_DIFFERENT       |
+  CORRELATOR_    (R >= 80% AND Q acceptable)         _MECHANISM    R AND T measured?
+  NOT_MEASURED     /            \                   [amended, PI-1]   /      \
+     [PI-6]      YES              NO                                NO       YES
+                   |                |                                |         |
+                   v                v                                v     R < 80% ?
+                   A       A_WITH_WEAK_RESIDUAL                CORRELATOR_    /    \
+                           (weak tail <= 5%,                   NOT_MEASURED YES    NO
+                            made visible)                         [PI-6]      |      |
+                                                                               v  E >= 90% ?
+                                                                        NEEDS_DIFFERENT  /  \
+                                                                           _MECHANISM  YES   NO
+                                                                                         |     |
+                                                                                         v     v
+                                                                                         B     C
+                                                                                            SCORING_REQUIRED
 ```
 
 **Positive definitions (no "otherwise" bucket):**
 
 ```
 A
-   D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3%  AND  (R >= 80% AND Q acceptable)
-   -> OBI carries the attribution; the correlator is a marginal fallback.
+   F == 0  (D_cov == 1 AND D_acc == 1 -- not D == 1 alone, see PI-10)
+   OR  ( D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3%  AND  (R >= 80% AND Q acceptable) )
+   -> OBI carries the attribution; the correlator is a marginal fallback. [amended, PI-6]
+      The `F == 0` clause needs no correlator measurement at all: there is no
+      residual for one to be marginal or weak *about*. [tightened, PI-10] Checking
+      `D == 1` alone let a single-axis perturbation of the derived `D` land on
+      an impossible `(D=1, D_acc != 1)` point during the §3.3 robustness check.
 
 A_WITH_WEAK_RESIDUAL
-   D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3%  AND  weak residual quality  AND  F <= 5%
+   F > 0  AND  D >= 95%  AND  D_acc >= 99%  AND  unresolved <= 3%  AND  R, T measured
+   AND  weak residual quality  AND  F <= 5%
    -> OBI is enough; the fallback is weak BUT only covers <= 5% of traffic.
-      The risk is made VISIBLE without over-building.
+      The risk is made VISIBLE without over-building. [amended, PI-6] Requires a
+      genuine nonzero residual and a real correlator measurement — cannot apply
+      to `F == 0` (routed to `A` above) or to an unmeasured correlator (routed to
+      `CORRELATOR_NOT_MEASURED` below).
+
+CORRELATOR_NOT_MEASURED   [PI-6]
+   F > 0  AND  (R is unmeasured OR T is unmeasured)  AND the branch needs them
+   -> The tree cannot resolve A vs A_WITH_WEAK_RESIDUAL, or NEEDS_DIFFERENT_MECHANISM
+      vs B vs C, without a correlator measurement on the residual. Not a verdict:
+      an outcome that forbids pronouncing one, same status as BORDERLINE. Run the
+      correlator, then re-decide.
 
 NEEDS_DIFFERENT_MECHANISM   [amended, PI-1]
-   (F > 5%  AND  R < 80%)
+   (F > 5%  AND  R measured  AND  R < 80%)
    OR
    (D >= 95%  AND  (D_acc < 99%  OR  unresolved > 3%))
    -> The true candidate is MISSING too often (or OBI's direct IDs are not reliable enough).
@@ -224,19 +290,25 @@ NEEDS_DIFFERENT_MECHANISM   [amended, PI-1]
       different or reconfigured OBI, additional keys, instrumentation, another attribution
       mechanism.
       WARNING: do NOT fund a better ranker: the problem is candidate generation.
+      [PI-6] The second clause (`D >= 95%` failing on `D_acc`/`unresolved`) never
+      needed `R`/`T` and is unaffected by whether the correlator was measured.
+      The first clause (`F > 5% AND R < 80%`) does — an unmeasured `R` routes to
+      `CORRELATOR_NOT_MEASURED` instead.
 
 C: SCORING_REQUIRED
-   F > 5%  AND  R >= 80%  AND  E < 90%  (insufficient ranking efficiency)
+   F > 5%  AND  R, T measured  AND  R >= 80%  AND  E < 90%  (insufficient ranking efficiency)
    -> The candidate is generally there but ranked badly. Investing in scoring has a real
       chance of paying off: temporal scoring, duration, connection metadata, topology, span
       semantics, priors.
 
 B: HYBRID
-   D < 95%  AND  E >= 90%  AND  R >= 80%
+   D < 95%  AND  R, T measured  AND  E >= 90%  AND  R >= 80%
    -> OBI alone is insufficient, but OBI + correlator already give a correct global
       attribution. Co-necessary. A POSITIVE category, not a dumping ground.
    [amended, PI-4] The source clause "non-catastrophic ranking" is removed: `R >= 80%` and
    `E >= 90%` already bound it.
+   [PI-6] Requires an actual correlator measurement — cannot be reached by crediting
+   a placeholder `R`/`T` for a correlator that was never run.
 ```
 
 Resolution of the `E < 90%` case (no sixth hole):
@@ -264,10 +336,26 @@ so A could never be reached. Provisional, to be frozen before the run.
 BORDERLINE means: moving any single input (`D`, `D_acc`, `unresolved`, `R`, `T`) by its band
 could change the verdict. An input that cannot change the outcome does not trigger it.
 
+**[amended, PI-6]** This perturbation set requires all five inputs to exist. When `R`/`T` are
+unmeasured, two of the five cannot be perturbed at all — the check is reported as **not run**
+(`borderline_checked = false`), never as "checked and found not borderline." Concretely: at
+`F == 0` the nominal verdict is `A` regardless of `R`/`T` (the short-circuit above), but perturbing
+`D` alone away from that exact point can re-enter a branch that needs `R`/`T` — a flip that has
+nothing to do with anything actually measured. Reporting "not BORDERLINE" in that situation would
+claim a robustness check that never happened, so the perturbation loop does not run at all when
+the correlator was not measured; only the nominal outcome is reported.
+
 Cross-dimension conflicts: the primary decision is **weighted by traffic fraction** (`E` already
 aggregates). The **veto** looks explicitly at the residual (`R`, `Q`) so a bad tail is not hidden
 behind an average. Poor performance on <= 5% of traffic gives `A_WITH_WEAK_RESIDUAL`, never an
 automatic C.
+
+**[amended, PI-15]** Two of the five inputs are not independent: `D <= D_acc` (`D = D_cov *
+D_acc`, `D_cov <= 1`) and `T <= R` (PI-7). The perturbation loop skips any synthetic point
+violating either — moving one member of a pair while the other stays at its real value can
+otherwise land on a combination no real measurement could ever produce (e.g. `D = 1` while
+`D_acc` stays at a real, lower value), and judging that impossible point as if it were a
+genuine sensitivity is not what "BORDERLINE" is meant to mean.
 
 ### Stability gate: repeatability (a verdict only if stable)
 
@@ -294,6 +382,17 @@ SD_fixed small, SD_variable large    -> stable BUT pattern-sensitive
 **[amended, PI-5]** The criterion is the sample standard deviation of each decision metric across
 repetitions; the worst metric decides. It is not a confidence-interval width: a CI narrows as
 repetitions are added, so it could be satisfied by running more of them.
+
+**[amended, PI-9]** "The worst metric decides" presupposes every repetition tracks the same set of
+decision metrics — unenforced before, which let a metric absent from the first repetition go
+unchecked regardless of how unstable it was. Every repetition in a group must track an identical,
+nonempty metric set; the fixed-seed and variable-seed groups must track the same set as each
+other. A mismatch is rejected, not silently resolved by trusting the first repetition.
+
+**[amended, PI-19]** Each repetition's metrics are ratios over `deterministic_gt_ops` attempts,
+the same relationship PI-17 enforces between `attribution.Metrics`'s ratios and `n`/`n_residual`.
+A metric value that could not have come from any integer count of `deterministic_gt_ops` attempts
+is rejected at construction, not merely range-checked (PI-13).
 
 ---
 
@@ -334,6 +433,25 @@ Example: REGIME = A  AND  LATENCY_VERDICT = FAIL
    (perfect attribution, but too slow to serve during an incident).
 Never "A = all good".
 ```
+
+**[amended, PI-8]** `MIN_SIGNALS = 100` signals, provisional (same status as PI-3's
+`q_acceptable_min` — to be frozen before a real run). Below it, `gate()` raises rather than
+returning `PASS`/`FAIL`: nearest-rank `p99` needs `ceil(0.99 * n)` to be a meaningfully distinct
+index from `n` itself, which first happens at `n = 100`. No third `LATENCY_VERDICT` value —
+`PASS`/`FAIL` stays binary, a verdict is only ever returned when it is computable at all.
+
+**[amended, PI-11]** A negative value anywhere in `l1_corrected` also makes `gate()` raise, no
+tolerance band. Once skew is correctly applied, `L1 >= 0` always — the correlator cannot ingest a
+signal before the corrected moment it was produced. Skew is a fixed, pre-measured correction, not
+a live noisy estimate, so a negative result means the skew is wrong, not that the true latency
+was merely near zero.
+
+**[amended, PI-14]** A non-finite value (`NaN` or `inf`) anywhere in `l1_corrected` also makes
+`gate()` raise. `NaN` breaks `sorted()`'s determinism — confirmed directly: the identical
+multiset, permuted into 20 input orders, produced two different `p95` values for the same data,
+losing the permutation-invariance this project treats as foundational elsewhere. `inf` sorts
+correctly (a single `inf` among enough samples legitimately reading `PASS` is correct nearest-
+rank behavior, not a bug) but is still physically meaningless for a real latency.
 
 `detection_latency` (L3): threshold pre-registered **separately**, once the operational delay of
 the SRE platform is fixed. **Do not reuse an application SLO.**

@@ -123,3 +123,59 @@ jobs:
           grep -q "strong-tier-probe attached" /tmp/smoke.log
           grep -q "ring buffer reserve failures" /tmp/smoke.log
           grep -q "shutting down" /tmp/smoke.log
+
+  # A measurement, not a gate: which uprobe symbol fires on HTTP/2 traffic
+  # to fake-upstream (m0-harness/README.md, "http-signal-probe: default
+  # symbol..."). The script fails only if its own orchestration breaks;
+  # the answer is in the job summary and the uploaded run directory
+  # (manifest with hashes and versions, per-cell logs and JSONL).
+  probe-symbols:
+    name: eBPF probe symbol comparison (real kernel, sudo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: m0-harness/go.mod
+
+      # Same portable bpftool and libbpf headers as ebpf-smoke, for
+      # http-signal-probe's bpf/ directory instead.
+      - name: install portable bpftool
+        run: |
+          curl -sSL -o /tmp/bpftool.tar.gz \
+            https://github.com/libbpf/bpftool/releases/download/v7.7.0/bpftool-v7.7.0-amd64.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/bpftool.tar.gz bpftool
+          sudo chmod +x /usr/local/bin/bpftool
+
+      - name: generate vmlinux.h and vendor libbpf headers
+        working-directory: m0-harness/cmd/http-signal-probe/bpf
+        run: |
+          sudo /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+          mkdir -p vendor/bpf
+          BASE=https://raw.githubusercontent.com/libbpf/libbpf/v1.4.0/src
+          for f in bpf_helpers.h bpf_helper_defs.h bpf_tracing.h bpf_core_read.h bpf_endian.h; do
+            curl -sSL -o "vendor/bpf/$f" "$BASE/$f"
+          done
+
+      # Runs as the runner user; the script calls sudo itself for phase 2.
+      - name: compare runHandler and ServeHTTP
+        working-directory: m0-harness
+        env:
+          RUN_DIR: /tmp/probe-symbols
+        run: |
+          scripts/compare-probe-symbols.sh
+          {
+            echo '### Probe symbol comparison'
+            echo '```'
+            cat "$RUN_DIR/manifest.txt"
+            echo
+            column -t -s $'\t' "$RUN_DIR/results.tsv"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload run directory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-symbols
+          path: /tmp/probe-symbols

@@ -6,7 +6,8 @@
 // LRU_HASH maps to correlate a request's entry with its later completion and
 // with its propagated trace context (bpf/gotracer/maps/nethttp.h upstream).
 // This probe deliberately does none of that: a single uprobe on Go's
-// `net/http.(*serverHandler).ServeHTTP` entry, emitting {pid, timestamp_ns}
+// HTTP/2 request-dispatch entry (`net/http/internal/http2.(*serverConn).runHandler`,
+// the loader's default -symbol), emitting {pid, timestamp_ns}
 // straight to a ring buffer — the same architecture m0-harness's
 // strong-tier-probe already validated at n=10000 with 0 drops (README
 // iteration 6). All correlation (if any is needed downstream) happens in
@@ -43,8 +44,10 @@ struct {
 	__type(value, __u64);
 } drops SEC(".maps");
 
-// uprobe on net/http.(*serverHandler).ServeHTTP entry (fake-upstream's own
-// binary — this is the exact symbol OBI's gotracer also targets). No
+// uprobe attached by the loader to the -symbol it is given (default: HTTP/2's
+// runHandler; `net/http.(*serverHandler).ServeHTTP`, which OBI's gotracer
+// targets, did not fire on HTTP/2 per the README). The SEC name below is a
+// label only and is kept so bpf/probe.o stays in sync with this source. No
 // argument decoding: firing alone, with zero kernel-side state, is the
 // entire test.
 SEC("uprobe/ServeHTTP")

@@ -25,54 +25,78 @@ import (
 	"reconcileflow/m0-harness/internal/oracle"
 )
 
-func main() {
-	loadGenPath := flag.String("load-gen", "load-gen.jsonl", "load-gen JSONL path")
-	fakeUpstreamPath := flag.String("fake-upstream", "fake-upstream.jsonl", "fake-upstream JSONL path")
-	shuffle := flag.Bool("shuffle", false, "negative control: permute expected trace_id before joining")
-	flag.Parse()
+type joinKey struct {
+	connKey  string
+	streamID int
+}
 
-	expected, err := readRecords(*loadGenPath)
-	if err != nil {
-		log.Fatalf("read load-gen log: %v", err)
-	}
-	observed, err := readRecords(*fakeUpstreamPath)
-	if err != nil {
-		log.Fatalf("read fake-upstream log: %v", err)
-	}
+type joinResult struct {
+	Expected     int
+	Joined       int
+	Matched      int
+	JoinMisses   int
+	FakeUpstream int
+	DAcc         float64
+}
 
+// join computes D_acc for the legacy ordinal diagnostic. (conn_key, stream_id)
+// is only unique if both sides' independently-assigned generation counters
+// happened to agree (see README "Lesson") -- not guaranteed, so a collision on
+// either side is rejected rather than silently mis-joined: a collision in
+// expected would silently drop whichever load-gen record lost the map
+// overwrite; a collision in observed lets more than one fake-upstream record
+// match the same expected entry, inflating `joined`/`matched` past
+// `len(expected)` -- confirmed empirically to reach D_acc=2.0 and a negative
+// join_misses on two observed records sharing one key.
+func join(expected, observed []oracle.Record, shuffle bool) (joinResult, error) {
 	for _, records := range [][]oracle.Record{expected, observed} {
 		for _, r := range records {
 			if r.SchemaVersion >= 2 && (r.Protocol != "HTTP/1.1" || r.Error != "") {
-				log.Fatal("legacy ordinal join requires successful HTTP/1.1 records; local ordinals are not an HTTP/2 oracle")
+				return joinResult{}, fmt.Errorf(
+					"legacy ordinal join requires successful HTTP/1.1 records; local ordinals are not an HTTP/2 oracle",
+				)
 			}
 		}
 	}
-	log.Print("legacy diagnostic only: local ordinals and independently assigned connection generations do not establish GT2")
 
-	type key struct {
-		connKey  string
-		streamID int
-	}
-	expectedByKey := make(map[key]string, len(expected))
+	expectedByKey := make(map[joinKey]string, len(expected))
 	traceIDs := make([]string, 0, len(expected))
 	for _, r := range expected {
-		expectedByKey[key{r.ConnKey, r.StreamID}] = r.TraceID
+		k := joinKey{r.ConnKey, r.StreamID}
+		if _, dup := expectedByKey[k]; dup {
+			return joinResult{}, fmt.Errorf(
+				"duplicate (conn_key=%s, stream_id=%d) in load-gen's own log -- "+
+					"the fallback-tier key is not unique even on its authoritative side",
+				r.ConnKey, r.StreamID,
+			)
+		}
+		expectedByKey[k] = r.TraceID
 		traceIDs = append(traceIDs, r.TraceID)
 	}
 
-	if *shuffle {
+	if shuffle {
 		rand.Shuffle(len(traceIDs), func(i, j int) { traceIDs[i], traceIDs[j] = traceIDs[j], traceIDs[i] })
 		i := 0
 		for k := range expectedByKey {
 			expectedByKey[k] = traceIDs[i]
 			i++
 		}
-		log.Printf("negative control: expected trace_id permuted across %d keys", len(traceIDs))
 	}
 
+	seenObserved := make(map[joinKey]bool, len(observed))
 	var matched, joined int
 	for _, o := range observed {
-		want, ok := expectedByKey[key{o.ConnKey, o.StreamID}]
+		k := joinKey{o.ConnKey, o.StreamID}
+		if seenObserved[k] {
+			return joinResult{}, fmt.Errorf(
+				"duplicate (conn_key=%s, stream_id=%d) in fake-upstream's own log -- "+
+					"independently assigned generations collided (see README Lesson); "+
+					"counting it again would inflate D_acc past 100%%",
+				o.ConnKey, o.StreamID,
+			)
+		}
+		seenObserved[k] = true
+		want, ok := expectedByKey[k]
 		if !ok {
 			continue // no matching load-gen record for this (conn_key, stream_id) — a join miss
 		}
@@ -91,9 +115,43 @@ func main() {
 	if len(expected) > 0 {
 		dAcc = float64(matched) / float64(len(expected))
 	}
+	return joinResult{
+		Expected:     len(expected),
+		Joined:       joined,
+		Matched:      matched,
+		JoinMisses:   len(expected) - joined,
+		FakeUpstream: len(observed),
+		DAcc:         dAcc,
+	}, nil
+}
+
+func main() {
+	loadGenPath := flag.String("load-gen", "load-gen.jsonl", "load-gen JSONL path")
+	fakeUpstreamPath := flag.String("fake-upstream", "fake-upstream.jsonl", "fake-upstream JSONL path")
+	shuffle := flag.Bool("shuffle", false, "negative control: permute expected trace_id before joining")
+	flag.Parse()
+
+	expected, err := readRecords(*loadGenPath)
+	if err != nil {
+		log.Fatalf("read load-gen log: %v", err)
+	}
+	observed, err := readRecords(*fakeUpstreamPath)
+	if err != nil {
+		log.Fatalf("read fake-upstream log: %v", err)
+	}
+
+	log.Print("legacy diagnostic only: local ordinals and independently assigned connection generations do not establish GT2")
+	if *shuffle {
+		log.Printf("negative control: expected trace_id will be permuted across %d keys", len(expected))
+	}
+
+	result, err := join(expected, observed, *shuffle)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Printf(
 		"expected=%d joined=%d matched=%d join_misses=%d D_acc=%.4f (fake_upstream_records=%d shuffle=%v)\n",
-		len(expected), joined, matched, len(expected)-joined, dAcc, len(observed), *shuffle,
+		result.Expected, result.Joined, result.Matched, result.JoinMisses, result.DAcc, result.FakeUpstream, *shuffle,
 	)
 }
 
