@@ -42,7 +42,7 @@ from reconcileflow.m0.attribution import (
     decide,
 )
 from reconcileflow.m0.latency import MIN_SIGNALS, LatencyVerdict, gate
-from reconcileflow.m0.stability import Repetition, _achievable, assess
+from reconcileflow.m0.stability import MIN_REPS, Repetition, _achievable, assess
 
 SETTINGS = settings(max_examples=500, deadline=None)
 
@@ -607,5 +607,26 @@ def test_decision_does_not_depend_on_the_callers_decimal_context(context, m):
 
     def build():
         return decide(replace(m), RUN_001)
+
+    assert _in_context(context, build) == _in_context(None, build)
+
+
+@st.composite
+def repetition_group(draw):
+    """Five reps clustered around a mean, so the SD lands near MAX_SD often
+    enough for a rounding context to move it across the limit."""
+    centre = draw(st.integers(min_value=500, max_value=9_500))
+    return [
+        Repetition({"d": Decimal(centre + draw(st.integers(-300, 300))) / 10_000}, 10_000)
+        for _ in range(MIN_REPS)
+    ]
+
+
+@pytest.mark.parametrize("context", FOREIGN_CONTEXTS, ids=FOREIGN_CONTEXT_IDS)
+@SETTINGS
+@given(repetition_group(), repetition_group())
+def test_stability_does_not_depend_on_the_callers_decimal_context(context, fixed, variable):
+    def build():
+        return assess(fixed, variable)
 
     assert _in_context(context, build) == _in_context(None, build)

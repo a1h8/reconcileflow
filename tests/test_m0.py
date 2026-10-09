@@ -553,6 +553,14 @@ def test_sd_just_over_the_limit_is_not_stable():
     assert assess(STEADY, spread("0.90", "0.0151")) is Stability.STABLE_LOAD_SENSITIVE
 
 
+def test_stability_verdict_does_not_depend_on_the_callers_precision():
+    """Now that the SD is a Decimal, it is computed in a decimal context: at
+    two digits, 0.0151 would round to the limit and pass."""
+    fixed = spread("0.90", "0.0151")  # built outside: 0.90 - 0.0151 is 0.88 at prec=2
+    with localcontext(Context(prec=2)):
+        assert assess(fixed, STEADY) is Stability.EXTEND_TO_10
+
+
 # --- PI-9: stability gate must not trust reps[0] for which metrics exist --
 
 
