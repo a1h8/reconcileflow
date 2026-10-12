@@ -56,4 +56,7 @@ if __name__ == "__main__":
     print(f"ground truth trace_ids: {len(gt)}")
     for (svc, event, dest), (total, bad) in sorted(counts.items(), key=lambda kv: -kv[1][0]):
         pct = 100 * bad / total if total else 0
-        print(f"{svc:10s} {event:12s} -> {dest:22s} total={total:5d} self_authored={bad:5d} ({pct:.1f}%)")
+        print(
+            f"{svc:10s} {event:12s} -> {dest:22s} "
+            f"total={total:5d} self_authored={bad:5d} ({pct:.1f}%)"
+        )

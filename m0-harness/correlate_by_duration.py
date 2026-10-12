@@ -77,7 +77,7 @@ OBI_LINE = re.compile(
 
 def _duration_ns(value: str, unit: str) -> int:
     factor = 1_000_000 if unit == "ms" else 1_000_000_000
-    return int(round(float(value) * factor))
+    return round(float(value) * factor)
 
 
 def load_traefik_inbound(obi_log: str, start: int, end: int) -> list[tuple[int, str]]:
@@ -115,7 +115,9 @@ def _sorted_sides(obi_log: str, load_gen_jsonl: str, start: int, end: int):
     return rows, observed
 
 
-def run(obi_log: str, load_gen_jsonl: str, start: int, end: int, tol: Tolerance, bucket: int) -> None:
+def run(
+    obi_log: str, load_gen_jsonl: str, start: int, end: int, tol: Tolerance, bucket: int
+) -> None:
     rows, observed = _sorted_sides(obi_log, load_gen_jsonl, start, end)
     lefts = [
         Record(
@@ -168,7 +170,12 @@ def run_sliding(
     """
     rows, observed = _sorted_sides(obi_log, load_gen_jsonl, start, end)
     lefts = [
-        Record(id=row["trace_id"], account="1", amount=Decimal(row["duration_ns"]), value_date=_PLACEHOLDER_DATE)
+        Record(
+            id=row["trace_id"],
+            account="1",
+            amount=Decimal(row["duration_ns"]),
+            value_date=_PLACEHOLDER_DATE,
+        )
         for row in rows
     ]
     rights = [
@@ -205,7 +212,12 @@ def run_sliding(
 
 
 if __name__ == "__main__":
-    obi_log, load_gen_jsonl, start, end = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+    obi_log, load_gen_jsonl, start, end = (
+        sys.argv[1],
+        sys.argv[2],
+        int(sys.argv[3]),
+        int(sys.argv[4]),
+    )
     mode = sys.argv[5] if len(sys.argv) > 5 else "bucket"
     param = int(sys.argv[6]) if len(sys.argv) > 6 else 0
     for abs_ns in (500_000, 1_000_000, 2_000_000, 5_000_000):
