@@ -126,15 +126,21 @@ def evaluate(
 def evaluate_json(
     rows: list[dict],
     lines: list[str],
-    port: int,
+    port: int | None = None,
     kind: str = "SPAN_KIND_SERVER",
     excluded: frozenset[str] = frozenset(),
+    attrs: dict[str, str] | None = None,
 ) -> dict:
-    """Score OBI's JSON-printer output (OTEL_EBPF_TRACE_PRINTER=json) for one hop.
+    """Score the agent's JSON-printer output (OBI or Beyla) for one observation point.
 
-    Selects spans of ``kind`` whose ``hostPort`` is ``port``; the request path is
+    Selects spans of ``kind`` whose ``hostPort`` is ``port`` (when given) and whose
+    ``attributes`` contain every ``attrs`` pair (e.g. ``serverAddr=hop-1``: in a
+    chain, hops are told apart by service name, not by port). The request path is
     ``attributes.url``. Same scoring as the text printer.
     """
+    if port is None and not attrs:
+        raise ValueError("select an observation point by port, by attributes, or both")
+    attrs = attrs or {}
     expected = _check_ground_truth(rows)
     observed: list[tuple[str | None, str]] = []
     parse_failures = 0
@@ -148,10 +154,15 @@ def evaluate_json(
             parse_failures += 1
             continue
         for span in spans:
-            if span.get("kind") != kind or int(span.get("hostPort", 0)) != port:
+            if span.get("kind") != kind:
+                continue
+            if port is not None and int(span.get("hostPort", 0)) != port:
+                continue
+            span_attrs = span.get("attributes", {})
+            if any(span_attrs.get(key) != value for key, value in attrs.items()):
                 continue
             observed.append((span.get("attributes", {}).get("url"), span.get("traceID", "")))
-    hop = {"kind": kind, "port": port}
+    hop = {"kind": kind, "port": port, "attributes": attrs}
     return _score(rows, expected, observed, parse_failures, hop, excluded)
 
 
@@ -160,6 +171,13 @@ def main() -> None:
     parser.add_argument("obi_log")
     parser.add_argument("load_gen_jsonl")
     parser.add_argument("--json-port", type=int, help="JSON printer output: hop's server port")
+    parser.add_argument(
+        "--json-attr",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="JSON printer output: required span attribute, e.g. serverAddr=hop-1 (repeatable)",
+    )
     parser.add_argument("--json-kind", default="SPAN_KIND_SERVER")
     parser.add_argument("--service", help="text printer output: printed service")
     parser.add_argument("--event", choices=("HTTP", "HTTPClient"))
@@ -180,9 +198,10 @@ def main() -> None:
     if excluded & {row["trace_id"] for row in rows}:
         parser.error("--exclude files share ids with the measured run")
     with open(args.obi_log) as source:
-        if args.json_port is not None:
+        if args.json_port is not None or args.json_attr:
+            attrs = dict(item.split("=", 1) for item in args.json_attr)
             result = evaluate_json(
-                rows, list(source), args.json_port, args.json_kind, frozenset(excluded)
+                rows, list(source), args.json_port, args.json_kind, frozenset(excluded), attrs
             )
         elif args.service and args.event and args.destination:
             result = evaluate(
@@ -194,7 +213,7 @@ def main() -> None:
                 frozenset(excluded),
             )
         else:
-            parser.error("give --json-port, or --service, --event and --destination")
+            parser.error("give --json-port/--json-attr, or --service, --event and --destination")
     print(json.dumps(result, indent=2, sort_keys=True))
     if result["status"] != "VALID":
         raise SystemExit(1)

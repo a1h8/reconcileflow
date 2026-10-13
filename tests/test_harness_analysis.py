@@ -153,3 +153,27 @@ def test_excluded_known_traffic_does_not_invalidate_but_unknown_extra_does():
     )
     assert extra["status"] == "INVALID"
     assert extra["unexpected_requests"] == 1
+
+
+def test_json_points_told_apart_by_service_name_not_port():
+    # Two hops reporting the same (wrong) port: only the service name separates them.
+    def hop_span(service, truth, reported, kind="SPAN_KIND_SERVER"):
+        key = "serverAddr" if kind == "SPAN_KIND_SERVER" else "clientAddr"
+        span = jspan(truth, reported, port=48736, kind=kind)
+        span["attributes"][key] = service
+        return span
+
+    lines = [
+        json_line(
+            hop_span("hop-1", A, A),
+            hop_span("hop-2", A, B),
+            hop_span("hop-1", A, A, kind="SPAN_KIND_CLIENT"),
+        )
+    ]
+    rows = [row(A), row(B)]
+    first = evaluate_json(rows, lines, attrs={"serverAddr": "hop-1"})
+    second = evaluate_json(rows, lines, attrs={"serverAddr": "hop-2"})
+    out = evaluate_json(rows, lines, kind="SPAN_KIND_CLIENT", attrs={"clientAddr": "hop-1"})
+    assert (first["correct"], second["wrong_known_trace"], out["correct"]) == (1, 1, 1)
+    with pytest.raises(ValueError):
+        evaluate_json(rows, lines)
