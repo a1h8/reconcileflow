@@ -12,16 +12,10 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"flag"
 	"log"
 	"math"
-	"math/big"
 	mrand "math/rand"
 	"net"
 	"net/http"
@@ -30,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"reconcileflow/m0-harness/internal/labtls"
 	"reconcileflow/m0-harness/internal/oracle"
 )
 
@@ -118,6 +113,8 @@ func main() {
 				TimestampNS:  time.Now().UnixNano(),
 				Control:      control,
 				ResponseSize: int64(len(body)),
+				Baggage:      r.Header.Get("baggage"),
+				Path:         r.URL.Path,
 			}); err != nil {
 				log.Fatalf("write oracle record: %v", err)
 			}
@@ -168,24 +165,5 @@ func parseTraceparent(h string) string {
 }
 
 func selfSignedCert() (tls.Certificate, error) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "fake-upstream.m0-harness.local"},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
-	return tls.X509KeyPair(certPEM, keyPEM)
+	return labtls.SelfSigned("fake-upstream.m0-harness.local")
 }

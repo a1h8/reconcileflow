@@ -49,7 +49,7 @@ func TestRequestAccounting(t *testing.T) {
 			defer server.Close()
 			client := newClient(true, time.Second)
 			defer client.CloseIdleConnections()
-			r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", false, true)
+			r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "", false, true)
 			if (r.Error != "") != tc.wantError {
 				t.Fatalf("record: %+v", r)
 			}
@@ -69,7 +69,7 @@ func TestFailuresKeepIdentity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	defer server.Close()
 	for _, target := range []string{"://invalid", server.URL} {
-		r := performRequest(client, newConnTracker(), target, "truth", "parent", "", false, true)
+		r := performRequest(client, newConnTracker(), target, "truth", "parent", "", "", false, true)
 		if r.Error == "" || r.TraceID != "truth" || r.TimestampNS == 0 || r.DurationNS <= 0 {
 			t.Fatalf("failure disappeared: %+v", r)
 		}
@@ -104,8 +104,8 @@ func TestNoPoolingUsesDistinctConnections(t *testing.T) {
 	client := newClient(false, time.Second)
 	defer client.CloseIdleConnections()
 	tracker := newConnTracker()
-	a := performRequest(client, tracker, server.URL, "a", "parent", "", false, true)
-	b := performRequest(client, tracker, server.URL, "b", "parent", "", false, true)
+	a := performRequest(client, tracker, server.URL, "a", "parent", "", "", false, true)
+	b := performRequest(client, tracker, server.URL, "b", "parent", "", "", false, true)
 	if a.Error != "" || b.Error != "" || a.ConnKey == b.ConnKey {
 		t.Fatalf("no-pool witness: %+v %+v", a, b)
 	}
@@ -126,7 +126,7 @@ func TestRedirectIsNotFollowedAndMaskKeepsTruthLocal(t *testing.T) {
 	defer server.Close()
 	client := newClient(true, time.Second)
 	defer client.CloseIdleConnections()
-	record := performRequest(client, newConnTracker(), server.URL+"/start", "truth", "parent", "", true, true)
+	record := performRequest(client, newConnTracker(), server.URL+"/start", "truth", "parent", "", "", true, true)
 	if record.TraceID != "truth" || record.StatusCode != 302 || record.Error == "" {
 		t.Fatalf("redirect must remain a failed logical attempt with its truth: %+v", record)
 	}
@@ -142,12 +142,39 @@ func TestWitnessControlIsLabelledOnTheWire(t *testing.T) {
 	defer server.Close()
 	client := newClient(true, time.Second)
 	defer client.CloseIdleConnections()
-	r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "positive", false, true)
+	r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "positive", false, true)
 	if r.Error != "" || r.Control != "positive" {
 		t.Fatalf("record: %+v", r)
 	}
 	if h := <-got; h != "positive" {
 		t.Fatalf("X-Witness-Control = %q, want positive", h)
+	}
+}
+
+func TestBaggageIsSentAndLoggedOnlyWhenAsked(t *testing.T) {
+	got := make(chan string, 2)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get("baggage")
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	client := newClient(true, time.Second)
+	defer client.CloseIdleConnections()
+
+	with := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "exchange_id=abc", "", false, true)
+	if with.Error != "" || with.Baggage != "exchange_id=abc" {
+		t.Fatalf("record: %+v", with)
+	}
+	if h := <-got; h != "exchange_id=abc" {
+		t.Fatalf("baggage on the wire = %q, want exchange_id=abc", h)
+	}
+	without := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "", false, true)
+	if without.Baggage != "" {
+		t.Fatalf("record: %+v", without)
+	}
+	if h := <-got; h != "" {
+		t.Fatalf("baggage sent although not asked: %q", h)
 	}
 }
 

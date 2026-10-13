@@ -72,6 +72,13 @@ type Record struct {
 	// load-gen's side, the size it actually received. A correlation signal
 	// orthogonal to DurationNS: content-based, not timing-based.
 	ResponseSize int64 `json:"response_size,omitempty"`
+	// Baggage is the W3C baggage header: on load-gen's side the value it sent
+	// (-baggage), on fake-upstream's side the value it received ("" if none).
+	Baggage string `json:"baggage,omitempty"`
+	// Path is the request path fake-upstream received; with -truth-in-path it
+	// carries the request's own id, so the two halves join without relying on
+	// a traceparent that may have been lost on the way. Empty on load-gen's side.
+	Path string `json:"path,omitempty"`
 }
 
 // Writer is a concurrency-safe JSONL appender — both binaries write to their

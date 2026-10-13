@@ -78,3 +78,28 @@ def test_stripped_header_shows_as_self_authored_downstream(tmp_path):
     result = hn.analyze_cell(cell)
     assert dict(result["points"])["fake-upstream in"]["unknown_trace"] == 2
     assert result["wire"]["received_once"] == 0
+
+
+def test_wire_joins_by_path_and_checks_baggage_without_relying_on_trace_id():
+    rows = [{**lg_row(A), "baggage": "exchange_id=1"}, {**lg_row(B), "baggage": "exchange_id=2"}]
+    fu = [
+        {"path": f"/truth-{A}", "trace_id": "", "baggage": "exchange_id=1"},  # traceparent lost
+        {"path": f"/truth-{B}", "trace_id": B, "baggage": ""},  # baggage lost
+    ]
+    w = hn.wire(rows, fu)
+    assert w == {
+        "measured": 2,
+        "reached_once": 2,
+        "received_once": 1,
+        "traceparent_absent": 1,
+        "baggage_exact": 1,
+        "baggage_absent": 1,
+    }
+
+
+def test_cell_without_agent_has_wire_check_only(tmp_path):
+    cell = write_cell(tmp_path, [], fu_ids=[A, B])
+    (cell / "agent.out").unlink()
+    result = hn.analyze_cell(cell)
+    assert result["points"] == []
+    assert result["wire"]["received_once"] == 2

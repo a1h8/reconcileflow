@@ -6,8 +6,12 @@ k, its inbound server span (``serverAddr = hop-k``) and its outbound client span
 (``clientAddr = hop-k``); then fake-upstream's inbound server span. Scoring is
 analyze_run.evaluate_json, with warm-up and tail traffic excluded by id.
 
-The "wire" column is independent of the agent's spans: the trace id
-fake-upstream itself read from the traceparent header it received.
+The "wire" check is independent of the agent's spans: what fake-upstream itself
+read from the headers it received -- the traceparent trace id and, when load-gen
+sent one, the baggage. fake-upstream's records are joined to load-gen's by the
+truth id in the request path, never by trace id, so the check still holds when
+traceparent is lost on the way. Cells run without an agent have no points,
+only the wire check.
 
 Usage: hn_analyze.py <run-dir> [--json]
 """
@@ -21,7 +25,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from analyze_run import evaluate_json
+from analyze_run import TRUTH, evaluate_json
 
 SERVER, CLIENT = "SPAN_KIND_SERVER", "SPAN_KIND_CLIENT"
 
@@ -45,13 +49,33 @@ def points(hops: int, fake_upstream_port: int) -> list[tuple[str, dict]]:
 
 
 def wire(rows: list[dict], fu_records: list[dict]) -> dict:
-    """What fake-upstream read from the header, per measured request."""
-    expected = {r["trace_id"] for r in rows}
-    seen = Counter(r.get("trace_id", "") for r in fu_records)
-    return {
-        "received_once": sum(1 for t in expected if seen[t] == 1),
-        "measured": len(expected),
+    """What fake-upstream read from the headers, per measured request.
+
+    Joined by the truth id in fake-upstream's logged path. Records from runs
+    that predate the path field fall back to a trace-id count.
+    """
+    by_id = {r["trace_id"]: r for r in rows}
+    if not any(rec.get("path") for rec in fu_records):
+        seen = Counter(rec.get("trace_id", "") for rec in fu_records)
+        return {"received_once": sum(1 for t in by_id if seen[t] == 1), "measured": len(by_id)}
+    received: dict[str, list[dict]] = {}
+    for rec in fu_records:
+        match = TRUTH.search(rec.get("path", ""))
+        if match and match[1] in by_id:
+            received.setdefault(match[1], []).append(rec)
+    once = {t: recs[0] for t, recs in received.items() if len(recs) == 1}
+    out = {
+        "measured": len(by_id),
+        "reached_once": len(once),
+        "received_once": sum(1 for t, rec in once.items() if rec.get("trace_id") == t),
+        "traceparent_absent": sum(1 for rec in once.values() if not rec.get("trace_id")),
     }
+    if any(r.get("baggage") for r in rows):
+        out["baggage_exact"] = sum(
+            1 for t, rec in once.items() if rec.get("baggage") == by_id[t]["baggage"]
+        )
+        out["baggage_absent"] = sum(1 for rec in once.values() if not rec.get("baggage"))
+    return out
 
 
 def analyze_cell(cell_dir: Path) -> dict:
@@ -61,10 +85,11 @@ def analyze_cell(cell_dir: Path) -> dict:
     excluded = frozenset(
         _ids([*glob.glob(str(cell_dir / "warmup-*.jsonl")), cell_dir / "tail.jsonl"])
     )
-    with open(cell_dir / "agent.out") as f:
-        lines = list(f)
+    agent_out = cell_dir / "agent.out"
+    lines = agent_out.read_text().splitlines(keepends=True) if agent_out.exists() else []
+    selections = points(meta["hops"], meta["fake_upstream_port"]) if lines else []
     scored = []
-    for label, selection in points(meta["hops"], meta["fake_upstream_port"]):
+    for label, selection in selections:
         result = evaluate_json(
             rows,
             lines,
@@ -98,7 +123,10 @@ def main(argv: list[str]) -> None:
         if "--json" in argv:
             continue
         meta = result["meta"]
-        print(f"== {cell_dir.name}: hops={meta['hops']} strip_hop={meta['strip_hop']}")
+        print(
+            f"== {cell_dir.name}: hops={meta['hops']} kind={meta.get('hop_kind', 'traefik')} "
+            f"strip_hop={meta['strip_hop']} agent={meta.get('agent', '?')}"
+        )
         print(
             f"   {'point':18s} {'status':7s} {'correct':>8s} {'swapped':>8s} {'unknown':>8s} "
             f"{'missing':>8s} {'dup':>5s} {'selected':>9s} {'excluded':>9s}"
@@ -110,10 +138,18 @@ def main(argv: list[str]) -> None:
                 f"{r['selected_events']:9d} {r['excluded_outside_run']:9d}"
             )
         w = result["wire"]
-        print(
-            f"   wire: fake-upstream read the right id once for "
-            f"{w['received_once']}/{w['measured']}"
-        )
+        line = f"   wire: fake-upstream read the right id once for {w['received_once']}"
+        line += f"/{w['measured']}"
+        if "reached_once" in w:
+            line += (
+                f" (reached once {w['reached_once']}, traceparent absent {w['traceparent_absent']})"
+            )
+        print(line)
+        if "baggage_exact" in w:
+            print(
+                f"   wire: baggage exact {w['baggage_exact']}/{w['measured']}, "
+                f"absent {w['baggage_absent']}"
+            )
         print(f"   first point not clean: {first_failure(result['points']) or 'none'}")
     if "--json" in argv:
         print(json.dumps(report, indent=2, default=str))
