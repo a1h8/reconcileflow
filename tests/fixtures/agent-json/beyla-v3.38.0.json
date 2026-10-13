@@ -1,0 +1,50 @@
+{
+ "agent": "beyla-v3.38.0",
+ "load_gen_row": {
+  "conn_key": "127.0.0.1:34318-127.0.0.1:58059|0",
+  "duration_ns": 23625120,
+  "identity_kind": "local_ordinal",
+  "negotiated_protocol": "h2",
+  "protocol": "HTTP/2.0",
+  "response_size": 725,
+  "schema_version": 2,
+  "side": "load-gen",
+  "status_code": 200,
+  "stream_id": 1,
+  "timestamp_ns": 1791865221615275238,
+  "trace_id": "f3816c01451952ebf715591dc42c0ace"
+ },
+ "port": 58059,
+ "span": {
+  "attributes": {
+   "clientAddr": "127.0.0.1",
+   "contentLen": "0",
+   "method": "GET",
+   "responseLen": "0",
+   "route": "/*",
+   "serverAddr": "fake-upstream",
+   "serverPort": "58059",
+   "status": "200",
+   "url": "/truth-f3816c01451952ebf715591dc42c0ace"
+  },
+  "duration": "4.792645ms",
+  "durationUSec": "4792",
+  "end": "1791865221638592",
+  "handlerDuration": "4.056956ms",
+  "handlerDurationUSec": "4056",
+  "handlerStart": "1791865221634535",
+  "host": "127.0.0.1",
+  "hostName": "fake-upstream",
+  "hostPort": "58059",
+  "kind": "SPAN_KIND_SERVER",
+  "parentSpanID": "3397c0566645ef71",
+  "peer": "127.0.0.1",
+  "peerName": "127.0.0.1",
+  "peerPort": "34318",
+  "spanID": "64fd97025ec45fdc",
+  "start": "1791865221633799",
+  "traceFlags": "1",
+  "traceID": "f3816c01451952ebf715591dc42c0ace",
+  "type": "HTTP"
+ }
+}

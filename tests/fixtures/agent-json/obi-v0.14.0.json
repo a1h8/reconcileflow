@@ -1,0 +1,50 @@
+{
+ "agent": "obi-v0.14.0",
+ "load_gen_row": {
+  "conn_key": "127.0.0.1:46764-127.0.0.1:34529|0",
+  "duration_ns": 38461257,
+  "identity_kind": "local_ordinal",
+  "negotiated_protocol": "h2",
+  "protocol": "HTTP/2.0",
+  "response_size": 1960,
+  "schema_version": 2,
+  "side": "load-gen",
+  "status_code": 200,
+  "stream_id": 1,
+  "timestamp_ns": 1791865071606316527,
+  "trace_id": "1046f93efcf675d2d27e28fee7a5835c"
+ },
+ "port": 34529,
+ "span": {
+  "attributes": {
+   "clientAddr": "127.0.0.1",
+   "contentLen": "0",
+   "method": "GET",
+   "responseLen": "0",
+   "route": "/*",
+   "serverAddr": "fake-upstream",
+   "serverPort": "34529",
+   "status": "200",
+   "url": "/truth-1046f93efcf675d2d27e28fee7a5835c"
+  },
+  "duration": "24.509084ms",
+  "durationUSec": "24509",
+  "end": "1791865071641626",
+  "handlerDuration": "6.54591ms",
+  "handlerDurationUSec": "6545",
+  "handlerStart": "1791865071635080",
+  "host": "127.0.0.1",
+  "hostName": "fake-upstream",
+  "hostPort": "34529",
+  "kind": "SPAN_KIND_SERVER",
+  "parentSpanID": "c3f49c5b1a7ac182",
+  "peer": "127.0.0.1",
+  "peerName": "127.0.0.1",
+  "peerPort": "46764",
+  "spanID": "1ab2f74892ba0747",
+  "start": "1791865071617117",
+  "traceFlags": "1",
+  "traceID": "1046f93efcf675d2d27e28fee7a5835c",
+  "type": "HTTP"
+ }
+}
