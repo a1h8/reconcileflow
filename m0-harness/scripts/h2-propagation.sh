@@ -89,9 +89,12 @@ cell() {
 	# Warm-up until OBI prints a server span on this port; one file per attempt.
 	local ready=0
 	for i in $(seq 1 30); do
-		"$bin/load-gen" -target "https://127.0.0.1:$port" -out "$dir/warmup-$i.jsonl" \
+		"$bin/load-gen" -target "https://127.0.0.1:$port" -out "$dir/warmup-$i.jsonl" -truth-in-path \
 			-requests 20 -concurrency 1 2>>"$dir/warmup.log" || true
-		if grep '^\[' "$dir/agent.out" | grep -q "\"hostPort\":\"$port\""; then ready=1; break; fi
+		# One grep on the file, no pipe: under pipefail, "grep | grep -q" fails
+		# once the output outgrows the pipe buffer (grep -q exits on the first
+		# match and the writer gets SIGPIPE). Span fields never occur in log lines.
+		if grep -q "\"hostPort\":\"$port\"" "$dir/agent.out"; then ready=1; break; fi
 		sleep 1
 	done
 	((ready)) || { kill "$obi" "$fu" 2>/dev/null; die "$name: the agent printed no server span (see agent.log)"; }

@@ -152,10 +152,13 @@ cell() {
 	# Warm-up through the whole chain until both ends print server spans.
 	local ready=0 i
 	for i in $(seq 1 40); do
-		"$bin/load-gen" -target "$entry" -out "$dir/warmup-$i.jsonl" \
+		"$bin/load-gen" -target "$entry" -out "$dir/warmup-$i.jsonl" -truth-in-path \
 			-requests 20 -concurrency 1 2>>"$dir/warmup.log" || true
-		if grep '^\[' "$dir/agent.out" | grep -q '"serverAddr":"hop-1"' &&
-			grep '^\[' "$dir/agent.out" | grep -q "\"hostPort\":\"$fu_port\""; then
+		# One grep on the file, no pipe: under pipefail, "grep | grep -q" fails
+		# once the output outgrows the pipe buffer (grep -q exits on the first
+		# match and the writer gets SIGPIPE). Span fields never occur in log lines.
+		if grep -q '"serverAddr":"hop-1"' "$dir/agent.out" &&
+			grep -q "\"hostPort\":\"$fu_port\"" "$dir/agent.out"; then
 			ready=1; break
 		fi
 		sleep 1
