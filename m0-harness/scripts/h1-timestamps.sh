@@ -14,14 +14,19 @@
 # only). Analysis and decision rule: h1_timestamps.py.
 #
 # Run as your normal user, from m0-harness/:
-#   OBI_BIN=/path/to/obi scripts/h1-timestamps.sh
+#   AGENT_BIN=/path/to/obi-or-beyla scripts/h1-timestamps.sh
+# (OBI_BIN is accepted as an alias.) The agent kind is detected from the
+# binary: OBI reads OTEL_EBPF_* variables, Beyla reads BEYLA_*.
 # Phase 1 (your user) builds everything into a fresh run directory and records
 # hashes. Phase 2 re-executes this script under sudo (OBI and the probe need
 # root).
 #
 # Runs: R1 = 2000 requests at concurrency 1, R2 = 10000 at concurrency 100.
-# Environment: OBI_BIN (required), RUN_DIR, R1_N, R2_N.
+# Environment: AGENT_BIN (required; OBI_BIN alias), RUN_DIR, R1_N, R2_N.
 set -euo pipefail
+
+# shellcheck source=agent.sh
+source "$(dirname "$0")/agent.sh"
 
 SERVE_HTTP_VALUE="net/http.serverHandler.ServeHTTP"
 R1_N=${R1_N:-2000}
@@ -32,14 +37,16 @@ die() { echo "error: $*" >&2; exit 1; }
 build() {
 	[[ $(id -u) -ne 0 ]] || die "run phase 1 as your normal user (it calls sudo itself)"
 	[[ -f go.mod && -d cmd/http-signal-probe ]] || die "run from m0-harness/"
-	[[ -x ${OBI_BIN:-} ]] || die "OBI_BIN must point to an executable obi binary"
+	AGENT_BIN=${AGENT_BIN:-${OBI_BIN:-}}
+	[[ -x $AGENT_BIN ]] || die "AGENT_BIN must point to an executable obi or beyla binary"
+	AGENT_KIND=$(agent_kind "$AGENT_BIN") || die "$AGENT_BIN is neither OBI nor Beyla"
 	RUN_DIR=${RUN_DIR:-/tmp/h1-timestamps-$(date +%Y%m%dT%H%M%S)}
 	mkdir -p "$RUN_DIR/bin"
 
 	for cmd in fake-upstream load-gen http-signal-probe; do
 		go build -o "$RUN_DIR/bin/$cmd" "./cmd/$cmd"
 	done
-	cp "$OBI_BIN" "$RUN_DIR/bin/obi"
+	cp "$AGENT_BIN" "$RUN_DIR/bin/agent"
 	local bpf=cmd/http-signal-probe/bpf
 	for f in "$bpf/vmlinux.h" "$bpf/vendor/bpf/bpf_helpers.h"; do
 		[[ -f $f ]] || die "missing $f -- see README \"Building\" (same steps, http-signal-probe paths)"
@@ -52,14 +59,14 @@ build() {
 		echo "kernel: $(uname -r)"
 		echo "go: $(go version)"
 		echo "clang: $(clang --version | head -1)"
-		echo "obi: $(go version -m "$RUN_DIR/bin/obi" | grep -o "buildinfo.Revision=[0-9a-f]*" | head -1)"
+		echo "agent: $AGENT_KIND $(agent_identity "$RUN_DIR/bin/agent")"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "R1_N=$R1_N (c=1) R2_N=$R2_N (c=100) symbol=$SERVE_HTTP_VALUE"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
 	echo "built into $RUN_DIR; phase 2 needs root"
-	exec sudo R1_N="$R1_N" R2_N="$R2_N" "$0" --measure "$RUN_DIR"
+	exec sudo AGENT_KIND="$AGENT_KIND" R1_N="$R1_N" R2_N="$R2_N" "$0" --measure "$RUN_DIR"
 }
 
 free_port() {
@@ -84,8 +91,9 @@ run() {
 	local fu=$!
 	wait_for 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null || die "$dir: fake-upstream did not listen"
 
-	OTEL_EBPF_OPEN_PORT=$port OTEL_EBPF_TRACE_PRINTER=json OTEL_EBPF_LOG_LEVEL=info \
-		"$bin/obi" >"$dir/obi.out" 2>"$dir/obi.log" &
+	local prefix; prefix=$(agent_env_prefix "$AGENT_KIND") || die "unknown AGENT_KIND '$AGENT_KIND'"
+	env "${prefix}_OPEN_PORT=$port" "${prefix}_TRACE_PRINTER=json" "${prefix}_LOG_LEVEL=info" \
+		"$bin/agent" >"$dir/agent.out" 2>"$dir/agent.log" &
 	local obi=$!
 
 	# Warm-up until OBI prints spans, so the measured run starts instrumented.
@@ -98,10 +106,10 @@ run() {
 			-requests 20 -concurrency 1 2>>"$dir/warmup.log" || true
 		# A server span on this port, not just any span (OBI also prints
 		# internal ones, e.g. ProcessAlive, before it instruments anything).
-		if grep '^\[' "$dir/obi.out" | grep -q "\"hostPort\":\"$port\""; then ready=1; break; fi
+		if grep '^\[' "$dir/agent.out" | grep -q "\"hostPort\":\"$port\""; then ready=1; break; fi
 		sleep 1
 	done
-	((ready)) || { kill "$obi" "$fu" 2>/dev/null; die "$dir: OBI printed no span (see obi.log)"; }
+	((ready)) || { kill "$obi" "$fu" 2>/dev/null; die "$dir: the agent printed no span (see agent.log)"; }
 
 	"$bin/http-signal-probe" -binary "$bin/fake-upstream" -obj "$bin/probe.o" \
 		-symbol "$SERVE_HTTP_VALUE" -out "$dir/probe.jsonl" 2>"$dir/probe.log" &
@@ -136,7 +144,7 @@ measure() {
 	echo
 	echo "analyse (as your user, from the repo root):"
 	for d in "$RUN_DIR"/r1-c1 "$RUN_DIR"/r2-c100; do
-		echo "  .venv/bin/python m0-harness/h1_timestamps.py $d/lg.jsonl $d/obi.out $d/probe-fu.jsonl --port $(cat "$d/port")"
+		echo "  .venv/bin/python m0-harness/h1_timestamps.py $d/lg.jsonl $d/agent.out $d/probe-fu.jsonl --port $(cat "$d/port")"
 	done
 }
 
