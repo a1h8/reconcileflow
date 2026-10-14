@@ -3,7 +3,7 @@
 Status: 2026-09-29. This is the execution order for a defensible lab demonstration.
 The matching library, the M0 evaluation harness, and the target operational platform
 have different completion criteria. Finishing this harness does not implement the
-platform or establish PCI-DSS compliance.
+platform or establish regulatory compliance.
 
 ## 1. OBI dependency: merged and measured — the per-stream fix holds under load
 
