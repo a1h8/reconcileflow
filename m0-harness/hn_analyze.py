@@ -125,7 +125,8 @@ def main(argv: list[str]) -> None:
         meta = result["meta"]
         print(
             f"== {cell_dir.name}: hops={meta['hops']} kind={meta.get('hop_kind', 'traefik')} "
-            f"strip_hop={meta['strip_hop']} agent={meta.get('agent', '?')}"
+            f"strip_hop={meta['strip_hop']} agent={meta.get('agent', '?')} "
+            f"propagation={meta.get('context_propagation', 'agent-default')}"
         )
         print(
             f"   {'point':18s} {'status':7s} {'correct':>8s} {'swapped':>8s} {'unknown':>8s} "

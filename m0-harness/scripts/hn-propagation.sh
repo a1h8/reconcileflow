@@ -30,6 +30,9 @@
 #             new outbound request, no header copied -- the agent alone can
 #             carry context across it). STRIP_N applies to traefik only.
 #   BAGGAGE   1: load-gen also sends a baggage entry (A2c)
+#   CONTEXT_PROPAGATION  agent context propagation: empty (default) leaves the
+#             agent's own default (disabled in OBI v0.14.0 and Beyla v3.38.0:
+#             the agent reads context, never writes it); headers, tcp, all
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
 #             root, so phase 2 runs as your user and AGENT_BIN is not needed
 #   RUN_DIR
@@ -46,6 +49,7 @@ TAIL=${TAIL:-50}
 HOP_KIND=${HOP_KIND:-traefik}
 BAGGAGE=${BAGGAGE:-0}
 NO_AGENT=${NO_AGENT:-0}
+CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-}
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -82,13 +86,15 @@ build() {
 		echo "hop kind: $HOP_KIND"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY STRIP_N=$STRIP_N TAIL=$TAIL" \
-			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT"
+			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
+			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
 	local env_args=(AGENT_KIND="$AGENT_KIND" HOPS="$HOPS" REQUESTS="$REQUESTS"
 		CONCURRENCY="$CONCURRENCY" STRIP_N="$STRIP_N" TAIL="$TAIL"
-		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT")
+		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT"
+		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION")
 	if ((NO_AGENT)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -171,9 +177,9 @@ cell() {
 		next="https://127.0.0.1:$port"
 	done
 	local entry=$next
-	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "baggage": %d, "agent": "%s"}\n' \
+	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "baggage": %d, "agent": "%s", "context_propagation": "%s"}\n' \
 		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" "$BAGGAGE" \
-		"$AGENT_KIND" >"$dir/cell.json"
+		"$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" >"$dir/cell.json"
 
 	local lg_flags=(-truth-in-path)
 	((BAGGAGE)) && lg_flags+=(-baggage)
@@ -181,8 +187,11 @@ cell() {
 	local agent=""
 	if ((!NO_AGENT)); then
 		local prefix; prefix=$(agent_env_prefix "$AGENT_KIND") || die "unknown AGENT_KIND '$AGENT_KIND'"
-		env "${prefix}_OPEN_PORT=$(IFS=,; echo "${ports[*]}")" "${prefix}_TRACE_PRINTER=json" \
-			"${prefix}_LOG_LEVEL=info" "$bin/agent" >"$dir/agent.out" 2>"$dir/agent.log" &
+		local agent_env=("${prefix}_OPEN_PORT=$(IFS=,; echo "${ports[*]}")"
+			"${prefix}_TRACE_PRINTER=json" "${prefix}_LOG_LEVEL=info")
+		[[ -z $CONTEXT_PROPAGATION ]] ||
+			agent_env+=("${prefix}_BPF_CONTEXT_PROPAGATION=$CONTEXT_PROPAGATION")
+		env "${agent_env[@]}" "$bin/agent" >"$dir/agent.out" 2>"$dir/agent.log" &
 		agent=$!
 	fi
 
@@ -213,6 +222,7 @@ cell() {
 	if [[ -n $agent ]]; then kill -TERM "$agent"; wait "$agent" || true; fi
 	kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null || true
 	echo "$name: hops=$n kind=$HOP_KIND strip_hop=$strip_hop baggage=$BAGGAGE agent=$AGENT_KIND" \
+		"propagation=${CONTEXT_PROPAGATION:-agent-default}" \
 		"requests=$REQUESTS c=$CONCURRENCY load-gen exit=$lg_exit" |
 		tee -a "$RUN_DIR/cells.txt"
 }
