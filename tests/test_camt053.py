@@ -80,3 +80,37 @@ def test_multiple_statements_and_entries_have_distinct_locators(tmp_path):
         assert records[0].record.id != records[1].record.id
         assert records[0].source_locator == "/Document/BkToCstmrStmt/Stmt[1]/Ntry[1]"
         assert records[1].source_locator == "/Document/BkToCstmrStmt/Stmt[2]/Ntry[1]"
+
+
+STATEMENT = PAYLOAD[
+    PAYLOAD.index(b"    <Stmt>") : PAYLOAD.index(b"    </Stmt>") + len(b"    </Stmt>\n")
+]
+
+
+@pytest.mark.parametrize(
+    "before,after,reason",
+    [
+        (b"<Id>LAB-STATEMENT</Id>", b"<Id> </Id>", "empty Id"),
+        (STATEMENT, b"", "statement is missing"),
+        (
+            b"<Othr><Id>LAB-ACCOUNT</Id></Othr>",
+            b"<IBAN>LAB-IBAN</IBAN><Othr><Id>LAB-ACCOUNT</Id></Othr>",
+            "exactly one nonempty account",
+        ),
+        (
+            b"<Othr><Id>LAB-ACCOUNT</Id></Othr>",
+            b"<Othr><Id> </Id></Othr>",
+            "exactly one nonempty account",
+        ),
+        # date.fromisoformat accepts the basic format since 3.11; the adapter must not.
+        (b"<ValDt><Dt>2026-09-28</Dt>", b"<ValDt><Dt>20260928</Dt>", "YYYY-MM-DD"),
+        (b"</ValDt>", b"</ValDt><RvslInd>yes</RvslInd>", "invalid RvslInd"),
+        (b"</ValDt>", b"</ValDt><RvslInd>true</RvslInd><RvslInd>true</RvslInd>", "invalid RvslInd"),
+    ],
+)
+def test_each_rejection_reports_its_own_reason(tmp_path, before, after, reason):
+    assert before in PAYLOAD
+    with ProvenanceStore(tmp_path / "raw.sqlite") as store:
+        with pytest.raises(IngestionError, match=reason) as error:
+            ingest(store, PAYLOAD.replace(before, after), source="bank")
+        assert store.raw_event(error.value.raw_event_id)

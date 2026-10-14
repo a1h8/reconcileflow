@@ -18,6 +18,7 @@ START_LINE/END_LINE (0-indexed, END exclusive) slice OBI_LOG to the window of
 one sweep level, since OBI's own leading timestamp is batched, not per-event,
 and cannot be used to window a continuously-running OBI process by time
 (documented pitfall, README "OTEL_EBPF_TRACE_PRINTER=text leading timestamp").
+Exits 1 if any HTTP/HTTPClient line in the window could not be parsed.
 """
 
 from __future__ import annotations
@@ -58,10 +59,21 @@ def analyze(obi_lines: list[str], ground_truth: set[str]) -> dict[tuple[str, str
     return counts
 
 
-if __name__ == "__main__":
-    obi_log, gt_jsonl = sys.argv[1], sys.argv[2]
-    start_line = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    end_line = int(sys.argv[4]) if len(sys.argv) > 4 else None
+def count_unparsed(lines: list[str]) -> int:
+    """HTTP/HTTPClient events OBI_LINE cannot read: an empty route, method or
+    traceparent is valid printer output but does not match. They would
+    otherwise vanish from the denominator instead of invalidating the run."""
+    return sum(
+        1
+        for line in lines
+        if ("HTTP(subType=" in line or "HTTPClient(subType=" in line) and not OBI_LINE.match(line)
+    )
+
+
+def main(argv: list[str]) -> int:
+    obi_log, gt_jsonl = argv[0], argv[1]
+    start_line = int(argv[2]) if len(argv) > 2 else 0
+    end_line = int(argv[3]) if len(argv) > 3 else None
 
     with open(obi_log) as f:
         lines = f.readlines()[start_line:end_line]
@@ -72,3 +84,12 @@ if __name__ == "__main__":
     for (svc, event), (total, bad) in sorted(counts.items()):
         pct = 100 * bad / total if total else 0
         print(f"{svc:15s} {event:12s} total={total:5d} self_authored={bad:5d} ({pct:.1f}%)")
+    unparsed = count_unparsed(lines)
+    if unparsed:
+        print(f"INVALID: {unparsed} HTTP/HTTPClient lines not parsed", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
