@@ -34,6 +34,8 @@
 #   FRESH_HOP relay hop that sets a fresh traceparent (-fresh-traceparent; 0: none)
 #   UNINSTRUMENTED_HOPS  hops left out of the agent's port selection, e.g. "1"
 #   BAGGAGE   1: load-gen also sends a baggage entry (A2c)
+#   LG_MASK   1: measured and tail requests carry no traceparent (load-gen -mask),
+#             the chain-level negative control; warm-up is not masked
 #   CONTEXT_PROPAGATION  agent context propagation: empty (default) leaves the
 #             agent's own default (disabled in OBI v0.14.0 and Beyla v3.38.0:
 #             the agent reads context, never writes it); headers, tcp, all
@@ -59,6 +61,7 @@ HOP_KINDS=${HOP_KINDS:-}
 STRIP_HOP=${STRIP_HOP:-0}
 FRESH_HOP=${FRESH_HOP:-0}
 UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-}
+LG_MASK=${LG_MASK:-0}
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -99,7 +102,8 @@ build() {
 		[[ ! -x $RUN_DIR/bin/traefik ]] ||
 			echo "traefik: $("$RUN_DIR/bin/traefik" version | awk '/^Version:/ {print $2}')"
 		echo "hop kind: $HOP_KIND hop kinds: ${HOP_KINDS:-same}"
-		echo "STRIP_HOP=$STRIP_HOP FRESH_HOP=$FRESH_HOP UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-none}"
+		echo "STRIP_HOP=$STRIP_HOP FRESH_HOP=$FRESH_HOP UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-none}" \
+			"LG_MASK=$LG_MASK"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
@@ -111,7 +115,7 @@ build() {
 		CONCURRENCY="$CONCURRENCY" STRIP_N="$STRIP_N" TAIL="$TAIL"
 		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT"
 		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" HOP_KINDS="$HOP_KINDS" STRIP_HOP="$STRIP_HOP"
-		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS")
+		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK")
 	if ((NO_AGENT)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -209,9 +213,9 @@ cell() {
 	done
 	local entry=$next
 	local uninstrumented_json; uninstrumented_json=$(printf '%s,' $UNINSTRUMENTED_HOPS)
-	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "baggage": %d, "agent": "%s", "context_propagation": "%s"}\n' \
+	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s"}\n' \
 		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" \
-		"$(printf '"%s",' "${kinds[@]}" | sed 's/,$//')" "$FRESH_HOP" "${uninstrumented_json%,}" \
+		"$(printf '"%s",' "${kinds[@]}" | sed 's/,$//')" "$FRESH_HOP" "${uninstrumented_json%,}" "$LG_MASK" \
 		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" >"$dir/cell.json"
 	local first_instrumented=1
 	while ! instrumented "$first_instrumented" && ((first_instrumented <= n)); do
@@ -249,10 +253,12 @@ cell() {
 	done
 	((ready)) || { kill $agent "${pids[@]}" 2>/dev/null; die "$name: agent printed no span at both ends"; }
 
+	local measured_flags=("${lg_flags[@]}")
+	((LG_MASK)) && measured_flags+=(-mask)
 	local lg_exit=0
-	"$bin/load-gen" -target "$entry" -out "$dir/lg.jsonl" "${lg_flags[@]}" \
+	"$bin/load-gen" -target "$entry" -out "$dir/lg.jsonl" "${measured_flags[@]}" \
 		-requests "$REQUESTS" -concurrency "$CONCURRENCY" 2>"$dir/lg.log" || lg_exit=$?
-	"$bin/load-gen" -target "$entry" -out "$dir/tail.jsonl" "${lg_flags[@]}" \
+	"$bin/load-gen" -target "$entry" -out "$dir/tail.jsonl" "${measured_flags[@]}" \
 		-requests "$TAIL" -concurrency 1 2>"$dir/tail.log" || true
 	sleep 3
 
