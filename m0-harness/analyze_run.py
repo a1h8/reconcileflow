@@ -19,9 +19,7 @@ PATH = re.compile(r"\sGET (?P<path>[^ (]+)\(")
 TRUTH = re.compile(r"/truth-([0-9a-f]{32})(?:$|[/?])")
 
 
-def evaluate(
-    rows: list[dict], lines: list[str], service: str, event: str, destination: str
-) -> dict:
+def _check_ground_truth(rows: list[dict]) -> set[str]:
     expected = {row["trace_id"] for row in rows}
     if not rows or len(expected) != len(rows):
         raise ValueError("ground truth must contain nonempty, unique request identities")
@@ -29,20 +27,31 @@ def evaluate(
         raise ValueError("schema_version=2 required for explicit request accounting")
     if any(row.get("side") != "load-gen" for row in rows):
         raise ValueError("ground truth must contain load-gen records only")
+    return expected
 
+
+def _score(
+    rows: list[dict],
+    expected: set[str],
+    observed: list[tuple[str | None, str]],
+    parse_failures: int,
+    hop: dict,
+    excluded: frozenset[str] = frozenset(),
+) -> dict:
+    """Score selected observations, each (request path or None, reported trace id).
+
+    ``excluded`` holds ids of known traffic outside the measured run (warm-up,
+    tail): an event whose path id -- or, without a path id, reported id -- is in
+    it is counted apart and does not invalidate the run. Any other extra event
+    still does.
+    """
     observations: dict[str, list[str]] = defaultdict(list)
-    selected = unlabelled = unexpected = parse_failures = 0
-    for line in lines:
-        match = OBI_LINE.match(line)
-        if not match:
-            if "HTTP(subType=" in line or "HTTPClient(subType=" in line:
-                parse_failures += 1
+    unlabelled = unexpected = outside = 0
+    for path, reported_tid in observed:
+        truth = TRUTH.search(path) if path else None
+        if (truth[1] if truth else reported_tid) in excluded:
+            outside += 1
             continue
-        if (match["svc"], match["event"], match["dest"]) != (service, event, destination):
-            continue
-        selected += 1
-        path = PATH.search(line)
-        truth = TRUTH.search(path["path"]) if path else None
         if not truth:
             unlabelled += 1
             continue
@@ -50,7 +59,7 @@ def evaluate(
         if request_id not in expected:
             unexpected += 1
             continue
-        observations[request_id].append(match["tid"])
+        observations[request_id].append(reported_tid)
 
     correct = swapped = unknown = missing = duplicates = 0
     for request_id in expected:
@@ -65,10 +74,11 @@ def evaluate(
             swapped += 1
         else:
             unknown += 1
+    selected = len(observed) - outside
     valid = not (unlabelled or unexpected or duplicates or parse_failures) and selected > 0
     return {
         "evaluation": "path_labelled_lab_not_GT2",
-        "hop": {"service": service, "event": event, "destination": destination},
+        "hop": hop,
         "status": "VALID" if valid else "INVALID",
         "attempted": len(rows),
         "request_failures": sum(bool(row.get("error")) for row in rows),
@@ -82,24 +92,128 @@ def evaluate(
         "unlabelled_events": unlabelled,
         "unexpected_requests": unexpected,
         "unparsed_http_lines": parse_failures,
+        "excluded_outside_run": outside,
         "correct_per_attempt": correct / len(rows) if valid else None,
     }
+
+
+def evaluate(
+    rows: list[dict],
+    lines: list[str],
+    service: str,
+    event: str,
+    destination: str,
+    excluded: frozenset[str] = frozenset(),
+) -> dict:
+    """Score OBI's text-printer output for one hop."""
+    expected = _check_ground_truth(rows)
+    observed: list[tuple[str | None, str]] = []
+    parse_failures = 0
+    for line in lines:
+        match = OBI_LINE.match(line)
+        if not match:
+            if "HTTP(subType=" in line or "HTTPClient(subType=" in line:
+                parse_failures += 1
+            continue
+        if (match["svc"], match["event"], match["dest"]) != (service, event, destination):
+            continue
+        path = PATH.search(line)
+        observed.append((path["path"] if path else None, match["tid"]))
+    hop = {"service": service, "event": event, "destination": destination}
+    return _score(rows, expected, observed, parse_failures, hop, excluded)
+
+
+def evaluate_json(
+    rows: list[dict],
+    lines: list[str],
+    port: int | None = None,
+    kind: str = "SPAN_KIND_SERVER",
+    excluded: frozenset[str] = frozenset(),
+    attrs: dict[str, str] | None = None,
+) -> dict:
+    """Score the agent's JSON-printer output (OBI or Beyla) for one observation point.
+
+    Selects spans of ``kind`` whose ``hostPort`` is ``port`` (when given) and whose
+    ``attributes`` contain every ``attrs`` pair (e.g. ``serverAddr=hop-1``: in a
+    chain, hops are told apart by service name, not by port). The request path is
+    ``attributes.url``. Same scoring as the text printer.
+    """
+    if port is None and not attrs:
+        raise ValueError("select an observation point by port, by attributes, or both")
+    attrs = attrs or {}
+    expected = _check_ground_truth(rows)
+    observed: list[tuple[str | None, str]] = []
+    parse_failures = 0
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("["):
+            continue  # OBI's own log lines share stdout
+        try:
+            spans = json.loads(line)
+        except json.JSONDecodeError:
+            parse_failures += 1
+            continue
+        for span in spans:
+            if span.get("kind") != kind:
+                continue
+            if port is not None and int(span.get("hostPort", 0)) != port:
+                continue
+            span_attrs = span.get("attributes", {})
+            if any(span_attrs.get(key) != value for key, value in attrs.items()):
+                continue
+            observed.append((span.get("attributes", {}).get("url"), span.get("traceID", "")))
+    hop = {"kind": kind, "port": port, "attributes": attrs}
+    return _score(rows, expected, observed, parse_failures, hop, excluded)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("obi_log")
     parser.add_argument("load_gen_jsonl")
-    parser.add_argument("--service", required=True)
-    parser.add_argument("--event", choices=("HTTP", "HTTPClient"), required=True)
+    parser.add_argument("--json-port", type=int, help="JSON printer output: hop's server port")
     parser.add_argument(
-        "--destination", required=True, help="exact printed destination, e.g. traefik:7080"
+        "--json-attr",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="JSON printer output: required span attribute, e.g. serverAddr=hop-1 (repeatable)",
+    )
+    parser.add_argument("--json-kind", default="SPAN_KIND_SERVER")
+    parser.add_argument("--service", help="text printer output: printed service")
+    parser.add_argument("--event", choices=("HTTP", "HTTPClient"))
+    parser.add_argument("--destination", help="exact printed destination, e.g. traefik:7080")
+    parser.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[],
+        help="load-gen JSONL files of known traffic outside the measured run (warm-up, tail)",
     )
     args = parser.parse_args()
     with open(args.load_gen_jsonl) as source:
         rows = [json.loads(line) for line in source if line.strip()]
+    excluded: set[str] = set()
+    for path in args.exclude:
+        with open(path) as source:
+            excluded |= {json.loads(line)["trace_id"] for line in source if line.strip()}
+    if excluded & {row["trace_id"] for row in rows}:
+        parser.error("--exclude files share ids with the measured run")
     with open(args.obi_log) as source:
-        result = evaluate(rows, list(source), args.service, args.event, args.destination)
+        if args.json_port is not None or args.json_attr:
+            attrs = dict(item.split("=", 1) for item in args.json_attr)
+            result = evaluate_json(
+                rows, list(source), args.json_port, args.json_kind, frozenset(excluded), attrs
+            )
+        elif args.service and args.event and args.destination:
+            result = evaluate(
+                rows,
+                list(source),
+                args.service,
+                args.event,
+                args.destination,
+                frozenset(excluded),
+            )
+        else:
+            parser.error("give --json-port/--json-attr, or --service, --event and --destination")
     print(json.dumps(result, indent=2, sort_keys=True))
     if result["status"] != "VALID":
         raise SystemExit(1)

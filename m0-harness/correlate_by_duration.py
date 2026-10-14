@@ -191,7 +191,12 @@ def run_sliding(
     """
     rows, observed = _sorted_sides(obi_log, load_gen_jsonl, start, end)
     lefts = [
-        Record(id=row["trace_id"], account="1", amount=Decimal(row["duration_ns"]), value_date=_PLACEHOLDER_DATE)
+        Record(
+            id=row["trace_id"],
+            account="1",
+            amount=Decimal(row["duration_ns"]),
+            value_date=_PLACEHOLDER_DATE,
+        )
         for row in rows
     ]
     rights = [

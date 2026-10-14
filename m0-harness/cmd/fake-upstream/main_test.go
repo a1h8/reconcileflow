@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -265,5 +266,27 @@ func TestJoinCannotScoreTheCurrentHarnessOutput(t *testing.T) {
 	join := buildBinary(t, r.bin, "join", "../join")
 	if err := exec.Command(join, "-load-gen", r.loadGenPath, "-fake-upstream", r.fuPath).Run(); err == nil {
 		t.Fatal("join accepted HTTP/2 records; update this test and the join README notes")
+	}
+}
+
+// Baggage and path, the two fields the A2c wire check joins on: fake-upstream
+// must log exactly the baggage load-gen sent and the truth path it received.
+func TestBaggageAndTruthPathReachTheLogUnchanged(t *testing.T) {
+	const n = 50
+	r := pipeline(t, "-truth-in-path", "-baggage", "-requests", fmt.Sprint(n), "-concurrency", "5")
+	observed := byTraceID(t, r.fakeUpstream)
+	seen := map[string]bool{}
+	for _, want := range r.loadGen {
+		got := observed[want.TraceID]
+		if !strings.HasPrefix(want.Baggage, "exchange_id=") || strings.Contains(want.Baggage, want.TraceID) {
+			t.Fatalf("baggage %q must be an exchange id drawn apart from trace_id %s", want.Baggage, want.TraceID)
+		}
+		if got.Baggage != want.Baggage || got.Path != "/truth-"+want.TraceID {
+			t.Fatalf("trace_id %s: baggage %q/%q, path %q", want.TraceID, want.Baggage, got.Baggage, got.Path)
+		}
+		if seen[want.Baggage] {
+			t.Fatalf("baggage %q repeated", want.Baggage)
+		}
+		seen[want.Baggage] = true
 	}
 }
