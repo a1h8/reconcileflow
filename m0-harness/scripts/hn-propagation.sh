@@ -39,6 +39,7 @@
 #             the agent reads context, never writes it); headers, tcp, all
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
 #             root, so phase 2 runs as your user and AGENT_BIN is not needed
+#   RUN_BASE  where run directories go (default: runs/ next to the repository)
 #   RUN_DIR
 set -euo pipefail
 
@@ -77,7 +78,10 @@ build() {
 	if [[ " $HOP_KIND $HOP_KINDS " == *" traefik "* ]]; then
 		[[ -x ${TRAEFIK_BIN:-} ]] || die "TRAEFIK_BIN must point to an executable traefik binary"
 	fi
-	RUN_DIR=${RUN_DIR:-/tmp/hn-propagation-$(date +%Y%m%dT%H%M%S)}
+	# Runs go to persistent disk, next to the repository (RUN_BASE overrides):
+	# /tmp may be a size-limited tmpfs, wiped at reboot, and runs are evidence.
+	RUN_BASE=${RUN_BASE:-$(dirname "$(git rev-parse --show-toplevel)")/runs}
+	RUN_DIR=${RUN_DIR:-$RUN_BASE/hn-propagation-$(date +%Y%m%dT%H%M%S)}
 	mkdir -p "$RUN_DIR/bin"
 
 	for cmd in fake-upstream load-gen relay; do

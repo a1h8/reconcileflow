@@ -22,7 +22,7 @@
 # root).
 #
 # Runs: R1 = 2000 requests at concurrency 1, R2 = 10000 at concurrency 100.
-# Environment: AGENT_BIN (required; OBI_BIN alias), RUN_DIR, R1_N, R2_N.
+# Environment: RUN_BASE (default: ../runs next to the repository), AGENT_BIN (required; OBI_BIN alias), RUN_DIR, R1_N, R2_N.
 set -euo pipefail
 
 # shellcheck source=agent.sh
@@ -40,7 +40,10 @@ build() {
 	AGENT_BIN=${AGENT_BIN:-${OBI_BIN:-}}
 	[[ -x $AGENT_BIN ]] || die "AGENT_BIN must point to an executable obi or beyla binary"
 	AGENT_KIND=$(agent_kind "$AGENT_BIN") || die "$AGENT_BIN is neither OBI nor Beyla"
-	RUN_DIR=${RUN_DIR:-/tmp/h1-timestamps-$(date +%Y%m%dT%H%M%S)}
+	# Runs go to persistent disk, next to the repository (RUN_BASE overrides):
+	# /tmp may be a size-limited tmpfs, wiped at reboot, and runs are evidence.
+	RUN_BASE=${RUN_BASE:-$(dirname "$(git rev-parse --show-toplevel)")/runs}
+	RUN_DIR=${RUN_DIR:-$RUN_BASE/h1-timestamps-$(date +%Y%m%dT%H%M%S)}
 	mkdir -p "$RUN_DIR/bin"
 
 	for cmd in fake-upstream load-gen http-signal-probe; do

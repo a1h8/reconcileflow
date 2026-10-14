@@ -19,7 +19,7 @@
 # Phase 1 (your user) builds into a fresh run directory and records hashes.
 # Phase 2 re-executes this script under sudo (the agent needs root).
 #
-# Environment: AGENT_BIN (required; OBI_BIN alias), RUN_DIR, TAIL (50),
+# Environment: RUN_BASE (default: ../runs next to the repository), AGENT_BIN (required; OBI_BIN alias), RUN_DIR, TAIL (50),
 # CONTEXT_PROPAGATION (empty: the agent's default, disabled in OBI v0.14.0 and
 # Beyla v3.38.0 -- reading only; headers, tcp, all: the agent writes context).
 set -euo pipefail
@@ -38,7 +38,10 @@ build() {
 	AGENT_BIN=${AGENT_BIN:-${OBI_BIN:-}}
 	[[ -x $AGENT_BIN ]] || die "AGENT_BIN must point to an executable obi or beyla binary"
 	AGENT_KIND=$(agent_kind "$AGENT_BIN") || die "$AGENT_BIN is neither OBI nor Beyla"
-	RUN_DIR=${RUN_DIR:-/tmp/h2-propagation-$(date +%Y%m%dT%H%M%S)}
+	# Runs go to persistent disk, next to the repository (RUN_BASE overrides):
+	# /tmp may be a size-limited tmpfs, wiped at reboot, and runs are evidence.
+	RUN_BASE=${RUN_BASE:-$(dirname "$(git rev-parse --show-toplevel)")/runs}
+	RUN_DIR=${RUN_DIR:-$RUN_BASE/h2-propagation-$(date +%Y%m%dT%H%M%S)}
 	mkdir -p "$RUN_DIR/bin"
 
 	for cmd in fake-upstream load-gen; do
