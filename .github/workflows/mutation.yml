@@ -1,0 +1,42 @@
+name: Mutation
+
+# docs/mutation-testing.md. Not part of ci.yml: a run takes minutes, and only
+# changes to the code or its tests can move the result.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "mutation-baseline.toml"
+      - "tools/mutation_check.py"
+
+jobs:
+  mutation:
+    name: Mutation testing (rules, engine, attribution, stability)
+    runs-on: ubuntu-latest
+    # Past 20 minutes this moves to a nightly run on main (docs/mutation-testing.md).
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install
+        run: pip install -e ".[dev,mutation]"
+      - name: mutmut run
+        run: mutmut run
+      - name: compare with the baseline
+        run: python tools/mutation_check.py | tee mutation-report.txt
+        shell: bash -o pipefail {0}
+      - name: upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: |
+            mutation-report.txt
+            mutants/**/*.meta
+          if-no-files-found: warn

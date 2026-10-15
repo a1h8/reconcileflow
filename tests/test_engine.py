@@ -1,11 +1,11 @@
 """Example cases: one business intent per test."""
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal, localcontext
 
 import pytest
 
-from reconcileflow import Record, RejectReason, RuleId, Tolerance, reconcile
+from reconcileflow import Record, Reject, RejectReason, RuleId, Tolerance, reconcile
 
 D = Decimal
 
@@ -149,6 +149,25 @@ def test_rule_priority():
     by_left = {m.left_id: m for m in result.matches}
     assert by_left["L1"].rule is RuleId.M0_REFERENCE
     assert by_left["L1"].right_ids == ("R2",)
+
+
+@pytest.mark.parametrize("rounding", [None, ROUND_DOWN])
+def test_score_does_not_depend_on_the_callers_decimal_context(rounding):
+    """0.8 - 0.05 * 0.10/0.30 - 0.05 * 1/3 = 0.7666..., rounded half-even.
+
+    Same bytes on every run means the same bytes whatever rounding mode the
+    caller left in its own context.
+    """
+    with localcontext() as ctx:
+        if rounding is not None:
+            ctx.rounding = rounding
+        result = reconcile(
+            [rec("L1", "100.00", 1)],
+            [rec("R1", "100.10", 2)],
+            Tolerance(amount_abs=D("0.30"), date_days=3, max_aggregate_size=1),
+        )
+
+    assert result.matches[0].score == D("0.766667")
 
 
 def test_disjoint_blocks_do_not_mix():
@@ -410,3 +429,162 @@ def test_business_key_is_stable_across_a_break_becoming_a_match():
     (match,) = after.matches
     assert brk.business_key == match.business_key == "B1"
     assert brk.fingerprint != match.fingerprint
+
+
+# --- Counters: J4 reads them as time series, so every one is pinned --------
+
+
+def test_counters_tally_every_stage():
+    """Two blocks; an M0 and two M1 matches; two free rights; one left alone.
+
+    candidates_evaluated = 1 (M0: L1-R1) + 2 (M1: L2-R2, L4-R6); M2 never
+    runs because no left is still free, and the OTHER block has no right.
+    """
+    result = reconcile(
+        [
+            rec("L1", "100.00", 1, reference="TX"),
+            rec("L2", "50.00", 1),
+            rec("L4", "20.00", 1),
+            rec("L3", "10.00", 1, account="OTHER"),
+        ],
+        [
+            rec("R1", "100.00", 1, reference="TX"),
+            rec("R2", "50.00", 1),
+            rec("R6", "20.00", 1),
+            rec("R3", "7.00", 1),
+            rec("R4", "8.00", 1),
+        ],
+        Tolerance(max_aggregate_size=1),
+    )
+
+    assert result.counters == {
+        "records_left": 4,
+        "records_right": 5,
+        "blocks": 2,
+        "candidates_evaluated": 3,
+        "matched_M0_REFERENCE": 1,
+        "matched_M1_EXACT": 2,
+        "unmatched_left": 1,
+        "unmatched_right": 2,
+    }
+
+
+# --- Oversized blocks: only M3 is skipped, and every left is reported ------
+
+
+def test_oversized_block_still_runs_the_single_counterpart_rules():
+    """Six rights over a bound of five: M3 is off, M0-M2 are not. Each left
+    left over gets its own BLOCK_TOO_LARGE and its own manual review."""
+    rights = [rec(f"R{i}", "1.00", 1) for i in range(6)]
+    result = reconcile(
+        [rec("L1", "1.00", 1), rec("L2", "999.00", 1), rec("L3", "998.00", 1)],
+        rights,
+        Tolerance(date_days=3, max_aggregate_size=3, max_block_candidates=5),
+    )
+
+    assert [(m.left_id, m.rule, m.right_ids) for m in result.matches] == [
+        ("L1", RuleId.M1_EXACT, ("R0",))
+    ]
+    assert result.rejects == (
+        Reject("L2", None, RejectReason.BLOCK_TOO_LARGE),
+        Reject("L3", None, RejectReason.BLOCK_TOO_LARGE),
+    )
+    assert result.counters["manual_review"] == 2
+
+
+def test_a_block_at_its_bound_is_not_oversized():
+    """Five rights, bound five: M3 still runs and finds the pair."""
+    rights = [rec(f"R{i}", "1.00", 1) for i in range(1, 6)]
+    match = only_match(
+        reconcile(
+            [rec("L1", "2.00", 1)],
+            rights,
+            Tolerance(max_aggregate_size=2, max_block_candidates=5),
+        )
+    )
+
+    assert (match.rule, match.right_ids) == (RuleId.M3_AGGREGATE, ("R1", "R2"))
+
+
+# --- Resolution: a skipped candidate does not end the rule -----------------
+
+
+@pytest.mark.parametrize(
+    ("lefts", "rights"),
+    [
+        # Sorted M1 candidates: L1-R1 (0.9), L1-R2 (0.883333, L1 taken),
+        # L2-R3 (0.866667).
+        (
+            [rec("L1", "100.00", 1), rec("L2", "50.00", 1)],
+            [rec("R1", "100.00", 1), rec("R2", "100.00", 2), rec("R3", "50.00", 3)],
+        ),
+        # Sorted M1 candidates: L1-R1 (0.9), L2-R1 (0.883333, R1 taken),
+        # L2-R2 (0.866667), L1-R2 (0.85).
+        (
+            [rec("L1", "100.00", 1), rec("L2", "100.00", 2)],
+            [rec("R1", "100.00", 1), rec("R2", "100.00", 4)],
+        ),
+    ],
+    ids=["left-taken", "right-taken"],
+)
+def test_a_taken_candidate_does_not_end_resolution(lefts, rights):
+    """Otherwise the next left falls through to M2 and is matched by a looser
+    rule than the one that actually fits it."""
+    result = reconcile(lefts, rights, Tolerance(date_days=3, max_aggregate_size=1))
+
+    assert {m.left_id: m.rule for m in result.matches} == {
+        "L1": RuleId.M1_EXACT,
+        "L2": RuleId.M1_EXACT,
+    }
+
+
+# --- Audit: the exact reasons, at the exact bounds -------------------------
+
+
+def test_amount_reason_compares_the_difference_not_the_sum():
+    result = reconcile(
+        [rec("L1", "100.00", 1)],
+        [rec("R1", "-100.00", 1)],
+        Tolerance(max_aggregate_size=1),
+    )
+
+    assert result.rejects == (Reject("L1", "R1", RejectReason.AMOUNT_OUT_OF_TOLERANCE),)
+
+
+def test_aggregate_not_found_is_reported_from_a_size_of_two():
+    result = reconcile(
+        [rec("L1", "999.00", 1)],
+        [rec("R1", "10.00", 1), rec("R2", "20.00", 1)],
+        Tolerance(max_aggregate_size=2),
+    )
+
+    assert result.rejects == (
+        Reject("L1", "R1", RejectReason.AMOUNT_OUT_OF_TOLERANCE),
+        Reject("L1", "R2", RejectReason.AMOUNT_OUT_OF_TOLERANCE),
+        Reject("L1", None, RejectReason.AGGREGATE_NOT_FOUND),
+    )
+
+
+@pytest.mark.parametrize(
+    ("second_day", "pair_reason", "aggregate_not_found"),
+    [(4, RejectReason.AMOUNT_OUT_OF_TOLERANCE, True), (9, RejectReason.DATE_OUT_OF_WINDOW, False)],
+    ids=["at-the-window-edge", "outside-the-window"],
+)
+def test_aggregate_not_found_needs_two_free_rights_in_the_window(
+    second_day, pair_reason, aggregate_not_found
+):
+    """A combination is conceivable only from rights inside the inclusive
+    window: day 4 is three days from day 1, day 9 is not."""
+    result = reconcile(
+        [rec("L1", "999.00", 1)],
+        [rec("R1", "10.00", 1), rec("R2", "20.00", second_day)],
+        Tolerance(date_days=3, max_aggregate_size=2),
+    )
+
+    expected = [
+        Reject("L1", "R1", RejectReason.AMOUNT_OUT_OF_TOLERANCE),
+        Reject("L1", "R2", pair_reason),
+    ]
+    if aggregate_not_found:
+        expected.append(Reject("L1", None, RejectReason.AGGREGATE_NOT_FOUND))
+    assert result.rejects == tuple(expected)
