@@ -103,3 +103,29 @@ def test_cell_without_agent_has_wire_check_only(tmp_path):
     result = hn.analyze_cell(cell)
     assert result["points"] == []
     assert result["wire"]["received_once"] == 2
+
+
+def test_wire_tells_the_edges_fresh_id_from_the_clients():
+    rows = [lg_row(A), lg_row(B)]
+    fresh = {A: "f" * 32, B: "e" * 32}
+    fu = [
+        {"path": f"/truth-{A}", "trace_id": "f" * 32},  # the edge's fresh id won
+        {"path": f"/truth-{B}", "trace_id": B},  # the client's id got through
+    ]
+    w = hn.wire(rows, fu, fresh)
+    assert (w["fresh_received"], w["received_once"], w["other_received"]) == (1, 1, 0)
+
+
+def test_consistency_compares_adjacent_points_whatever_the_ids():
+    # Self-authored ids (not the client's) that stay the same along the chain are
+    # consistent; a change between two points is not.
+    X, Y = "c" * 32, "d" * 32
+    spans = [
+        span(hn.SERVER, "hop-1", A, X),
+        span(hn.CLIENT, "hop-1", A, X),
+        span(hn.SERVER, "hop-1", B, Y),
+        span(hn.CLIENT, "hop-1", B, "9" * 32),
+    ]
+    lines = [json.dumps(spans) + "\n"]
+    chain = hn.consistency(lines, hops=1, fu_port=FU_PORT, measured={A, B})
+    assert chain[0] == {"from": "hop-1 in", "to": "hop-1 out", "same_id": 1, "both_seen": 2}

@@ -29,12 +29,19 @@
 #   HOP_KIND  traefik (default: forwards headers itself) or relay (cmd/relay:
 #             new outbound request, no header copied -- the agent alone can
 #             carry context across it). STRIP_N applies to traefik only.
+#   HOP_KINDS per-hop kinds, overriding HOP_KIND, e.g. "relay traefik"
+#   STRIP_HOP hop whose Traefik strips traceparent in every regular cell (0: none)
+#   FRESH_HOP relay hop that sets a fresh traceparent (-fresh-traceparent; 0: none)
+#   UNINSTRUMENTED_HOPS  hops left out of the agent's port selection, e.g. "1"
 #   BAGGAGE   1: load-gen also sends a baggage entry (A2c)
+#   LG_MASK   1: measured and tail requests carry no traceparent (load-gen -mask),
+#             the chain-level negative control; warm-up is not masked
 #   CONTEXT_PROPAGATION  agent context propagation: empty (default) leaves the
 #             agent's own default (disabled in OBI v0.14.0 and Beyla v3.38.0:
 #             the agent reads context, never writes it); headers, tcp, all
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
 #             root, so phase 2 runs as your user and AGENT_BIN is not needed
+#   RUN_BASE  where run directories go (default: runs/ next to the repository)
 #   RUN_DIR
 set -euo pipefail
 
@@ -50,30 +57,41 @@ HOP_KIND=${HOP_KIND:-traefik}
 BAGGAGE=${BAGGAGE:-0}
 NO_AGENT=${NO_AGENT:-0}
 CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-}
+HOP_KINDS=${HOP_KINDS:-}
+STRIP_HOP=${STRIP_HOP:-0}
+FRESH_HOP=${FRESH_HOP:-0}
+UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-}
+LG_MASK=${LG_MASK:-0}
 
 die() { echo "error: $*" >&2; exit 1; }
 
 build() {
 	[[ $(id -u) -ne 0 ]] || die "run phase 1 as your normal user (it calls sudo itself)"
 	[[ -f go.mod && -d cmd/load-gen ]] || die "run from m0-harness/"
-	case $HOP_KIND in traefik | relay) ;; *) die "HOP_KIND must be traefik or relay" ;; esac
+	local kind
+	for kind in $HOP_KIND $HOP_KINDS; do
+		case $kind in traefik | relay) ;; *) die "hop kinds must be traefik or relay, got '$kind'" ;; esac
+	done
 	AGENT_KIND=none
 	if ((!NO_AGENT)); then
 		AGENT_BIN=${AGENT_BIN:-${OBI_BIN:-}}
 		[[ -x $AGENT_BIN ]] || die "AGENT_BIN must point to an executable obi or beyla binary"
 		AGENT_KIND=$(agent_kind "$AGENT_BIN") || die "$AGENT_BIN is neither OBI nor Beyla"
 	fi
-	if [[ $HOP_KIND == traefik ]]; then
+	if [[ " $HOP_KIND $HOP_KINDS " == *" traefik "* ]]; then
 		[[ -x ${TRAEFIK_BIN:-} ]] || die "TRAEFIK_BIN must point to an executable traefik binary"
 	fi
-	RUN_DIR=${RUN_DIR:-/tmp/hn-propagation-$(date +%Y%m%dT%H%M%S)}
+	# Runs go to persistent disk, next to the repository (RUN_BASE overrides):
+	# /tmp may be a size-limited tmpfs, wiped at reboot, and runs are evidence.
+	RUN_BASE=${RUN_BASE:-$(dirname "$(git rev-parse --show-toplevel)")/runs}
+	RUN_DIR=${RUN_DIR:-$RUN_BASE/hn-propagation-$(date +%Y%m%dT%H%M%S)}
 	mkdir -p "$RUN_DIR/bin"
 
 	for cmd in fake-upstream load-gen relay; do
 		go build -o "$RUN_DIR/bin/$cmd" "./cmd/$cmd"
 	done
 	((NO_AGENT)) || cp "$AGENT_BIN" "$RUN_DIR/bin/agent"
-	[[ $HOP_KIND != traefik ]] || cp "$TRAEFIK_BIN" "$RUN_DIR/bin/traefik"
+	[[ " $HOP_KIND $HOP_KINDS " != *" traefik "* ]] || cp "$TRAEFIK_BIN" "$RUN_DIR/bin/traefik"
 
 	{
 		echo "date: $(date -Iseconds)"
@@ -81,9 +99,11 @@ build() {
 		echo "go: $(go version)"
 		if ((NO_AGENT)); then echo "agent: none"; else
 			echo "agent: $AGENT_KIND $(agent_identity "$RUN_DIR/bin/agent")"; fi
-		[[ $HOP_KIND != traefik ]] ||
+		[[ ! -x $RUN_DIR/bin/traefik ]] ||
 			echo "traefik: $("$RUN_DIR/bin/traefik" version | awk '/^Version:/ {print $2}')"
-		echo "hop kind: $HOP_KIND"
+		echo "hop kind: $HOP_KIND hop kinds: ${HOP_KINDS:-same}"
+		echo "STRIP_HOP=$STRIP_HOP FRESH_HOP=$FRESH_HOP UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-none}" \
+			"LG_MASK=$LG_MASK"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
@@ -94,7 +114,8 @@ build() {
 	local env_args=(AGENT_KIND="$AGENT_KIND" HOPS="$HOPS" REQUESTS="$REQUESTS"
 		CONCURRENCY="$CONCURRENCY" STRIP_N="$STRIP_N" TAIL="$TAIL"
 		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT"
-		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION")
+		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" HOP_KINDS="$HOP_KINDS" STRIP_HOP="$STRIP_HOP"
+		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK")
 	if ((NO_AGENT)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -144,6 +165,14 @@ hop_config() {
 	} >"$file"
 }
 
+# kind_of <k>: hop k's kind, from HOP_KINDS when set, else HOP_KIND.
+kind_of() {
+	local kinds=($HOP_KINDS)
+	if ((${#kinds[@]} >= $1)); then echo "${kinds[$1 - 1]}"; else echo "$HOP_KIND"; fi
+}
+
+instrumented() { [[ " $UNINSTRUMENTED_HOPS " != *" $1 "* ]]; }
+
 # cell <name> <hops> <strip-hop: 0 for none>
 cell() {
 	local name=$1 n=$2 strip_hop=$3
@@ -157,13 +186,19 @@ cell() {
 	wait_for 10 listening "$fu_port" || die "$name: fake-upstream did not listen"
 
 	# Build the chain from the far end: hop-n forwards to fake-upstream.
-	local next="https://127.0.0.1:$fu_port" ports=("$fu_port") hop_ports=() k
+	local next="https://127.0.0.1:$fu_port" ports=("$fu_port") hop_ports=() kinds=() k
 	for ((k = n; k >= 1; k--)); do
 		local port; port=$(free_port)
-		if [[ $HOP_KIND == relay ]]; then
+		local kind; kind=$(kind_of "$k")
+		kinds=("$kind" "${kinds[@]}")
+		if [[ $kind == relay ]]; then
+			local fresh_flags=()
+			((k == FRESH_HOP)) && fresh_flags=(-fresh-traceparent -log "$dir/hop-$k-fresh.jsonl")
+			((k == strip_hop)) && die "$name: STRIP_HOP $k is a relay; only Traefik hops strip"
 			cp "$bin/relay" "$dir/hop-$k"
-			"$dir/hop-$k" -addr "127.0.0.1:$port" -next "$next" >"$dir/hop-$k.log" 2>&1 &
+			"$dir/hop-$k" -addr "127.0.0.1:$port" -next "$next" "${fresh_flags[@]}" >"$dir/hop-$k.log" 2>&1 &
 		else
+			((k == FRESH_HOP)) && die "$name: FRESH_HOP $k is a Traefik hop; only relays set a fresh traceparent"
 			cp "$bin/traefik" "$dir/hop-$k"
 			hop_config "$dir/hop-$k.yml" "$next" $((k == strip_hop))
 			"$dir/hop-$k" --entrypoints.web.address="127.0.0.1:$port" --entrypoints.web.http.tls=true \
@@ -172,14 +207,20 @@ cell() {
 		fi
 		pids+=($!)
 		wait_for 15 listening "$port" || die "$name: hop-$k did not listen"
-		ports+=("$port")
+		instrumented "$k" && ports+=("$port")
 		hop_ports=("$port" "${hop_ports[@]}")
 		next="https://127.0.0.1:$port"
 	done
 	local entry=$next
-	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "baggage": %d, "agent": "%s", "context_propagation": "%s"}\n' \
-		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" "$BAGGAGE" \
-		"$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" >"$dir/cell.json"
+	local uninstrumented_json; uninstrumented_json=$(printf '%s,' $UNINSTRUMENTED_HOPS)
+	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s"}\n' \
+		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" \
+		"$(printf '"%s",' "${kinds[@]}" | sed 's/,$//')" "$FRESH_HOP" "${uninstrumented_json%,}" "$LG_MASK" \
+		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" >"$dir/cell.json"
+	local first_instrumented=1
+	while ! instrumented "$first_instrumented" && ((first_instrumented <= n)); do
+		first_instrumented=$((first_instrumented + 1))
+	done
 
 	local lg_flags=(-truth-in-path)
 	((BAGGAGE)) && lg_flags+=(-baggage)
@@ -204,7 +245,7 @@ cell() {
 		# One grep on the file, no pipe: under pipefail, "grep | grep -q" fails
 		# once the output outgrows the pipe buffer (grep -q exits on the first
 		# match and the writer gets SIGPIPE). Span fields never occur in log lines.
-		if grep -q '"serverAddr":"hop-1"' "$dir/agent.out" &&
+		if { ((first_instrumented > n)) || grep -q "\"serverAddr\":\"hop-$first_instrumented\"" "$dir/agent.out"; } &&
 			grep -q "\"hostPort\":\"$fu_port\"" "$dir/agent.out"; then
 			ready=1; break
 		fi
@@ -212,10 +253,12 @@ cell() {
 	done
 	((ready)) || { kill $agent "${pids[@]}" 2>/dev/null; die "$name: agent printed no span at both ends"; }
 
+	local measured_flags=("${lg_flags[@]}")
+	((LG_MASK)) && measured_flags+=(-mask)
 	local lg_exit=0
-	"$bin/load-gen" -target "$entry" -out "$dir/lg.jsonl" "${lg_flags[@]}" \
+	"$bin/load-gen" -target "$entry" -out "$dir/lg.jsonl" "${measured_flags[@]}" \
 		-requests "$REQUESTS" -concurrency "$CONCURRENCY" 2>"$dir/lg.log" || lg_exit=$?
-	"$bin/load-gen" -target "$entry" -out "$dir/tail.jsonl" "${lg_flags[@]}" \
+	"$bin/load-gen" -target "$entry" -out "$dir/tail.jsonl" "${measured_flags[@]}" \
 		-requests "$TAIL" -concurrency 1 2>"$dir/tail.log" || true
 	sleep 3
 
@@ -232,7 +275,7 @@ measure() {
 	((NO_AGENT)) || [[ $(id -u) -eq 0 ]] || die "phase 2 must run as root"
 	local n
 	for n in $HOPS; do
-		cell "n$n" "$n" 0
+		cell "n$n" "$n" "$STRIP_HOP"
 		if [[ -n $STRIP_N && $n == "$STRIP_N" && $HOP_KIND == traefik ]]; then
 			cell "n$n-strip" "$n" 2
 		fi

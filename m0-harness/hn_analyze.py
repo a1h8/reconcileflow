@@ -22,6 +22,7 @@ import glob
 import json
 import sys
 from collections import Counter
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -48,7 +49,62 @@ def points(hops: int, fake_upstream_port: int) -> list[tuple[str, dict]]:
     return out
 
 
-def wire(rows: list[dict], fu_records: list[dict]) -> dict:
+def reported_ids(lines: list[str], selection: dict, port: int | None = None) -> dict[str, str]:
+    """truth id -> trace id the agent reported at one observation point (unique spans only)."""
+    seen: dict[str, list[str]] = {}
+    for line in lines:
+        if not line.startswith("["):
+            continue
+        for span in json.loads(line):
+            if span.get("kind") != selection["kind"]:
+                continue
+            if (
+                selection.get("port") is not None
+                and int(span.get("hostPort", 0)) != selection["port"]
+            ):
+                continue
+            attrs = span.get("attributes", {})
+            if any(attrs.get(k) != v for k, v in (selection.get("attrs") or {}).items()):
+                continue
+            match = TRUTH.search(attrs.get("url", ""))
+            if match:
+                seen.setdefault(match[1], []).append(span.get("traceID", ""))
+    return {t: ids[0] for t, ids in seen.items() if len(ids) == 1}
+
+
+def consistency(lines: list[str], hops: int, fu_port: int, measured: set[str]) -> list[dict]:
+    """For each pair of adjacent points, requests on which both report the same trace id."""
+    selections = points(hops, fu_port)
+    maps = [(label, reported_ids(lines, sel)) for label, sel in selections]
+    out = []
+    for (a, ma), (b, mb) in pairwise(maps):
+        both = [t for t in measured if t in ma and t in mb]
+        out.append(
+            {
+                "from": a,
+                "to": b,
+                "same_id": sum(1 for t in both if ma[t] == mb[t]),
+                "both_seen": len(both),
+            }
+        )
+    return out
+
+
+def fresh_ids(cell_dir: Path) -> dict[str, str]:
+    """truth id -> fresh trace id set by a relay hop running -fresh-traceparent."""
+    out: dict[str, str] = {}
+    for path in glob.glob(str(cell_dir / "hop-*-fresh.jsonl")):
+        with open(path) as f:
+            for line in f:
+                if line.strip():
+                    rec = json.loads(line)
+                    match = TRUTH.search(rec.get("path", ""))
+                    if match:
+                        out[match[1]] = rec.get("trace_id", "")
+    return out
+
+
+def wire(rows: list[dict], fu_records: list[dict], fresh: dict[str, str] | None = None) -> dict:
     """What fake-upstream read from the headers, per measured request.
 
     Joined by the truth id in fake-upstream's logged path. Records from runs
@@ -70,6 +126,15 @@ def wire(rows: list[dict], fu_records: list[dict]) -> dict:
         "received_once": sum(1 for t, rec in once.items() if rec.get("trace_id") == t),
         "traceparent_absent": sum(1 for rec in once.values() if not rec.get("trace_id")),
     }
+    if fresh:
+        out["fresh_received"] = sum(
+            1 for t, rec in once.items() if fresh.get(t) == rec.get("trace_id")
+        )
+        out["other_received"] = sum(
+            1
+            for t, rec in once.items()
+            if rec.get("trace_id") and rec.get("trace_id") not in (t, fresh.get(t))
+        )
     if any(r.get("baggage") for r in rows):
         out["baggage_exact"] = sum(
             1 for t, rec in once.items() if rec.get("baggage") == by_id[t]["baggage"]
@@ -101,7 +166,14 @@ def analyze_cell(cell_dir: Path) -> dict:
         scored.append((label, result))
     with open(cell_dir / "fu.jsonl") as f:
         fu_records = [json.loads(line) for line in f if line.strip()]
-    return {"meta": meta, "points": scored, "wire": wire(rows, fu_records)}
+    measured = {r["trace_id"] for r in rows}
+    chain = consistency(lines, meta["hops"], meta["fake_upstream_port"], measured) if lines else []
+    return {
+        "meta": meta,
+        "points": scored,
+        "wire": wire(rows, fu_records, fresh_ids(cell_dir)),
+        "consistency": chain,
+    }
 
 
 def first_failure(scored: list[tuple[str, dict]]) -> str | None:
@@ -124,7 +196,8 @@ def main(argv: list[str]) -> None:
             continue
         meta = result["meta"]
         print(
-            f"== {cell_dir.name}: hops={meta['hops']} kind={meta.get('hop_kind', 'traefik')} "
+            f"== {cell_dir.name}: hops={meta['hops']} "
+            f"kinds={','.join(meta.get('hop_kinds') or [meta.get('hop_kind', 'traefik')])} "
             f"strip_hop={meta['strip_hop']} agent={meta.get('agent', '?')} "
             f"propagation={meta.get('context_propagation', 'agent-default')}"
         )
@@ -146,6 +219,13 @@ def main(argv: list[str]) -> None:
                 f" (reached once {w['reached_once']}, traceparent absent {w['traceparent_absent']})"
             )
         print(line)
+        if "fresh_received" in w:
+            print(
+                f"   wire: edge's fresh id {w['fresh_received']}/{w['measured']}, "
+                f"client id {w['received_once']}, other {w['other_received']}"
+            )
+        for c in result["consistency"]:
+            print(f"   same id {c['from']} -> {c['to']}: {c['same_id']}/{c['both_seen']}")
         if "baggage_exact" in w:
             print(
                 f"   wire: baggage exact {w['baggage_exact']}/{w['measured']}, "

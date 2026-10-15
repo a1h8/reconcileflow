@@ -727,7 +727,7 @@ as gaps:
     just more precisely scoped: a connection-pooling hop *can* intermittently
     drop trace context under real concurrent load — not "eventually and
     permanently," as first claimed, but often enough (10–34% observed here)
-    that a PCI-DSS-grade tool cannot treat direct propagation as sufficient
+    that an audit-grade tool cannot treat direct propagation as sufficient
     on its own.
 - **The correlator MVP's recall is solved (100% once load-calibrated), but its
   precision was never real until this session's last step.** `T` was first

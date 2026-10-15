@@ -19,13 +19,16 @@
 # Phase 1 (your user) builds into a fresh run directory and records hashes.
 # Phase 2 re-executes this script under sudo (the agent needs root).
 #
-# Environment: AGENT_BIN (required; OBI_BIN alias), RUN_DIR, TAIL (50).
+# Environment: RUN_BASE (default: ../runs next to the repository), AGENT_BIN (required; OBI_BIN alias), RUN_DIR, TAIL (50),
+# CONTEXT_PROPAGATION (empty: the agent's default, disabled in OBI v0.14.0 and
+# Beyla v3.38.0 -- reading only; headers, tcp, all: the agent writes context).
 set -euo pipefail
 
 # shellcheck source=agent.sh
 source "$(dirname "$0")/agent.sh"
 
 TAIL=${TAIL:-50}
+CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-}
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -35,7 +38,10 @@ build() {
 	AGENT_BIN=${AGENT_BIN:-${OBI_BIN:-}}
 	[[ -x $AGENT_BIN ]] || die "AGENT_BIN must point to an executable obi or beyla binary"
 	AGENT_KIND=$(agent_kind "$AGENT_BIN") || die "$AGENT_BIN is neither OBI nor Beyla"
-	RUN_DIR=${RUN_DIR:-/tmp/h2-propagation-$(date +%Y%m%dT%H%M%S)}
+	# Runs go to persistent disk, next to the repository (RUN_BASE overrides):
+	# /tmp may be a size-limited tmpfs, wiped at reboot, and runs are evidence.
+	RUN_BASE=${RUN_BASE:-$(dirname "$(git rev-parse --show-toplevel)")/runs}
+	RUN_DIR=${RUN_DIR:-$RUN_BASE/h2-propagation-$(date +%Y%m%dT%H%M%S)}
 	mkdir -p "$RUN_DIR/bin"
 
 	for cmd in fake-upstream load-gen; do
@@ -49,12 +55,13 @@ build() {
 		echo "go: $(go version)"
 		echo "agent: $AGENT_KIND $(agent_identity "$RUN_DIR/bin/agent")"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
-		echo "TAIL=$TAIL"
+		echo "TAIL=$TAIL CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
 	echo "built into $RUN_DIR; phase 2 needs root"
-	exec sudo AGENT_KIND="$AGENT_KIND" TAIL="$TAIL" "$0" --measure "$RUN_DIR"
+	exec sudo AGENT_KIND="$AGENT_KIND" TAIL="$TAIL" CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" \
+		"$0" --measure "$RUN_DIR"
 }
 
 free_port() {
@@ -82,8 +89,10 @@ cell() {
 	wait_for 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null || die "$name: fake-upstream did not listen"
 
 	local prefix; prefix=$(agent_env_prefix "$AGENT_KIND") || die "unknown AGENT_KIND '$AGENT_KIND'"
-	env "${prefix}_OPEN_PORT=$port" "${prefix}_TRACE_PRINTER=json" "${prefix}_LOG_LEVEL=info" \
-		"$bin/agent" >"$dir/agent.out" 2>"$dir/agent.log" &
+	local agent_env=("${prefix}_OPEN_PORT=$port" "${prefix}_TRACE_PRINTER=json" "${prefix}_LOG_LEVEL=info")
+	[[ -z $CONTEXT_PROPAGATION ]] ||
+		agent_env+=("${prefix}_BPF_CONTEXT_PROPAGATION=$CONTEXT_PROPAGATION")
+	env "${agent_env[@]}" "$bin/agent" >"$dir/agent.out" 2>"$dir/agent.log" &
 	local obi=$!
 
 	# Warm-up until OBI prints a server span on this port; one file per attempt.
@@ -109,7 +118,8 @@ cell() {
 
 	kill -TERM "$obi"; wait "$obi" || true
 	kill "$fu"; wait "$fu" 2>/dev/null || true
-	echo "$name: port=$port requests=$requests c=$concurrency flags=[$*] load-gen exit=$lg_exit" |
+	echo "$name: port=$port requests=$requests c=$concurrency flags=[$*]" \
+		"propagation=${CONTEXT_PROPAGATION:-agent-default} load-gen exit=$lg_exit" |
 		tee -a "$RUN_DIR/cells.txt"
 }
 
