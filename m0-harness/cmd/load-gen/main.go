@@ -56,6 +56,8 @@ func main() {
 	seed := flag.String("seed-policy", "variable", "variable only; fixed replay is not implemented")
 	timeout := flag.Duration("timeout", 30*time.Second, "deadline per request, including response body")
 	requireHTTP2 := flag.Bool("require-http2", true, "mark a request failed unless HTTP/2 was negotiated")
+	baggage := flag.Bool("baggage", false, "send a W3C baggage header exchange_id=<random 128-bit hex>, "+
+		"drawn independently of trace_id, and log the value sent (records' baggage field)")
 	flag.Parse()
 	if *concurrency <= 0 || *total <= 0 || *timeout <= 0 {
 		log.Fatal("concurrency, requests and timeout must be positive")
@@ -92,7 +94,11 @@ func main() {
 			if *truthInPath {
 				path = "/truth-" + traceID
 			}
-			record := performRequest(client, tracker, *target+path, traceID, traceparent, *control, *mask, *requireHTTP2)
+			bag := ""
+			if *baggage {
+				bag = "exchange_id=" + randHex(16)
+			}
+			record := performRequest(client, tracker, *target+path, traceID, traceparent, bag, *control, *mask, *requireHTTP2)
 			if err := w.Write(record); err != nil {
 				writeFailures.Add(1)
 				log.Printf("write record: %v", err)
@@ -109,8 +115,8 @@ func main() {
 		writeFailures.Add(1)
 		log.Printf("close output: %v", err)
 	}
-	log.Printf("done: attempted=%d succeeded=%d failed=%d write_failures=%d control=%q pool=%v mask=%v truthInPath=%v",
-		*total, succeeded.Load(), failed.Load(), writeFailures.Load(), *control, *pool, *mask, *truthInPath)
+	log.Printf("done: attempted=%d succeeded=%d failed=%d write_failures=%d control=%q pool=%v mask=%v truthInPath=%v baggage=%v",
+		*total, succeeded.Load(), failed.Load(), writeFailures.Load(), *control, *pool, *mask, *truthInPath, *baggage)
 	if failed.Load() != 0 || writeFailures.Load() != 0 {
 		os.Exit(1)
 	}
@@ -130,10 +136,10 @@ func newClient(pool bool, timeout time.Duration) *http.Client {
 
 // One record for every attempted request, including build, transport and body failures.
 // StreamID remains a local completion ordinal, NEVER a protocol stream ID.
-func performRequest(client *http.Client, tracker *connTracker, target, traceID, traceparent, control string, mask, requireHTTP2 bool) (record oracle.Record) {
+func performRequest(client *http.Client, tracker *connTracker, target, traceID, traceparent, baggage, control string, mask, requireHTTP2 bool) (record oracle.Record) {
 	started := time.Now()
 	record = oracle.Record{
-		SchemaVersion: 2, Side: "load-gen", TraceID: traceID, Control: control,
+		SchemaVersion: 2, Side: "load-gen", TraceID: traceID, Control: control, Baggage: baggage,
 		TimestampNS: started.UnixNano(), StreamID: -1, IdentityKind: "local_ordinal",
 	}
 	defer func() { record.DurationNS = time.Since(started).Nanoseconds() }()
@@ -147,6 +153,9 @@ func performRequest(client *http.Client, tracker *connTracker, target, traceID, 
 	}
 	if !mask {
 		req.Header.Set("traceparent", traceparent)
+	}
+	if baggage != "" {
+		req.Header.Set("baggage", baggage)
 	}
 	if control != "" {
 		req.Header.Set("X-Witness-Control", control)

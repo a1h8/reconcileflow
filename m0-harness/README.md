@@ -681,6 +681,19 @@ Exact-`trace_id` matching (used for all the D_cov/D_acc numbers in this
 section and the OBI section above) is unaffected — it never depended on the
 timestamp field.
 
+> **⚠ Corrected 2026-10-12 — the timestamps are not batched; the text
+> printer's time format is broken.** OBI's text printer formats the span
+> start with the Go layout `"2006-01-02 15:04:05.12345"`. `.12345` is not a
+> fractional-second layout in Go: it prints month, day, hour, minute and
+> second, so every event within one second prints the same value
+> (10:00:00.000 to 10:00:00.987 on 2026-09-29 all print as
+> `10:00:00.9291000`). That fully accounts for "6 distinct values for 1985
+> events". OBI's structured output (JSON printer) carries per-event times:
+> 100% distinct, consistent with an independent kernel probe to ~10-15 µs.
+> The Skew and correlator-MVP Δ values above still carry this quantization
+> error; their qualitative conclusions are unchanged. See
+> ["OBI timestamps are per-event"](#obi-timestamps-are-per-event-the-1-s-batching-was-a-print-format-defect-2026-10-12).
+
 ## Thesis 2 — where this leaves it (2026-09-24, both open items closed)
 
 `ground-truth-eval-plane-v3.md`'s thesis 2: OBI and the correlator are two
@@ -732,6 +745,8 @@ as gaps:
   itself**: OBI's timing relationship with the application is load-dependent,
   and its trace-printer timestamp is batched (~1s granularity) rather than
   per-event — the spec's own calibration method (§6) doesn't apply as written.
+  *(Corrected 2026-10-12: not batched — a print-format defect; the structured
+  output is per-event. See the section of that date at the end.)*
 
 **Combinability (OBI ∪ correlator) — thesis 2's second half — is now
 answerable, and the answer is qualified, not clean.** There is real residual
@@ -1481,3 +1496,62 @@ write errors (`_ = enc.Encode(...)`); not changed here.
 91% statement coverage without a kernel. Six mutants (old counting, no size
 check, PID from the thread half of `pid_tgid`, exit 0 on loss, `==` on
 `ErrClosed`, `-binary` check skipped) fail its tests.
+
+## OBI timestamps are per-event: the "~1 s batching" was a print-format defect (2026-10-12)
+
+**Question.** Can per-event timestamps support timing-based pairing at high
+volume? The ~1 s batching reported on 2026-09-24 said no. Reading OBI's source
+said otherwise: the text printer uses the Go time layout
+`"2006-01-02 15:04:05.12345"`, whose `.12345` prints month, day, hour, minute,
+second instead of a fraction (checked with a six-line Go program). Underneath,
+`request.Span` holds kernel monotonic nanoseconds per event; the JSON printer
+(`OTEL_EBPF_TRACE_PRINTER=json`) exposes `start`, `handlerStart`, `end` in
+microseconds with the `traceID`. Still present in v0.14.0 and v1.0.0-rc.1.
+
+**Method** (`scripts/h1-timestamps.sh`, analysis `h1_timestamps.py`, both
+tested; decision rule written before the runs). One hop, `load-gen ->
+fake-upstream`, OBI (JSON printer) and `http-signal-probe` (kernel timestamp
+at `net/http.serverHandler.ServeHTTP` entry) attached at the same time. R1:
+2000 requests at concurrency 1; R2: 10000 at concurrency 100. Pairing never
+uses time: OBI by trace id, the probe by order (R1 only). Residual = offset to
+load-gen minus its median. Two independent runs, two OBI binaries: commit
+`335c1c9e` built from source, and the v0.14.0 release (revision `13d9b0c3f`).
+
+**Results.**
+
+| | Run 1 (`335c1c9e`) | Run 2 (v0.14.0) |
+|---|---|---|
+| Distinct timestamps, OBI structured output (R1 / R2) | 100% / 99.8-100% | 100% / 99.9-100% |
+| OBI `handlerStart` vs probe entry, same request (R1): p50 / p99 / max | 1.2 / 10.8 / 51 µs | 1.75 / 14.75 / 103 µs |
+| load-gen send vs probe entry (R1): p50 / p99 / max | 64 / 790 µs / 7.3 ms | 91 / 502 µs / 5.1 ms |
+| OBI `end` vs load-gen completion (R2): p99 | 694 µs | 565 µs |
+| OBI `start` vs load-gen send (R2): p99 | 28.6 ms | 4.6 ms |
+
+**What this shows, and what it does not.**
+
+- **The timestamps are per-event and precise.** Two independent kernel-side
+  observations of the same handler entry agree to ~10-15 µs (p99).
+- **That is one event seen twice, not two hops.** Between client and server
+  the residual is ~0.5-0.8 ms p99 at concurrency 1, with millisecond spikes.
+  Its structure, identical in both runs: the first request (connection and
+  TLS setup) is among the largest; no dependency on server idle time or
+  response size; a clear dependency on the client's idle gap between requests
+  (gap < 50 µs: median about -100 µs; 100-200 µs: about +80 to +130 µs), the
+  signature of Go runtime threads parking and being woken; irregular
+  millisecond spikes, no period. Not decomposed further (that needs a
+  kernel-side probe on the client's send path).
+- **Under load, application-side start times are a poor pairing signal**
+  (R2 start p99 4.6-28.6 ms, client-side queueing); end times hold
+  (~0.6-0.7 ms).
+- **For correlation**, the noise between two hops — transit plus scheduling,
+  ~0.5 ms class — governs timing-based pairing, not timestamp precision.
+  Exact-identity pairing on the propagated `traceparent` stays the primary
+  path; timing only covers what propagation misses.
+
+**Side observations.** No duplicated trace id in any run (swaps are not
+detectable here: this run did not use `-truth-in-path`). In R1 the last 8-10
+requests have no OBI span at all, consistent with a final batch not flushed
+before shutdown — unconfirmed. Two harness defects were found and fixed in the
+script during the runs: the readiness check accepted any span, and warm-up
+attempts overwrote one file (6 and 33 observed warm-up spans could not be
+attributed). Raw run outputs are not committed.
