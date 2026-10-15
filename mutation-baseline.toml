@@ -1,0 +1,149 @@
+# Mutants that survive on purpose. Checked by tools/mutation_check.py;
+# see docs/mutation-testing.md for what an entry must state.
+
+[[survivor]]
+function = "reconcileflow.engine._pair_reject_reason"
+removed = "if abs(left.amount - right.amount) > amount_tolerance(left.amount, tol):"
+added = "if abs(left.amount - right.amount) >= amount_tolerance(left.amount, tol):"
+reason = "a free pair at exactly the amount limit is always matched by M2, so it never reaches the audit"
+assumes = "M2 runs on every block with a free left and right, the same invariant as the unreachable return None"
+
+[[survivor]]
+function = "reconcileflow.engine._reconcile_block"
+removed = "continue"
+added = "break"
+reason = "break and continue both end the loop: M3_AGGREGATE is the last rule"
+assumes = "M3_AGGREGATE is the last member of RuleId"
+
+[[survivor]]
+function = "reconcileflow.engine._reconcile_block"
+removed = "if not available_left or not available_right:"
+added = "if not available_left and not available_right:"
+reason = "with one side empty, no rule can produce a candidate, so going on changes nothing"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.m0.attribution.Metrics._validate"
+removed = "d_cov_count = int((self.d_cov * self.n).to_integral_value(rounding=ROUND_HALF_EVEN))"
+added = "d_cov_count = int((self.d_cov * self.n).to_integral_value(rounding=None))"
+reason = "rounding=None falls back to the context, which is half-even"
+assumes = "ENGINE_CONTEXT is half-even; every entry point opens it (docs/decimal-context.md)"
+
+[[survivor]]
+function = "reconcileflow.m0.attribution.Thresholds.__post_init__"
+removed = "with localcontext(ENGINE_CONTEXT):"
+added = "with localcontext(None):"
+reason = "validation compares fractions, it does no arithmetic"
+assumes = "the body only compares Decimals, no arithmetic: the context is defensive"
+
+[[survivor]]
+function = "reconcileflow.m0.attribution._classify"
+removed = "if r is None or t is None:"
+added = "if r is None and t is None:"
+reason = "r and t are both None or both set, so or and and agree"
+assumes = "PI-18, enforced by Metrics._validate"
+
+[[survivor]]
+function = "reconcileflow.m0.attribution._decide"
+removed = "borderline_checked = m.r is not None and m.t is not None"
+added = "borderline_checked = m.r is not None or m.t is not None"
+reason = "r and t are both None or both set, so or and and agree"
+assumes = "PI-18, enforced by Metrics._validate"
+
+[[survivor]]
+function = "reconcileflow.m0.attribution._decide"
+removed = "moved = {**point, name: value + sign * band}"
+added = "moved = {**point, name: value - sign * band}"
+reason = "the loop runs sign over +1 and -1, so both signs visit the same points"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.m0.attribution.gate0"
+removed = "with localcontext(ENGINE_CONTEXT):"
+added = "with localcontext(None):"
+reason = "gate 0 compares two pairs of fractions"
+assumes = "the body only compares Decimals, no arithmetic: the context is defensive"
+
+[[survivor]]
+function = "reconcileflow.m0.stability._achievable"
+removed = "k = (value * denominator).to_integral_value(rounding=ROUND_HALF_EVEN)"
+added = "k = (value * denominator).to_integral_value(rounding=None)"
+reason = "rounding=None falls back to the context, which is half-even"
+assumes = "ENGINE_CONTEXT is half-even; every entry point opens it (docs/decimal-context.md)"
+
+[[survivor]]
+function = "reconcileflow.m0.stability._achievable"
+removed = "places = -exponent if isinstance(exponent, int) and exponent < 0 else 0"
+added = "places = -exponent if (isinstance(exponent, int) and exponent < 0) or True else 0"
+reason = "for a value in [0, 1], a non-negative exponent only occurs for 0 and 1, where every variant gives the same comparison"
+assumes = "the value is in [0, 1], checked before _achievable is called"
+
+[[survivor]]
+function = "reconcileflow.m0.stability._achievable"
+removed = "places = -exponent if isinstance(exponent, int) and exponent < 0 else 0"
+added = "places = -exponent if isinstance(exponent, int) and exponent < 0 else 1"
+reason = "for a value in [0, 1], a non-negative exponent only occurs for 0 and 1, where every variant gives the same comparison"
+assumes = "the value is in [0, 1], checked before _achievable is called"
+
+[[survivor]]
+function = "reconcileflow.m0.stability._achievable"
+removed = "places = -exponent if isinstance(exponent, int) and exponent < 0 else 0"
+added = "places = -exponent if isinstance(exponent, int) and exponent < 1 else 0"
+reason = "for a value in [0, 1], a non-negative exponent only occurs for 0 and 1, where every variant gives the same comparison"
+assumes = "the value is in [0, 1], checked before _achievable is called"
+
+[[survivor]]
+function = "reconcileflow.m0.stability._achievable"
+removed = "places = -exponent if isinstance(exponent, int) and exponent < 0 else 0"
+added = "places = -exponent if isinstance(exponent, int) and exponent <= 0 else 0"
+reason = "for a value in [0, 1], a non-negative exponent only occurs for 0 and 1, where every variant gives the same comparison"
+assumes = "the value is in [0, 1], checked before _achievable is called"
+
+[[survivor]]
+function = "reconcileflow.m0.stability._achievable"
+removed = "places = -exponent if isinstance(exponent, int) and exponent < 0 else 0"
+added = "places = -exponent if isinstance(exponent, int) or exponent < 0 else 0"
+reason = "for a value in [0, 1], a non-negative exponent only occurs for 0 and 1, where every variant gives the same comparison"
+assumes = "the value is in [0, 1], checked before _achievable is called"
+
+[[survivor]]
+function = "reconcileflow.m0.stability._achievable"
+removed = "quantum = Decimal(1).scaleb(-places)"
+added = "quantum = Decimal(2).scaleb(-places)"
+reason = "for a value in [0, 1], a non-negative exponent only occurs for 0 and 1, where every variant gives the same comparison"
+assumes = "the value is in [0, 1], checked before _achievable is called"
+
+[[survivor]]
+function = "reconcileflow.rules._score"
+removed = "penalty += (abs(residual) / limit) * _AMOUNT_PENALTY"
+added = "penalty = (abs(residual) / limit) * _AMOUNT_PENALTY"
+reason = "the first assignment after penalty = _ZERO: = and += give the same value"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.rules._score"
+removed = "return (_BASE_SCORE[rule] - penalty).quantize(_QUANTUM, rounding=ROUND_HALF_EVEN)"
+added = "return (_BASE_SCORE[rule] - penalty).quantize(_QUANTUM, )"
+reason = "the default rounding is the context's, which is half-even"
+assumes = "ENGINE_CONTEXT is half-even; every entry point opens it (docs/decimal-context.md)"
+
+[[survivor]]
+function = "reconcileflow.rules._score"
+removed = "return (_BASE_SCORE[rule] - penalty).quantize(_QUANTUM, rounding=ROUND_HALF_EVEN)"
+added = "return (_BASE_SCORE[rule] - penalty).quantize(_QUANTUM, rounding=None)"
+reason = "the default rounding is the context's, which is half-even"
+assumes = "ENGINE_CONTEXT is half-even; every entry point opens it (docs/decimal-context.md)"
+
+[[survivor]]
+function = "reconcileflow.rules.m1_exact"
+removed = "score=_score(RuleId.M1_EXACT, _ZERO, _ZERO, gap, tol),"
+added = "score=_score(RuleId.M1_EXACT, None, _ZERO, gap, tol),"
+reason = "_score reads residual only when limit > 0, and M1 passes limit = _ZERO"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.rules.m3_aggregate"
+removed = "residual = left.amount - sum((r.amount for r in combo), _ZERO)"
+added = "residual = left.amount - sum((r.amount for r in combo), )"
+reason = "sum starts from int 0, and 0 + Decimal is the same Decimal"
+assumes = "nothing"

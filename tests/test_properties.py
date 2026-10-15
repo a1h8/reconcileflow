@@ -11,8 +11,9 @@ nothing.
 
 from dataclasses import replace
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Context, Decimal, localcontext
 
+import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -280,3 +281,31 @@ def test_matches_never_cross_currencies(lefts, rights, tol):
     for match in reconcile(lefts, rights, tol).matches:
         currency = left_by_id[match.left_id].currency
         assert all(right_by_id[key].currency == currency for key in match.right_ids)
+
+
+# The caller's context, not the engine's: rounding modes other than the
+# default, and a precision too low for a six-place score (docs/decimal-context.md).
+FOREIGN_CONTEXTS = [
+    Context(rounding=ROUND_DOWN),
+    Context(rounding=ROUND_HALF_UP),
+    Context(rounding=ROUND_CEILING),
+    Context(prec=3),
+]
+FOREIGN_CONTEXT_IDS = ["ROUND_DOWN", "ROUND_HALF_UP", "ROUND_CEILING", "prec=3"]
+
+
+def _outcome(lefts, rights, tol, context=None):
+    with localcontext(context):
+        try:
+            return reconcile(lefts, rights, tol).result_hash
+        except ArithmeticError as error:
+            return type(error).__name__
+
+
+@pytest.mark.parametrize("context", FOREIGN_CONTEXTS, ids=FOREIGN_CONTEXT_IDS)
+@SETTINGS
+@given(LEFTS, RIGHTS, TOLERANCES)
+def test_result_does_not_depend_on_the_callers_decimal_context(context, lefts, rights, tol):
+    """Replaying the same inputs must give the same bytes; the caller's
+    context is not one of the recorded inputs."""
+    assert _outcome(lefts, rights, tol, context) == _outcome(lefts, rights, tol)
