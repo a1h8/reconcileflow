@@ -33,8 +33,8 @@ This spec makes a run reproducible and its result checkable.
 
 ## Scope
 
-`rules.py`, `engine.py`, `m0/attribution.py`, `m0/stability.py`: the code that
-decides matches and verdicts. Adapters, provenance and `m0/latency.py` may be
+`rules.py`, `engine.py`, `m0/attribution.py`, `m0/stability.py`,
+`correlation/assignment.py`: the code that decides matches and verdicts. Adapters, provenance and `m0/latency.py` may be
 added later; each addition starts with a full triage of its survivors.
 
 ## Reproducibility
