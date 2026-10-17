@@ -49,10 +49,8 @@ def test_components_are_split_by_duration_not_only_by_time():
 
 def test_union_is_transitive():
     # L0-R0 and L1-R0 and L1-R1 chain into one component of 4 records.
-    edges = cu.candidate_edges([L(0, 0, 100), L(1, 0, 104)], [R(0, 0, 102), R(1, 0, 107)], 1, TOL)
-    assert [
-        len({e.left_id for e in c} | {e.right_ids[0] for e in c}) for c in cu.components(edges)
-    ] == [4]
+    result = cu.correlate([L(0, 0, 100), L(1, 0, 104)], [R(0, 0, 102), R(1, 0, 107)], 1, TOL)
+    assert result.component_sizes == [4]
 
 
 def test_exact_assignment_beats_greedy():
@@ -117,3 +115,11 @@ def test_near_tie_is_ambiguous_only_with_a_margin():
     tolerant = cu.correlate(lefts, rights, window=1, tol=TOL, margin=Decimal("0.03"))
     assert tolerant.matches == []
     assert tolerant.ambiguous == {"L0", "L1"}
+
+
+def test_a_lone_left_with_an_equally_good_partner_is_ambiguous():
+    # Before the move to reconcileflow.correlation, only kept pairs were tested:
+    # L0 came out neither matched nor ambiguous and fell out of every count.
+    result = cu.correlate([L(0, 0, 100), L(1, 0, 100)], [R(0, 0, 100)], window=1, tol=TOL)
+    assert result.matches == []
+    assert result.ambiguous == {"L0", "L1"}

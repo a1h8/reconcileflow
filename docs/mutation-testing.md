@@ -33,8 +33,8 @@ This spec makes a run reproducible and its result checkable.
 
 ## Scope
 
-`rules.py`, `engine.py`, `m0/attribution.py`, `m0/stability.py`: the code that
-decides matches and verdicts. Adapters, provenance and `m0/latency.py` may be
+`rules.py`, `engine.py`, `m0/attribution.py`, `m0/stability.py`,
+`correlation/assignment.py`: the code that decides matches and verdicts. Adapters, provenance and `m0/latency.py` may be
 added later; each addition starts with a full triage of its survivors.
 
 ## Reproducibility
@@ -90,6 +90,6 @@ counting them as killed.
 A separate workflow, `mutation.yml`, on `workflow_dispatch` and on pull
 requests that touch `src/` or `tests/`. It uploads the report as an artifact.
 
-A local run over the four modules takes on the order of minutes. If the CI run
+A local run over the five modules takes on the order of minutes. If the CI run
 exceeds 20 minutes, it moves to a nightly schedule against `main` instead of
 gating pull requests; that is a measured decision, not one taken in advance.

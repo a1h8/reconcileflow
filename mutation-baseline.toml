@@ -147,3 +147,129 @@ removed = "residual = left.amount - sum((r.amount for r in combo), _ZERO)"
 added = "residual = left.amount - sum((r.amount for r in combo), )"
 reason = "sum starts from int 0, and 0 + Decimal is the same Decimal"
 assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._resolve"
+removed = "forbidden = 1 + sum(weights[x, y] for x in left_ids for y in right_ids if (x, y) in weights)"
+added = "forbidden = 2 + sum(weights[x, y] for x in left_ids for y in right_ids if (x, y) in weights)"
+reason = "any cost above the sum of the component's weights makes a forbidden cell worse than leaving every record alone"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "u, v = [0] * (n + 1), [0] * (n + 1)"
+added = "u, v = [1] * (n + 1), [0] * (n + 1)"
+reason = "every row potential starts one higher and receives the same updates: reduced costs all shift by the same constant, so every comparison is unchanged"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "u, v = [0] * (n + 1), [0] * (n + 1)"
+added = "u, v = [0] * (n + 1), [1] * (n + 1)"
+reason = "every column potential starts one higher and receives the same updates: reduced costs all shift by the same constant, so every comparison is unchanged"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "u, v = [0] * (n + 1), [0] * (n + 1)"
+added = "u, v = [0] * (n + 2), [0] * (n + 1)"
+reason = "indices stay within 0..n: the extra slot is never read"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "u, v = [0] * (n + 1), [0] * (n + 1)"
+added = "u, v = [0] * (n + 1), [0] * (n + 2)"
+reason = "indices stay within 0..n: the extra slot is never read"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "p, way = [0] * (n + 1), [0] * (n + 1)"
+added = "p, way = [0] * (n + 2), [0] * (n + 1)"
+reason = "indices stay within 0..n: the extra slot is never read"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "p, way = [0] * (n + 1), [0] * (n + 1)"
+added = "p, way = [0] * (n + 1), [0] * (n + 2)"
+reason = "indices stay within 0..n: the extra slot is never read"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "p, way = [0] * (n + 1), [0] * (n + 1)"
+added = "p, way = [0] * (n + 1), [1] * (n + 1)"
+reason = "way[j] is written when column j first gets a finite minv, before the path back reads it"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "for i in range(1, n + 1):"
+added = "for i in range(n + 1):"
+reason = "the extra row 0 pass finds p[0] == 0, breaks at once and leaves j0 == 0: it changes nothing"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "minv, used = [math.inf] * (n + 1), [False] * (n + 1)"
+added = "minv, used = [math.inf] * (n + 2), [False] * (n + 1)"
+reason = "indices stay within 0..n: the extra slot is never read"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "minv, used = [math.inf] * (n + 1), [False] * (n + 1)"
+added = "minv, used = [math.inf] * (n + 1), [False] * (n + 2)"
+reason = "indices stay within 0..n: the extra slot is never read"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "for _ in range(n + 1):"
+added = "for _ in range(n + 2):"
+reason = "a looser bound on a loop that always breaks within n + 1 steps"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "i0, delta, j1 = p[j0], math.inf, 0"
+added = "i0, delta, j1 = p[j0], math.inf, 1"
+reason = "some unused column always has a finite minv below delta = inf, so j1 is always overwritten"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "for j in range(1, n + 1):"
+added = "for j in range(n + 1):"
+reason = "in the column scan, column 0 is marked used on the first step and skipped; in the final read, p[0] holds row n, whose entry is written again by its own column later in the loop"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "if cur < minv[j]:"
+added = "if cur <= minv[j]:"
+reason = "on a tie the path goes through another row of equal reduced cost: still an optimal assignment, and statuses do not depend on which optimum is found"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "if minv[j] < delta:"
+added = "if minv[j] <= delta:"
+reason = "on a tie another column of equal reduced cost enters the tree: still an optimal assignment, and statuses do not depend on which optimum is found"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "row_to_col = [0] * n"
+added = "row_to_col = [1] * n"
+reason = "every row is assigned a column, so every entry is overwritten"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.assignment._min_cost_assignment"
+removed = "for j in range(1, n + 1):"
+added = "for j in range(2, n + 1):"
+reason = "skipping column 1 leaves its row at the initial value 0, which is column 1's index"
+assumes = "nothing"
