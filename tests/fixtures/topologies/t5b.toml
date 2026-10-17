@@ -1,0 +1,32 @@
+# T5b: as T5a without a message id: an async hop has nothing else to go on.
+[points.producer]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+outbound = ["tuple5"]
+
+[points.queue]
+host = "node-q"
+visibility = "log"
+clock = "ref-1"
+timestamps = "log_ms"
+inbound = []
+outbound = []
+
+[points.consumer]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5"]
+
+[[hops]]
+from = "producer"
+to = "queue"
+relation = "async"
+
+[[hops]]
+from = "queue"
+to = "consumer"
+relation = "async"

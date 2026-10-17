@@ -1,0 +1,20 @@
+# T3a: mesh sidecar -> application on the same host, socket cookie on both
+# sides. Hardest hop sidecar -> app: observed.
+[points.sidecar]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["socket_cookie"]
+outbound = ["socket_cookie"]
+
+[points.app]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["socket_cookie"]
+
+[[hops]]
+from = "sidecar"
+to = "app"

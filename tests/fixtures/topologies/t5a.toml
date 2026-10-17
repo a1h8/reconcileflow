@@ -1,0 +1,34 @@
+# T5a: producer -> queue -> consumer with a message id. Hardest hop
+# queue -> consumer: authored.
+[points.producer]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+outbound = ["tuple5", "message_id"]
+
+[points.queue]
+host = "node-q"
+visibility = "log"
+clock = "ref-1"
+timestamps = "log_ms"
+inbound = ["message_id"]
+outbound = ["message_id"]
+propagates = { message_id = "app" }
+
+[points.consumer]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "message_id"]
+
+[[hops]]
+from = "producer"
+to = "queue"
+relation = "async"
+
+[[hops]]
+from = "queue"
+to = "consumer"
+relation = "async"

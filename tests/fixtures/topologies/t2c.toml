@@ -1,0 +1,21 @@
+# T2c: as T2b without a NAT mapping source. Hardest hop: derived.
+[points.ingress]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id"]
+outbound = ["tuple5", "h2_stream_id"]
+
+[points.app]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id"]
+
+[[hops]]
+from = "ingress"
+to = "app"
+nat = "dnat"
+pooling = true

@@ -1,0 +1,19 @@
+# T3b: as T3a on two hosts (same clock): a socket cookie is local to one kernel.
+[points.sidecar]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["socket_cookie"]
+outbound = ["socket_cookie"]
+
+[points.app]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["socket_cookie"]
+
+[[hops]]
+from = "sidecar"
+to = "app"

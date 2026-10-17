@@ -1,0 +1,20 @@
+# T4: egress gateway -> external dependency, no shared identifier, the
+# dependency logged on the same clock reference. Hardest hop: derived.
+[points.egress]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "traceparent"]
+outbound = ["tuple5"]
+
+[points.external]
+host = "provider"
+visibility = "log"
+clock = "ref-1"
+timestamps = "log_ms"
+
+[[hops]]
+from = "egress"
+to = "external"
+nat = "snat"
