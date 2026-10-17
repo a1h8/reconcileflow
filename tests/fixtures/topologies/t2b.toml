@@ -1,0 +1,22 @@
+# T2b: no header; 5-tuple + HTTP/2 stream id + conntrack. Hardest hop: observed.
+[points.ingress]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id"]
+outbound = ["tuple5", "h2_stream_id"]
+
+[points.app]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id"]
+
+[[hops]]
+from = "ingress"
+to = "app"
+nat = "dnat"
+nat_mapping = "conntrack"
+pooling = true

@@ -1,0 +1,39 @@
+# T1b: the edge relay sets and logs a per-request id. Hardest hop: authored.
+[points.relay]
+host = "edge"
+visibility = "log"
+clock = "ref-1"
+timestamps = "log_ms"
+inbound = ["tuple5"]
+outbound = ["tuple5", "request_id"]
+sets = ["request_id"]
+trusts_incoming = false
+
+[points.ingress]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id", "traceparent", "request_id"]
+outbound = ["tuple5", "h2_stream_id", "traceparent"]
+propagates = { traceparent = "agent" }
+
+[points.app]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id", "traceparent"]
+
+[[hops]]
+from = "relay"
+to = "ingress"
+nat = "snat"
+pooling = true
+
+[[hops]]
+from = "ingress"
+to = "app"
+nat = "dnat"
+nat_mapping = "conntrack"
+pooling = true

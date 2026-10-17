@@ -273,3 +273,38 @@ removed = "for j in range(1, n + 1):"
 added = "for j in range(2, n + 1):"
 reason = "skipping column 1 leaves its row at the initial value 0, which is column 1's index"
 assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.topology._parse_hop"
+removed = "relation = f.choice(\"relation\", RELATIONS, required=False, default=\"call\")"
+added = "relation = f.choice(\"relation\", RELATIONS, required=None, default=\"call\")"
+reason = "required is only tested for truth: None and False behave the same"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.topology._parse_hop"
+removed = "nat = f.choice(\"nat\", NATS, required=False, default=\"none\")"
+added = "nat = f.choice(\"nat\", NATS, required=None, default=\"none\")"
+reason = "required is only tested for truth: None and False behave the same"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.topology._parse_hop"
+removed = "nat_mapping = f.choice(\"nat_mapping\", NAT_MAPPINGS, required=False, default=\"none\")"
+added = "nat_mapping = f.choice(\"nat_mapping\", NAT_MAPPINGS, required=None, default=\"none\")"
+reason = "required is only tested for truth: None and False behave the same"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.topology._parse_hop"
+removed = "expect = f.choice(\"expect\", frozenset(e.name.lower() for e in Evidence), required=False)"
+added = "expect = f.choice(\"expect\", frozenset(e.name.lower() for e in Evidence), required=None)"
+reason = "required is only tested for truth: None and False behave the same"
+assumes = "nothing"
+
+[[survivor]]
+function = "reconcileflow.correlation.topology._hop_ceiling"
+removed = "1_000 * (hop.noise_us or 0),"
+added = "1_000 * (hop.noise_us or 1),"
+reason = "an undeclared noise of 1 us never widens the window: every timestamp class is at least 1 us coarse"
+assumes = "the finest entry of PRECISION_NS is 1_000 ns"

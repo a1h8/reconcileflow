@@ -1,0 +1,24 @@
+# T2a: ingress -> pod with connection pooling and DNAT; traceparent on both
+# sides of the wire. Hardest hop ingress -> app: authored.
+[points.ingress]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id", "traceparent"]
+outbound = ["tuple5", "h2_stream_id", "traceparent"]
+propagates = { traceparent = "agent" }
+
+[points.app]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id", "traceparent"]
+
+[[hops]]
+from = "ingress"
+to = "app"
+nat = "dnat"
+nat_mapping = "conntrack"
+pooling = true

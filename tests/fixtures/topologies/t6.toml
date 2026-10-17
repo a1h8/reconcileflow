@@ -1,0 +1,41 @@
+# T6: T1a where the relay retries towards a second backend, at most 2 attempts.
+# Hardest hop relay -> ingress: derived, fan-out bounded to 2.
+[points.relay]
+host = "edge"
+visibility = "log"
+clock = "ref-1"
+timestamps = "log_ms"
+inbound = ["tuple5"]
+outbound = ["tuple5"]
+trusts_incoming = false
+
+[points.ingress]
+host = "node-a"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id", "traceparent"]
+outbound = ["tuple5", "h2_stream_id", "traceparent"]
+propagates = { traceparent = "agent" }
+
+[points.app]
+host = "node-b"
+visibility = "kernel"
+clock = "ref-1"
+timestamps = "kernel_monotonic"
+inbound = ["tuple5", "h2_stream_id", "traceparent"]
+
+[[hops]]
+from = "relay"
+to = "ingress"
+nat = "snat"
+pooling = true
+relation = "fanout"
+max_fanout = 2
+
+[[hops]]
+from = "ingress"
+to = "app"
+nat = "dnat"
+nat_mapping = "conntrack"
+pooling = true
