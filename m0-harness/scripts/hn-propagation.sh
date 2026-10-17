@@ -39,6 +39,9 @@
 #   CONTEXT_PROPAGATION  agent context propagation: empty (default) leaves the
 #             agent's own default (disabled in OBI v0.14.0 and Beyla v3.38.0:
 #             the agent reads context, never writes it); headers, tcp, all
+#   CPU_SAMPLE  1: record CPU use every second while the measured requests run:
+#             per core (cpu-cores.txt, mpstat) and per process, every process on
+#             the host (cpu-procs.txt, pidstat), to tell a busy host from the agent
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
 #             root, so phase 2 runs as your user and AGENT_BIN is not needed
 #   RUN_BASE  where run directories go (default: runs/ next to the repository)
@@ -62,6 +65,7 @@ STRIP_HOP=${STRIP_HOP:-0}
 FRESH_HOP=${FRESH_HOP:-0}
 UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-}
 LG_MASK=${LG_MASK:-0}
+CPU_SAMPLE=${CPU_SAMPLE:-0}
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -103,7 +107,7 @@ build() {
 			echo "traefik: $("$RUN_DIR/bin/traefik" version | awk '/^Version:/ {print $2}')"
 		echo "hop kind: $HOP_KIND hop kinds: ${HOP_KINDS:-same}"
 		echo "STRIP_HOP=$STRIP_HOP FRESH_HOP=$FRESH_HOP UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-none}" \
-			"LG_MASK=$LG_MASK"
+			"LG_MASK=$LG_MASK CPU_SAMPLE=$CPU_SAMPLE"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
@@ -115,7 +119,8 @@ build() {
 		CONCURRENCY="$CONCURRENCY" STRIP_N="$STRIP_N" TAIL="$TAIL"
 		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT"
 		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" HOP_KINDS="$HOP_KINDS" STRIP_HOP="$STRIP_HOP"
-		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK")
+		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK"
+		CPU_SAMPLE="$CPU_SAMPLE")
 	if ((NO_AGENT)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -241,6 +246,9 @@ cell() {
 	for i in $(seq 1 40); do
 		"$bin/load-gen" -target "$entry" -out "$dir/warmup-$i.jsonl" "${lg_flags[@]}" \
 			-requests 20 -concurrency 1 2>>"$dir/warmup.log" || true
+		# Every warm-up request must have succeeded: a proxy still loading its
+		# routes answers 404, and without an agent nothing else would catch it.
+		if grep -q '"error"' "$dir/warmup-$i.jsonl"; then sleep 1; continue; fi
 		if ((NO_AGENT)); then ready=1; break; fi
 		# One grep on the file, no pipe: under pipefail, "grep | grep -q" fails
 		# once the output outgrows the pipe buffer (grep -q exits on the first
@@ -251,15 +259,23 @@ cell() {
 		fi
 		sleep 1
 	done
-	((ready)) || { kill $agent "${pids[@]}" 2>/dev/null; die "$name: agent printed no span at both ends"; }
+	((ready)) || { kill $agent "${pids[@]}" 2>/dev/null; die "$name: not ready: warm-up failing, or the agent printed no span at both ends"; }
 
 	local measured_flags=("${lg_flags[@]}")
 	((LG_MASK)) && measured_flags+=(-mask)
+	local samplers=()
+	if ((CPU_SAMPLE)); then
+		LC_ALL=C S_TIME_FORMAT=ISO mpstat -P ALL 1 >"$dir/cpu-cores.txt" 2>&1 &
+		samplers+=($!)
+		LC_ALL=C pidstat -u -h 1 >"$dir/cpu-procs.txt" 2>&1 &
+		samplers+=($!)
+	fi
 	local lg_exit=0
 	"$bin/load-gen" -target "$entry" -out "$dir/lg.jsonl" "${measured_flags[@]}" \
 		-requests "$REQUESTS" -concurrency "$CONCURRENCY" 2>"$dir/lg.log" || lg_exit=$?
 	"$bin/load-gen" -target "$entry" -out "$dir/tail.jsonl" "${measured_flags[@]}" \
 		-requests "$TAIL" -concurrency 1 2>"$dir/tail.log" || true
+	((${#samplers[@]})) && { kill "${samplers[@]}" 2>/dev/null; wait "${samplers[@]}" 2>/dev/null || true; }
 	sleep 3
 
 	if [[ -n $agent ]]; then kill -TERM "$agent"; wait "$agent" || true; fi
