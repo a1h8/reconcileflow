@@ -269,6 +269,15 @@ def test_parameters_and_runs_must_share_their_load(tmp_path, capsys):
         tp.analyze_cell(tmp_path / "n1", quiet)
 
 
+def test_a_reading_across_loads_is_allowed_and_labelled(tmp_path, capsys):
+    write_cell(tmp_path, 5, load=4)
+    quiet = params_file(tmp_path, J1)
+    tp.main(["timing_path.py", str(tmp_path), str(quiet), "--reading"])
+    out = capsys.readouterr().out
+    assert out.startswith("READING ONLY")
+    assert "hop-1 -> fake-upstream: links 5 correct 5 wrong 0" in out
+
+
 def test_a_cell_without_a_recorded_load_ran_without_one(tmp_path):
     write_cell(tmp_path, 3)
     assert tp.cell_meta(tmp_path / "n1")["load"] == 0

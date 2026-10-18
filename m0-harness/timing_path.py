@@ -18,7 +18,11 @@ Per join:
 - density: rate x 2 x window of the first signal, against D_MAX;
 - component sizes and observations processed per second.
 
-Usage: timing_path.py <run-dir> <params.toml> [--json]
+The parameters must have been calibrated under the run's load (LOAD_CORES);
+--reading lifts that check, to read how parameters hold under another load:
+the output is then labelled a reading, never a verdict.
+
+Usage: timing_path.py <run-dir> <params.toml> [--json] [--reading]
 """
 
 from __future__ import annotations
@@ -163,11 +167,13 @@ def join_params(table: dict) -> tuple[JoinParams, str]:
     return params, table.get("receiver_start", "start")
 
 
-def params_for(params_file: Path, meta: dict) -> dict[str, tuple[JoinParams, str]]:
+def params_for(
+    params_file: Path, meta: dict, check_load: bool = True
+) -> dict[str, tuple[JoinParams, str]]:
     """The joins calibrated for this cell's agent and concurrency, under its load."""
     data = tomllib.loads(params_file.read_text())
     calibrated = data.get("load_cores", 0)
-    if calibrated != meta["load"]:
+    if check_load and calibrated != meta["load"]:
         raise ValueError(
             f"{params_file}: calibrated under a load of {calibrated} cores,"
             f" the run had {meta['load']}"
@@ -183,11 +189,11 @@ def rate(rows: list[dict]) -> float:
     return len(lg) / (span_us / 1e6) if span_us > 0 else 0.0
 
 
-def analyze_cell(cell_dir: Path, params_file: Path) -> dict:
+def analyze_cell(cell_dir: Path, params_file: Path, check_load: bool = True) -> dict:
     meta = cell_meta(cell_dir)
     topology = topology_for(meta["hops"])
     rows, measured = records(cell_dir, meta)
-    joins = params_for(params_file, meta)
+    joins = params_for(params_file, meta, check_load)
     requests_per_s = rate(rows)
     report = {
         "meta": meta,
@@ -247,10 +253,13 @@ def score_join(topology, rows, where, src, dst, params, receiver_start, requests
 def main(argv: list[str]) -> None:
     run_dir, params_file = Path(argv[1]), Path(argv[2])
     cells = sorted(p.parent for p in run_dir.glob("*/lg.jsonl"))
-    report = {cell.name: analyze_cell(cell, params_file) for cell in cells}
+    reading = "--reading" in argv
+    report = {cell.name: analyze_cell(cell, params_file, not reading) for cell in cells}
     if "--json" in argv:
         print(json.dumps(report, indent=2))
         return
+    if reading:
+        print("READING ONLY: parameters may come from another load; not a verdict")
     for name, cell in report.items():
         meta = cell["meta"]
         print(
