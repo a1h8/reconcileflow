@@ -1,0 +1,161 @@
+# Timing-path parameters, from calibration runs (calibrate_timing.py).
+
+[obi.c1."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T052746/n1"
+sha256 = "36137b1e8ac557f86c4af000573fb3f4d4c3f1de955362b036f44d686a0cfe21"
+receiver_start = "start"
+margin_us = 316
+max_component = 32
+density = 0.028
+feasible = true
+signals = [{ name = "end", offset_us = 177, window_us = 1401 }, { name = "start", offset_us = 443, window_us = 1635 }]
+
+[obi.c1."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T052746/n1"
+sha256 = "36137b1e8ac557f86c4af000573fb3f4d4c3f1de955362b036f44d686a0cfe21"
+receiver_start = "start"
+margin_us = 276
+max_component = 32
+density = 0.033
+feasible = true
+signals = [{ name = "end", offset_us = 107, window_us = 1642 }, { name = "start", offset_us = 329, window_us = 2373 }]
+
+[obi.c5."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T053629/n1"
+sha256 = "ec03c6259075063facc678b0ff280375ccfbab71e743e7c36ef14e2fd254811b"
+receiver_start = "start"
+margin_us = 344
+max_component = 32
+density = 0.128
+feasible = true
+signals = [{ name = "start", offset_us = 434, window_us = 1396 }, { name = "end", offset_us = 153, window_us = 1687 }]
+
+[obi.c5."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T053629/n1"
+sha256 = "ec03c6259075063facc678b0ff280375ccfbab71e743e7c36ef14e2fd254811b"
+receiver_start = "handlerStart"
+margin_us = 379
+max_component = 32
+density = 0.123
+feasible = true
+signals = [{ name = "start", offset_us = 363, window_us = 1343 }, { name = "end", offset_us = 103, window_us = 1376 }]
+
+[obi.c20."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T163724/n1"
+sha256 = "e564ccc8e10ee6d39979b6e2318971b896adbe2b3123f6809a47887405340bd1"
+receiver_start = "start"
+margin_us = 1096
+max_component = 32
+density = 1.034
+feasible = false
+signals = [{ name = "start", offset_us = 249, window_us = 3073 }, { name = "end", offset_us = 87, window_us = 4357 }]
+
+[obi.c20."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T163724/n1"
+sha256 = "e564ccc8e10ee6d39979b6e2318971b896adbe2b3123f6809a47887405340bd1"
+receiver_start = "start"
+margin_us = 1267
+max_component = 32
+density = 1.316
+feasible = false
+signals = [{ name = "start", offset_us = 194, window_us = 3912 }, { name = "end", offset_us = 72, window_us = 5388 }]
+
+[obi.c100."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T053945/n1"
+sha256 = "72646689a6b9ccd769824057950054cb3f48d04fe03f8ae1e8a2b54111d09817"
+receiver_start = "start"
+margin_us = 1132
+max_component = 32
+density = 2.326
+feasible = false
+signals = [{ name = "end", offset_us = 111, window_us = 2152 }]
+
+[obi.c100."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T053945/n1"
+sha256 = "72646689a6b9ccd769824057950054cb3f48d04fe03f8ae1e8a2b54111d09817"
+receiver_start = "start"
+margin_us = 1440
+max_component = 32
+density = 3.496
+feasible = false
+signals = [{ name = "end", offset_us = 145, window_us = 3234 }]
+
+[beyla.c1."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T103735/n1"
+sha256 = "6f5230575f0494f7523b78b464a1aebff29f8eff7eb9f1105d20063192375bc1"
+receiver_start = "start"
+margin_us = 3305
+max_component = 32
+density = 0.136
+feasible = true
+signals = [{ name = "start", offset_us = 395, window_us = 7181 }, { name = "end", offset_us = 161, window_us = 7690 }]
+
+[beyla.c1."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T103735/n1"
+sha256 = "6f5230575f0494f7523b78b464a1aebff29f8eff7eb9f1105d20063192375bc1"
+receiver_start = "handlerStart"
+margin_us = 3156
+max_component = 32
+density = 0.16
+feasible = true
+signals = [{ name = "duration", offset_us = 471, window_us = 8424 }]
+
+[beyla.c5."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T101725/n1"
+sha256 = "e363b2b2edfec5f54351bf5d1ed87ad4cb6c3748beead60b68ac602de138adb5"
+receiver_start = "start"
+margin_us = 278
+max_component = 32
+density = 0.108
+feasible = true
+signals = [{ name = "start", offset_us = 393, window_us = 1035 }, { name = "end", offset_us = 124, window_us = 1227 }]
+
+[beyla.c5."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T101725/n1"
+sha256 = "e363b2b2edfec5f54351bf5d1ed87ad4cb6c3748beead60b68ac602de138adb5"
+receiver_start = "start"
+margin_us = 254
+max_component = 32
+density = 0.075
+feasible = true
+signals = [{ name = "start", offset_us = 283, window_us = 716 }, { name = "duration", offset_us = 376, window_us = 1482 }]
+
+[beyla.c20."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T101950/n1"
+sha256 = "71f21685f86b6116c2fe3fc988e6a788c70d7d9878ba4a463b9c6b455802fdbe"
+receiver_start = "start"
+margin_us = 717
+max_component = 32
+density = 0.572
+feasible = true
+signals = [{ name = "start", offset_us = 239, window_us = 1648 }, { name = "end", offset_us = 82, window_us = 2847 }]
+
+[beyla.c20."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T101950/n1"
+sha256 = "71f21685f86b6116c2fe3fc988e6a788c70d7d9878ba4a463b9c6b455802fdbe"
+receiver_start = "start"
+margin_us = 557
+max_component = 32
+density = 0.894
+feasible = true
+signals = [{ name = "start", offset_us = 183, window_us = 2577 }, { name = "end", offset_us = 66, window_us = 3446 }]
+
+[beyla.c100."hop-1 -> fake-upstream"]
+calibration = "../runs/hn-propagation-20261018T103447/n1"
+sha256 = "55e466d88eebd1c71a6188174abc7467a7109c8b911e91c62910ab3103a8d69a"
+receiver_start = "start"
+margin_us = 1041
+max_component = 32
+density = 6.694
+feasible = false
+signals = [{ name = "end", offset_us = 72, window_us = 5257 }, { name = "duration", offset_us = 418, window_us = 7392 }]
+
+[beyla.c100."load-gen -> hop-1"]
+calibration = "../runs/hn-propagation-20261018T103447/n1"
+sha256 = "55e466d88eebd1c71a6188174abc7467a7109c8b911e91c62910ab3103a8d69a"
+receiver_start = "start"
+margin_us = 1563
+max_component = 32
+density = 4.031
+feasible = false
+signals = [{ name = "end", offset_us = 90, window_us = 3166 }, { name = "duration", offset_us = 382, window_us = 3989 }]
