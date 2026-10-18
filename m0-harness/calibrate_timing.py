@@ -153,8 +153,20 @@ def fingerprint(cell_dir: Path) -> str:
     return digest.hexdigest()
 
 
+def load_of(calibrations: list[tuple[Path, dict]]) -> int:
+    """The one load all calibration runs ran under; mixing loads is refused."""
+    loads = {cal["meta"]["load"] for _, cal in calibrations}
+    if len(loads) > 1:
+        raise ValueError(f"calibration runs under different loads: {sorted(loads)} cores")
+    return loads.pop() if loads else 0
+
+
 def to_toml(calibrations: list[tuple[Path, dict]]) -> str:
-    lines = ["# Timing-path parameters, from calibration runs (calibrate_timing.py).", ""]
+    lines = [
+        "# Timing-path parameters, from calibration runs (calibrate_timing.py).",
+        f"load_cores = {load_of(calibrations)}  # cores kept busy by cpu-load during calibration",
+        "",
+    ]
     for cell_dir, cal in calibrations:
         meta = cal["meta"]
         for where, j in cal["joins"].items():
@@ -190,10 +202,11 @@ def main(argv: list[str]) -> None:
     for run_dir in map(Path, args):
         for cell_dir in sorted(p.parent for p in run_dir.glob("*/lg.jsonl")):
             calibrations.append((cell_dir, calibrate_cell(cell_dir)))
+    load = load_of(calibrations)
     for cell_dir, cal in calibrations:
         meta = cal["meta"]
         print(
-            f"== {cell_dir}: agent={meta['agent']} c={meta['concurrency']}"
+            f"== {cell_dir}: agent={meta['agent']} c={meta['concurrency']} load={load}"
             f" rate={cal['rate_per_s']}/s"
         )
         for where, j in cal["joins"].items():

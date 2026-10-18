@@ -134,12 +134,16 @@ def test_foreign_load_is_everything_outside_the_bench_summed(tmp_path):
         f"{t1}     1000       301   50.00    0.00    0.00    0.00   50.00     1  python\n"
         f"{t2}     1000       302   40.00    0.00    0.00    0.00   40.00     1  goland\n"
         f"{t2}        0       400    1.00    0.00    0.00    0.00    1.00     1  pidstat\n"
+        f"{t1}        0       500  200.00    0.00    0.00    0.00  200.00     1  cpu-load\n"
+        f"{t2}        0       500  198.00    0.00    0.00    0.00  198.00     1  cpu-load\n"
     )
     (cell / "cpu-procs.txt").write_text(PIDSTAT.format(t1=t1, t2=t2) + foreign)
     c = fz.analyze_cell(cell)["cpu"]
     # (60 + 50 + 40) / 2 s: two python processes at 0.55 core together, plus goland.
     assert c["foreign_cores"] == 0.75
     assert c["foreign_by_process"] == {"python": 0.55, "goland": 0.2}
+    # The declared load (cpu-load, LOAD_CORES) is reported apart, never as foreign.
+    assert c["declared_load_cores"] == 1.99
 
 
 def test_main_prints_each_cell(tmp_path, capsys):

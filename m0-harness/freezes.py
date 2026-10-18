@@ -14,8 +14,9 @@ delay): requests ready at different times, let go together.
 
 With CPU_SAMPLE=1, the run directory also holds per-core and per-process CPU
 use, summarised here. Foreign load is the CPU used by every process outside
-the bench (BENCH), summed, in cores averaged over the run: a run is redone
-when it exceeds MAX_FOREIGN_CORES.
+the bench (BENCH) and outside the declared load (cpu-load, LOAD_CORES),
+summed, in cores averaged over the run: a run is redone when it exceeds
+MAX_FOREIGN_CORES. The declared load is reported apart.
 
 Usage: freezes.py <run-dir> [--json]
 """
@@ -33,6 +34,7 @@ FREEZE_DELAY_US = 20_000
 FREEZE_MIN = 10
 BUSY = 99.0  # a core this busy, or more, counts as saturated
 BENCH = {"load-gen", "hop-1", "hop-2", "hop-3", "fake-upstream", "agent", "pidstat", "mpstat"}
+DECLARED_LOAD = "cpu-load"  # LOAD_CORES: a known load, reported apart
 MAX_FOREIGN_CORES = 1.5  # an idle desktop alone uses 1.1 to 1.4 here
 TRUTH = re.compile(r"truth-([0-9a-f]+)")
 
@@ -93,7 +95,7 @@ def cpu(cell: Path, freeze_seconds: set[str]) -> dict | None:
     foreign = {
         name: round(sum(v) / max(len(seconds), 1) / 100, 2)
         for name, v in per_proc.items()
-        if name not in BENCH
+        if name not in BENCH and name != DECLARED_LOAD
     }
     return {
         "seconds": len(seconds),
@@ -107,10 +109,13 @@ def cpu(cell: Path, freeze_seconds: set[str]) -> dict | None:
             name: round(sum(v) / max(len(seconds), 1), 1) for name, v in top
         },
         "foreign_cores": round(
-            sum(sum(v) for name, v in per_proc.items() if name not in BENCH)
+            sum(sum(v) for name, v in per_proc.items() if name not in BENCH | {DECLARED_LOAD})
             / max(len(seconds), 1)
             / 100,
             2,
+        ),
+        "declared_load_cores": round(
+            sum(per_proc.get(DECLARED_LOAD, [])) / max(len(seconds), 1) / 100, 2
         ),
         "foreign_by_process": dict(
             sorted(((n, c) for n, c in foreign.items() if c > 0), key=lambda kv: -kv[1])[:6]
@@ -176,6 +181,7 @@ def main(argv: list[str]) -> None:
             print(
                 f"   foreign load: {c['foreign_cores']} cores ({verdict}, limit"
                 f" {MAX_FOREIGN_CORES}) {c['foreign_by_process']}"
+                f" | declared load: {c['declared_load_cores']} cores"
             )
 
 

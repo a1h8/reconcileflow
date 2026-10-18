@@ -54,13 +54,16 @@ def client(k, start, end, **attrs):
     }
 
 
-def write_cell(tmp_path, n, spacing=10_000, agent="obi", concurrency=100, warm=()):
+def write_cell(tmp_path, n, spacing=10_000, agent="obi", concurrency=100, warm=(), load=None):
     """A one-hop cell: request k sent at T0 + k*spacing µs, 5 ms round trip."""
     cell = tmp_path / "n1"
     cell.mkdir()
     meta = {"hops": 1, "fake_upstream_port": FU_PORT, "agent": agent}
     (cell / "cell.json").write_text(json.dumps(meta))
-    (tmp_path / "cells.txt").write_text(f"n1: hops=1 agent={agent} requests={n} c={concurrency}\n")
+    loaded = "" if load is None else f" load={load}"
+    (tmp_path / "cells.txt").write_text(
+        f"n1: hops=1 agent={agent} requests={n} c={concurrency}{loaded}\n"
+    )
     lg, spans = [], []
     for k in range(n):
         t = T0 + k * spacing
@@ -240,7 +243,7 @@ def test_calibration_writes_parameters_the_adapter_reads_back(tmp_path, capsys):
     cal.main(["calibrate_timing.py", str(tmp_path), "--write", str(out)])
     printed = capsys.readouterr().out
     assert "hop-1 -> fake-upstream: 40 pairs" in printed and "crossing hop-1" in printed
-    joins = tp.params_for(out, {"agent": "obi", "concurrency": 100})
+    joins = tp.params_for(out, {"agent": "obi", "concurrency": 100, "load": 0})
     assert set(joins) == {"hop-1 -> fake-upstream", "load-gen -> hop-1"}
     params, receiver_start = joins["hop-1 -> fake-upstream"]
     assert receiver_start == "start" and params.signals[0].window_us >= 1
@@ -252,3 +255,30 @@ def test_containment_is_the_share_of_downstream_intervals_inside_the_upstream_on
     inside, outside = pair(10, 10), pair(-5, 10)
     assert cal.contained([inside, outside]) == 0.5
     assert cal.contained([]) == 0.0
+
+
+def test_parameters_and_runs_must_share_their_load(tmp_path, capsys):
+    write_cell(tmp_path, 40, load=4)
+    out = tmp_path / "params.toml"
+    cal.main(["calibrate_timing.py", str(tmp_path), "--write", str(out)])
+    assert "load_cores = 4" in out.read_text()
+    assert tp.cell_meta(tmp_path / "n1")["load"] == 4
+    assert tp.analyze_cell(tmp_path / "n1", out)["joins"]["hop-1 -> fake-upstream"]["wrong"] == 0
+    quiet = params_file(tmp_path, J1)  # no load_cores: calibrated without load
+    with pytest.raises(ValueError, match="calibrated under a load of 0 cores, the run had 4"):
+        tp.analyze_cell(tmp_path / "n1", quiet)
+
+
+def test_a_cell_without_a_recorded_load_ran_without_one(tmp_path):
+    write_cell(tmp_path, 3)
+    assert tp.cell_meta(tmp_path / "n1")["load"] == 0
+
+
+def test_calibrations_under_different_loads_are_not_mixed(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    write_cell(a, 10, load=2)
+    write_cell(b, 10, load=4)
+    with pytest.raises(ValueError, match="different loads"):
+        cal.main(["calibrate_timing.py", str(a), str(b), "--write", str(tmp_path / "p.toml")])

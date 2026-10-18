@@ -51,12 +51,15 @@ def _jsonl(path: Path) -> list[dict]:
 
 def cell_meta(cell_dir: Path) -> dict:
     meta = json.loads((cell_dir / "cell.json").read_text())
-    concurrency = re.search(r"\bc=(\d+)", (cell_dir.parent / "cells.txt").read_text())
+    line = (cell_dir.parent / "cells.txt").read_text()
+    concurrency = re.search(r"\bc=(\d+)", line)
+    load = re.search(r"\bload=(\d+)", line)
     return {
         "hops": meta["hops"],
         "port": meta["fake_upstream_port"],
         "agent": meta.get("agent", "none"),
         "concurrency": int(concurrency[1]) if concurrency else None,
+        "load": int(load[1]) if load else 0,  # cores kept busy by cpu-load (LOAD_CORES)
     }
 
 
@@ -161,8 +164,14 @@ def join_params(table: dict) -> tuple[JoinParams, str]:
 
 
 def params_for(params_file: Path, meta: dict) -> dict[str, tuple[JoinParams, str]]:
-    """The joins calibrated for this cell's agent and concurrency."""
+    """The joins calibrated for this cell's agent and concurrency, under its load."""
     data = tomllib.loads(params_file.read_text())
+    calibrated = data.get("load_cores", 0)
+    if calibrated != meta["load"]:
+        raise ValueError(
+            f"{params_file}: calibrated under a load of {calibrated} cores,"
+            f" the run had {meta['load']}"
+        )
     cell = data.get(meta["agent"], {}).get(f"c{meta['concurrency']}", {})
     return {where: join_params(table) for where, table in cell.items()}
 

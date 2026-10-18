@@ -42,6 +42,8 @@
 #   CPU_SAMPLE  1: record CPU use every second while the measured requests run:
 #             per core (cpu-cores.txt, mpstat) and per process, every process on
 #             the host (cpu-procs.txt, pidstat), to tell a busy host from the agent
+#   LOAD_CORES  cores kept busy by cpu-load while the measured requests run: a
+#             known, reproducible foreign load (default 0: none)
 #   WARM_REQUESTS  requests load-gen sends first, at the measured concurrency and
 #             through the same connections, before the measured ones (default
 #             10 x CONCURRENCY; logged to warmup-inproc.jsonl, never scored)
@@ -69,6 +71,7 @@ FRESH_HOP=${FRESH_HOP:-0}
 UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-}
 LG_MASK=${LG_MASK:-0}
 CPU_SAMPLE=${CPU_SAMPLE:-0}
+LOAD_CORES=${LOAD_CORES:-0}
 WARM_REQUESTS=${WARM_REQUESTS:-$((10 * CONCURRENCY))}
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -95,7 +98,8 @@ build() {
 	RUN_DIR=${RUN_DIR:-$RUN_BASE/hn-propagation-$(date +%Y%m%dT%H%M%S)}
 	mkdir -p "$RUN_DIR/bin"
 
-	for cmd in fake-upstream load-gen relay; do
+	[[ $LOAD_CORES =~ ^[0-9]+$ ]] || die "LOAD_CORES must be a whole number of cores, got '$LOAD_CORES'"
+	for cmd in fake-upstream load-gen relay cpu-load; do
 		go build -o "$RUN_DIR/bin/$cmd" "./cmd/$cmd"
 	done
 	((NO_AGENT)) || cp "$AGENT_BIN" "$RUN_DIR/bin/agent"
@@ -111,7 +115,7 @@ build() {
 			echo "traefik: $("$RUN_DIR/bin/traefik" version | awk '/^Version:/ {print $2}')"
 		echo "hop kind: $HOP_KIND hop kinds: ${HOP_KINDS:-same}"
 		echo "STRIP_HOP=$STRIP_HOP FRESH_HOP=$FRESH_HOP UNINSTRUMENTED_HOPS=${UNINSTRUMENTED_HOPS:-none}" \
-			"LG_MASK=$LG_MASK CPU_SAMPLE=$CPU_SAMPLE"
+			"LG_MASK=$LG_MASK CPU_SAMPLE=$CPU_SAMPLE LOAD_CORES=$LOAD_CORES"
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY WARM_REQUESTS=$WARM_REQUESTS STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
@@ -124,7 +128,7 @@ build() {
 		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT"
 		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" HOP_KINDS="$HOP_KINDS" STRIP_HOP="$STRIP_HOP"
 		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK"
-		CPU_SAMPLE="$CPU_SAMPLE" WARM_REQUESTS="$WARM_REQUESTS")
+		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS")
 	if ((NO_AGENT)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -268,6 +272,11 @@ cell() {
 	local measured_flags=("${lg_flags[@]}")
 	((LG_MASK)) && measured_flags+=(-mask)
 	local samplers=()
+	if ((LOAD_CORES)); then
+		"$bin/cpu-load" -workers "$LOAD_CORES" 2>"$dir/cpu-load.log" &
+		samplers+=($!)
+		sleep 1 # the load is in place before the first measured request
+	fi
 	if ((CPU_SAMPLE)); then
 		LC_ALL=C S_TIME_FORMAT=ISO mpstat -P ALL 1 >"$dir/cpu-cores.txt" 2>&1 &
 		samplers+=($!)
@@ -291,7 +300,7 @@ cell() {
 	kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null || true
 	echo "$name: hops=$n kind=$HOP_KIND strip_hop=$strip_hop baggage=$BAGGAGE agent=$AGENT_KIND" \
 		"propagation=${CONTEXT_PROPAGATION:-agent-default}" \
-		"requests=$REQUESTS c=$CONCURRENCY load-gen exit=$lg_exit" |
+		"requests=$REQUESTS c=$CONCURRENCY load=$LOAD_CORES load-gen exit=$lg_exit" |
 		tee -a "$RUN_DIR/cells.txt"
 }
 
