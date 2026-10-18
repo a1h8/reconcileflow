@@ -13,7 +13,9 @@ fake-upstream for the arrival delay, receipt at load-gen for the answer
 delay): requests ready at different times, let go together.
 
 With CPU_SAMPLE=1, the run directory also holds per-core and per-process CPU
-use, summarised here.
+use, summarised here. Foreign load is the CPU used by every process outside
+the bench (BENCH), summed, in cores averaged over the run: a run is redone
+when it exceeds MAX_FOREIGN_CORES.
 
 Usage: freezes.py <run-dir> [--json]
 """
@@ -30,6 +32,8 @@ from pathlib import Path
 FREEZE_DELAY_US = 20_000
 FREEZE_MIN = 10
 BUSY = 99.0  # a core this busy, or more, counts as saturated
+BENCH = {"load-gen", "hop-1", "hop-2", "hop-3", "fake-upstream", "agent", "pidstat", "mpstat"}
+MAX_FOREIGN_CORES = 1.5  # an idle desktop alone uses 1.1 to 1.4 here
 TRUTH = re.compile(r"truth-([0-9a-f]+)")
 
 
@@ -86,6 +90,11 @@ def cpu(cell: Path, freeze_seconds: set[str]) -> dict | None:
             if len(parts) >= 10 and parts[2].isdigit():
                 per_proc[parts[9]].append(float(parts[7]))
     top = sorted(per_proc.items(), key=lambda kv: -sum(kv[1]) / max(len(seconds), 1))[:6]
+    foreign = {
+        name: round(sum(v) / max(len(seconds), 1) / 100, 2)
+        for name, v in per_proc.items()
+        if name not in BENCH
+    }
     return {
         "seconds": len(seconds),
         "seconds_with_a_saturated_core": len(saturated),
@@ -97,6 +106,15 @@ def cpu(cell: Path, freeze_seconds: set[str]) -> dict | None:
         "top_processes_mean_cpu": {
             name: round(sum(v) / max(len(seconds), 1), 1) for name, v in top
         },
+        "foreign_cores": round(
+            sum(sum(v) for name, v in per_proc.items() if name not in BENCH)
+            / max(len(seconds), 1)
+            / 100,
+            2,
+        ),
+        "foreign_by_process": dict(
+            sorted(((n, c) for n, c in foreign.items() if c > 0), key=lambda kv: -kv[1])[:6]
+        ),
     }
 
 
@@ -154,6 +172,11 @@ def main(argv: list[str]) -> None:
                 f"; busiest core p50 {c['busiest_core_p50']}%"
             )
             print(f"   top processes, mean %CPU: {c['top_processes_mean_cpu']}")
+            verdict = "valid" if c["foreign_cores"] <= MAX_FOREIGN_CORES else "REDO"
+            print(
+                f"   foreign load: {c['foreign_cores']} cores ({verdict}, limit"
+                f" {MAX_FOREIGN_CORES}) {c['foreign_by_process']}"
+            )
 
 
 if __name__ == "__main__":

@@ -122,6 +122,24 @@ def test_cpu_summary_ties_saturated_seconds_to_freezes(tmp_path):
     assert c["seconds_with_a_saturated_core"] == 1
     assert c["freeze_seconds"] == 1 and c["freeze_seconds_with_a_saturated_core"] == 1
     assert c["top_processes_mean_cpu"] == {"agent": 57.5, "hop-1": 5.0}
+    assert c["foreign_cores"] == 0.0
+
+
+def test_foreign_load_is_everything_outside_the_bench_summed(tmp_path):
+    t1, t2 = fz._clock(T0), fz._clock(T0 + 1000 * MS)
+    cell = write_cell(tmp_path, [calm("b1", T0)])
+    (cell / "cpu-cores.txt").write_text(MPSTAT.format(t1=t1, t2=t2))
+    foreign = (
+        f"{t1}     1000       300   60.00    0.00    0.00    0.00   60.00     1  python\n"
+        f"{t1}     1000       301   50.00    0.00    0.00    0.00   50.00     1  python\n"
+        f"{t2}     1000       302   40.00    0.00    0.00    0.00   40.00     1  goland\n"
+        f"{t2}        0       400    1.00    0.00    0.00    0.00    1.00     1  pidstat\n"
+    )
+    (cell / "cpu-procs.txt").write_text(PIDSTAT.format(t1=t1, t2=t2) + foreign)
+    c = fz.analyze_cell(cell)["cpu"]
+    # (60 + 50 + 40) / 2 s: two python processes at 0.55 core together, plus goland.
+    assert c["foreign_cores"] == 0.75
+    assert c["foreign_by_process"] == {"python": 0.55, "goland": 0.2}
 
 
 def test_main_prints_each_cell(tmp_path, capsys):
