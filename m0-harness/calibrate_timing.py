@@ -7,9 +7,10 @@ each candidate signal, then apply the rule fixed before any calibration run
 (docs: correlation-phase3-spec.md §3):
 
 - offset = median gap; residual = |gap - offset|;
-- signals retained: among start, end and duration, the one with the smallest
-  residual p99.9, plus the next one only if its p99.9 is at most 3 times the
-  first's (at most two);
+- signals retained: the first is start or end, whichever has the smaller
+  residual p99.9 (duration alone does not place a request in time); the
+  second is the next quietest of the other two, kept only if its p99.9 is at
+  most 3 times the first's (at most two);
 - window = residual p99.9 of each retained signal, rounded up to the µs;
 - margin = residual p99 of the first retained signal;
 - receiver start: the downstream span's start, or its handler start, whichever
@@ -35,6 +36,7 @@ from pathlib import Path
 from timing_path import D_MAX, cell_meta, rate, records
 
 SIGNALS = ("start", "end", "duration")
+LOCATING = ("start", "end")  # signals that place a request in time
 CANDIDATE_RECEIVER_STARTS = ("start", "handlerStart")
 
 
@@ -80,6 +82,9 @@ def choose(true_pairs) -> dict:
     for receiver_start in CANDIDATE_RECEIVER_STARTS:
         stats = {n: signal_stats(true_pairs, n, receiver_start) for n in SIGNALS}
         ranked = sorted(SIGNALS, key=lambda n: (stats[n]["p999"], SIGNALS.index(n)))
+        # Duration does not place a request in time: it may only come second.
+        ranked.remove(first := next(n for n in ranked if n in LOCATING))
+        ranked.insert(0, first)
         options.append((stats[ranked[0]]["p999"], receiver_start, stats, ranked))
     _, receiver_start, stats, ranked = min(options, key=lambda o: (o[0], o[1] != "start"))
     kept = [ranked[0]]

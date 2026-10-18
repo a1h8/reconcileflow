@@ -93,12 +93,12 @@ signals = [{ name = "start", offset_us = 395, window_us = 7181 }, { name = "end"
 [beyla.c1."load-gen -> hop-1"]
 calibration = "../runs/hn-propagation-20261018T103735/n1"
 sha256 = "6f5230575f0494f7523b78b464a1aebff29f8eff7eb9f1105d20063192375bc1"
-receiver_start = "handlerStart"
-margin_us = 3156
+receiver_start = "start"
+margin_us = 3338
 max_component = 32
-density = 0.16
-feasible = true
-signals = [{ name = "duration", offset_us = 471, window_us = 8424 }]
+density = 7.766
+feasible = false
+signals = [{ name = "start", offset_us = 302, window_us = 409324 }, { name = "duration", offset_us = 423, window_us = 8432 }]
 
 [beyla.c5."hop-1 -> fake-upstream"]
 calibration = "../runs/hn-propagation-20261018T101725/n1"

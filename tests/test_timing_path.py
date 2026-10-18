@@ -214,6 +214,21 @@ def test_the_handler_start_is_chosen_when_it_gives_the_quieter_best_signal():
     assert chosen["signals"][0]["name"] == "start"
 
 
+def test_duration_is_never_the_first_signal():
+    # Duration is the quietest (constant), but it does not place a request in time.
+    pairs = [pair(100 + (k % 50), 50 + (k % 40)) for k in range(1000)]
+    for k, (a, b) in enumerate(pairs):
+        shift = 400_000 if k % 100 == 0 else 0  # a clock jump on both ends
+        b["start"] += shift
+        b["handler"] += shift
+        b["end"] += shift
+        a["end"] = a["start"] + (b["end"] - b["start"]) + 300
+    chosen = cal.choose(pairs)
+    assert chosen["stats"]["duration"]["p999"] < chosen["stats"]["start"]["p999"]
+    assert chosen["signals"][0]["name"] in cal.LOCATING
+    assert [s["name"] for s in chosen["signals"]][1:] in ([], ["duration"])
+
+
 def test_a_window_is_never_zero():
     pairs = [pair(100, 50) for _ in range(10)]
     assert all(s["window_us"] == 1 for s in cal.choose(pairs)["signals"])
