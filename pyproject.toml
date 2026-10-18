@@ -47,6 +47,7 @@ source_paths = [
     "src/reconcileflow/correlation/assignment.py",
     "src/reconcileflow/correlation/topology.py",
     "src/reconcileflow/correlation/exact.py",
+    "src/reconcileflow/correlation/timing.py",
 ]
 pytest_add_cli_args_test_selection = ["tests/"]
 # A fixed seed: property tests then kill the same mutants on every run.
