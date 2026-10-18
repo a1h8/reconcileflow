@@ -92,7 +92,7 @@ def cpu(cell: Path, freeze_seconds: set[str]) -> dict | None:
         "freeze_seconds_with_a_saturated_core": sum(1 for s in freeze_seconds if s in saturated),
         "freeze_seconds": len(freeze_seconds),
         "busiest_core_p50": (
-            quantile([max(busy[s].values()) for s in seconds], 0.5) if seconds else None
+            round(quantile([max(busy[s].values()) for s in seconds], 0.5), 1) if seconds else None
         ),
         "top_processes_mean_cpu": {
             name: round(sum(v) / max(len(seconds), 1), 1) for name, v in top

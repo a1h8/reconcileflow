@@ -58,7 +58,13 @@ func main() {
 	requireHTTP2 := flag.Bool("require-http2", true, "mark a request failed unless HTTP/2 was negotiated")
 	baggage := flag.Bool("baggage", false, "send a W3C baggage header exchange_id=<random 128-bit hex>, "+
 		"drawn independently of trace_id, and log the value sent (records' baggage field)")
+	warmup := flag.Int("warmup", 0, "requests sent first, at the same concurrency and through the same "+
+		"client, to -warmup-out: the measured requests then start on open connections")
+	warmupOut := flag.String("warmup-out", "", "JSONL output of the -warmup requests (required with -warmup)")
 	flag.Parse()
+	if *warmup < 0 || (*warmup > 0) == (*warmupOut == "") {
+		log.Fatal("-warmup must be >= 0, and -warmup-out given exactly when -warmup > 0")
+	}
 	if *concurrency <= 0 || *total <= 0 || *timeout <= 0 {
 		log.Fatal("concurrency, requests and timeout must be positive")
 	}
@@ -66,20 +72,38 @@ func main() {
 		log.Fatal("only seed-policy=variable is supported; fixed replay is not implemented")
 	}
 
-	w, err := oracle.NewWriter(*outPath)
-	if err != nil {
-		log.Fatalf("open output: %v", err)
-	}
-
 	tracker := newConnTracker()
 	client := newClient(*pool, *timeout)
 	defer client.CloseIdleConnections()
+	send := func(n int, path string) (succeeded, failed, writeFailures int64) {
+		return run(client, tracker, path, n, *concurrency, *target, *control, *mask, *truthInPath, *baggage, *requireHTTP2)
+	}
 
+	if *warmup > 0 {
+		ok, bad, wf := send(*warmup, *warmupOut)
+		log.Printf("warm-up: attempted=%d succeeded=%d failed=%d write_failures=%d", *warmup, ok, bad, wf)
+	}
+	succeeded, failed, writeFailures := send(*total, *outPath)
+	log.Printf("done: attempted=%d succeeded=%d failed=%d write_failures=%d control=%q pool=%v mask=%v truthInPath=%v baggage=%v",
+		*total, succeeded, failed, writeFailures, *control, *pool, *mask, *truthInPath, *baggage)
+	if failed != 0 || writeFailures != 0 {
+		os.Exit(1)
+	}
+}
+
+// run sends n requests, at most concurrency in flight, and writes one record
+// per attempt to outPath.
+func run(client *http.Client, tracker *connTracker, outPath string, n, concurrency int,
+	target, control string, mask, truthInPath, baggage, requireHTTP2 bool) (int64, int64, int64) {
+	w, err := oracle.NewWriter(outPath)
+	if err != nil {
+		log.Fatalf("open output: %v", err)
+	}
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, *concurrency)
+	sem := make(chan struct{}, concurrency)
 	var succeeded, failed, writeFailures atomic.Int64
 
-	for i := 0; i < *total; i++ {
+	for i := 0; i < n; i++ {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -91,14 +115,14 @@ func main() {
 			traceparent := fmt.Sprintf("00-%s-%s-01", traceID, parentID)
 
 			path := "/"
-			if *truthInPath {
+			if truthInPath {
 				path = "/truth-" + traceID
 			}
 			bag := ""
-			if *baggage {
+			if baggage {
 				bag = "exchange_id=" + randHex(16)
 			}
-			record := performRequest(client, tracker, *target+path, traceID, traceparent, bag, *control, *mask, *requireHTTP2)
+			record := performRequest(client, tracker, target+path, traceID, traceparent, bag, control, mask, requireHTTP2)
 			if err := w.Write(record); err != nil {
 				writeFailures.Add(1)
 				log.Printf("write record: %v", err)
@@ -115,11 +139,7 @@ func main() {
 		writeFailures.Add(1)
 		log.Printf("close output: %v", err)
 	}
-	log.Printf("done: attempted=%d succeeded=%d failed=%d write_failures=%d control=%q pool=%v mask=%v truthInPath=%v baggage=%v",
-		*total, succeeded.Load(), failed.Load(), writeFailures.Load(), *control, *pool, *mask, *truthInPath, *baggage)
-	if failed.Load() != 0 || writeFailures.Load() != 0 {
-		os.Exit(1)
-	}
+	return succeeded.Load(), failed.Load(), writeFailures.Load()
 }
 
 func newClient(pool bool, timeout time.Duration) *http.Client {
