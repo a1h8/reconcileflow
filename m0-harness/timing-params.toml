@@ -1,161 +1,162 @@
 # Timing-path parameters, from calibration runs (calibrate_timing.py).
+load_cores = 0  # cores kept busy by cpu-load during calibration
 
 [obi.c1."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T052746/n1"
-sha256 = "36137b1e8ac557f86c4af000573fb3f4d4c3f1de955362b036f44d686a0cfe21"
+calibration = "../runs/hn-propagation-20261020T034759/n1"
+sha256 = "5ec4f74668d5a553377022d6795aa2f1e90d2ac007a1229d8e2295072c64ff0c"
 receiver_start = "start"
-margin_us = 316
+margin_us = 285
 max_component = 32
-density = 0.028
+density = 0.025
 feasible = true
-signals = [{ name = "end", offset_us = 177, window_us = 1401 }, { name = "start", offset_us = 443, window_us = 1635 }]
+signals = [{ name = "start", offset_us = 453, window_us = 1257 }, { name = "end", offset_us = 185, window_us = 1591 }]
 
 [obi.c1."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T052746/n1"
-sha256 = "36137b1e8ac557f86c4af000573fb3f4d4c3f1de955362b036f44d686a0cfe21"
+calibration = "../runs/hn-propagation-20261020T034759/n1"
+sha256 = "5ec4f74668d5a553377022d6795aa2f1e90d2ac007a1229d8e2295072c64ff0c"
 receiver_start = "start"
-margin_us = 276
+margin_us = 283
 max_component = 32
-density = 0.033
+density = 0.018
 feasible = true
-signals = [{ name = "end", offset_us = 107, window_us = 1642 }, { name = "start", offset_us = 329, window_us = 2373 }]
+signals = [{ name = "start", offset_us = 336, window_us = 926 }, { name = "end", offset_us = 113, window_us = 2093 }]
 
 [obi.c5."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T053629/n1"
-sha256 = "ec03c6259075063facc678b0ff280375ccfbab71e743e7c36ef14e2fd254811b"
-receiver_start = "start"
-margin_us = 344
+calibration = "../runs/hn-propagation-20261018T190811/n1"
+sha256 = "ee9bd277b69afdfe43b5cd5ca1e2f97b4ba98014b927f7a76f28dc16139adcfb"
+receiver_start = "handlerStart"
+margin_us = 327
 max_component = 32
-density = 0.128
+density = 0.132
 feasible = true
-signals = [{ name = "start", offset_us = 434, window_us = 1396 }, { name = "end", offset_us = 153, window_us = 1687 }]
+signals = [{ name = "start", offset_us = 456, window_us = 1327 }, { name = "end", offset_us = 134, window_us = 1661 }]
 
 [obi.c5."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T053629/n1"
-sha256 = "ec03c6259075063facc678b0ff280375ccfbab71e743e7c36ef14e2fd254811b"
-receiver_start = "handlerStart"
-margin_us = 379
+calibration = "../runs/hn-propagation-20261018T190811/n1"
+sha256 = "ee9bd277b69afdfe43b5cd5ca1e2f97b4ba98014b927f7a76f28dc16139adcfb"
+receiver_start = "start"
+margin_us = 359
 max_component = 32
-density = 0.123
+density = 0.163
 feasible = true
-signals = [{ name = "start", offset_us = 363, window_us = 1343 }, { name = "end", offset_us = 103, window_us = 1376 }]
+signals = [{ name = "start", offset_us = 298, window_us = 1640 }, { name = "end", offset_us = 91, window_us = 2484 }]
 
 [obi.c20."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T163724/n1"
-sha256 = "e564ccc8e10ee6d39979b6e2318971b896adbe2b3123f6809a47887405340bd1"
+calibration = "../runs/hn-propagation-20261018T191021/n1"
+sha256 = "63863492af33c6972d69e35528b3009b56d5ae570d1e84642f28688343fcb3eb"
 receiver_start = "start"
-margin_us = 1096
+margin_us = 370
 max_component = 32
-density = 1.034
-feasible = false
-signals = [{ name = "start", offset_us = 249, window_us = 3073 }, { name = "end", offset_us = 87, window_us = 4357 }]
+density = 0.542
+feasible = true
+signals = [{ name = "end", offset_us = 95, window_us = 1492 }, { name = "start", offset_us = 329, window_us = 1580 }]
 
 [obi.c20."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T163724/n1"
-sha256 = "e564ccc8e10ee6d39979b6e2318971b896adbe2b3123f6809a47887405340bd1"
+calibration = "../runs/hn-propagation-20261018T191021/n1"
+sha256 = "63863492af33c6972d69e35528b3009b56d5ae570d1e84642f28688343fcb3eb"
 receiver_start = "start"
-margin_us = 1267
+margin_us = 349
 max_component = 32
-density = 1.316
-feasible = false
-signals = [{ name = "start", offset_us = 194, window_us = 3912 }, { name = "end", offset_us = 72, window_us = 5388 }]
+density = 0.371
+feasible = true
+signals = [{ name = "end", offset_us = 77, window_us = 1021 }, { name = "start", offset_us = 245, window_us = 1930 }]
 
 [obi.c100."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T053945/n1"
-sha256 = "72646689a6b9ccd769824057950054cb3f48d04fe03f8ae1e8a2b54111d09817"
+calibration = "../runs/hn-propagation-20261019T072220/n1"
+sha256 = "fd9412deb11a0f8e762e93e5ab83216d817e21097fa6bff4a29b4f09f95cb2af"
 receiver_start = "start"
-margin_us = 1132
+margin_us = 562
 max_component = 32
-density = 2.326
+density = 1.195
 feasible = false
-signals = [{ name = "end", offset_us = 111, window_us = 2152 }]
+signals = [{ name = "end", offset_us = 79, window_us = 1093 }]
 
 [obi.c100."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T053945/n1"
-sha256 = "72646689a6b9ccd769824057950054cb3f48d04fe03f8ae1e8a2b54111d09817"
+calibration = "../runs/hn-propagation-20261019T072220/n1"
+sha256 = "fd9412deb11a0f8e762e93e5ab83216d817e21097fa6bff4a29b4f09f95cb2af"
 receiver_start = "start"
-margin_us = 1440
+margin_us = 758
 max_component = 32
-density = 3.496
+density = 1.694
 feasible = false
-signals = [{ name = "end", offset_us = 145, window_us = 3234 }]
+signals = [{ name = "end", offset_us = 97, window_us = 1549 }]
 
 [beyla.c1."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T103735/n1"
-sha256 = "6f5230575f0494f7523b78b464a1aebff29f8eff7eb9f1105d20063192375bc1"
+calibration = "../runs/hn-propagation-20261020T035658/n1"
+sha256 = "e37277acfea2f07a771643be50538f4d4113200bea921e9f1d3edc5fa9b14165"
 receiver_start = "start"
-margin_us = 3305
+margin_us = 339
 max_component = 32
-density = 0.136
+density = 0.025
 feasible = true
-signals = [{ name = "start", offset_us = 395, window_us = 7181 }, { name = "end", offset_us = 161, window_us = 7690 }]
+signals = [{ name = "end", offset_us = 182, window_us = 1351 }, { name = "start", offset_us = 448, window_us = 1362 }]
 
 [beyla.c1."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T103735/n1"
-sha256 = "6f5230575f0494f7523b78b464a1aebff29f8eff7eb9f1105d20063192375bc1"
-receiver_start = "start"
-margin_us = 3338
+calibration = "../runs/hn-propagation-20261020T035658/n1"
+sha256 = "e37277acfea2f07a771643be50538f4d4113200bea921e9f1d3edc5fa9b14165"
+receiver_start = "handlerStart"
+margin_us = 321
 max_component = 32
-density = 7.766
-feasible = false
-signals = [{ name = "start", offset_us = 302, window_us = 409324 }, { name = "duration", offset_us = 423, window_us = 8432 }]
+density = 0.03
+feasible = true
+signals = [{ name = "start", offset_us = 383, window_us = 1605 }, { name = "end", offset_us = 111, window_us = 2196 }]
 
 [beyla.c5."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T101725/n1"
-sha256 = "e363b2b2edfec5f54351bf5d1ed87ad4cb6c3748beead60b68ac602de138adb5"
-receiver_start = "start"
-margin_us = 278
+calibration = "../runs/hn-propagation-20261018T192048/n1"
+sha256 = "6077e5b978effa54f219386c83a7ae0dd58c4a6914b19607bbe61f702b07d7d7"
+receiver_start = "handlerStart"
+margin_us = 354
 max_component = 32
-density = 0.108
+density = 0.08
 feasible = true
-signals = [{ name = "start", offset_us = 393, window_us = 1035 }, { name = "end", offset_us = 124, window_us = 1227 }]
+signals = [{ name = "start", offset_us = 367, window_us = 905 }, { name = "end", offset_us = 106, window_us = 1955 }]
 
 [beyla.c5."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T101725/n1"
-sha256 = "e363b2b2edfec5f54351bf5d1ed87ad4cb6c3748beead60b68ac602de138adb5"
-receiver_start = "start"
-margin_us = 254
+calibration = "../runs/hn-propagation-20261018T192048/n1"
+sha256 = "6077e5b978effa54f219386c83a7ae0dd58c4a6914b19607bbe61f702b07d7d7"
+receiver_start = "handlerStart"
+margin_us = 358
 max_component = 32
-density = 0.075
+density = 0.096
 feasible = true
-signals = [{ name = "start", offset_us = 283, window_us = 716 }, { name = "duration", offset_us = 376, window_us = 1482 }]
+signals = [{ name = "start", offset_us = 281, window_us = 1094 }, { name = "end", offset_us = 79, window_us = 1636 }]
 
 [beyla.c20."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T101950/n1"
-sha256 = "71f21685f86b6116c2fe3fc988e6a788c70d7d9878ba4a463b9c6b455802fdbe"
+calibration = "../runs/hn-propagation-20261018T180249/n1"
+sha256 = "b4e21ebba525442a6137aa322d07f8750b0463fd59bcc37afe2c28b2aae5326d"
 receiver_start = "start"
-margin_us = 717
+margin_us = 966
 max_component = 32
-density = 0.572
-feasible = true
-signals = [{ name = "start", offset_us = 239, window_us = 1648 }, { name = "end", offset_us = 82, window_us = 2847 }]
+density = 1.11
+feasible = false
+signals = [{ name = "start", offset_us = 217, window_us = 3063 }, { name = "end", offset_us = 76, window_us = 4926 }]
 
 [beyla.c20."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T101950/n1"
-sha256 = "71f21685f86b6116c2fe3fc988e6a788c70d7d9878ba4a463b9c6b455802fdbe"
+calibration = "../runs/hn-propagation-20261018T180249/n1"
+sha256 = "b4e21ebba525442a6137aa322d07f8750b0463fd59bcc37afe2c28b2aae5326d"
 receiver_start = "start"
-margin_us = 557
+margin_us = 485
 max_component = 32
-density = 0.894
+density = 0.604
 feasible = true
-signals = [{ name = "start", offset_us = 183, window_us = 2577 }, { name = "end", offset_us = 66, window_us = 3446 }]
+signals = [{ name = "end", offset_us = 64, window_us = 1666 }, { name = "start", offset_us = 170, window_us = 3690 }]
 
 [beyla.c100."hop-1 -> fake-upstream"]
-calibration = "../runs/hn-propagation-20261018T103447/n1"
-sha256 = "55e466d88eebd1c71a6188174abc7467a7109c8b911e91c62910ab3103a8d69a"
+calibration = "../runs/hn-propagation-20261018T180346/n1"
+sha256 = "0eb8a92d94ff88ae02b8e5e38925644bfb800fb7c4b4d007a757ec8df08b2ceb"
 receiver_start = "start"
-margin_us = 1041
+margin_us = 715
 max_component = 32
-density = 6.694
+density = 2.322
 feasible = false
-signals = [{ name = "end", offset_us = 72, window_us = 5257 }, { name = "duration", offset_us = 418, window_us = 7392 }]
+signals = [{ name = "end", offset_us = 72, window_us = 2129 }, { name = "start", offset_us = 329, window_us = 4129 }]
 
 [beyla.c100."load-gen -> hop-1"]
-calibration = "../runs/hn-propagation-20261018T103447/n1"
-sha256 = "55e466d88eebd1c71a6188174abc7467a7109c8b911e91c62910ab3103a8d69a"
+calibration = "../runs/hn-propagation-20261018T180346/n1"
+sha256 = "0eb8a92d94ff88ae02b8e5e38925644bfb800fb7c4b4d007a757ec8df08b2ceb"
 receiver_start = "start"
-margin_us = 1563
+margin_us = 804
 max_component = 32
-density = 4.031
+density = 1.813
 feasible = false
-signals = [{ name = "end", offset_us = 90, window_us = 3166 }, { name = "duration", offset_us = 382, window_us = 3989 }]
+signals = [{ name = "end", offset_us = 88, window_us = 1662 }]
