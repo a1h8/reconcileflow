@@ -54,8 +54,12 @@ def client(k, start, end, **attrs):
     }
 
 
-def write_cell(tmp_path, n, spacing=10_000, agent="obi", concurrency=100, warm=(), load=None):
-    """A one-hop cell: request k sent at T0 + k*spacing µs, 5 ms round trip."""
+def write_cell(
+    tmp_path, n, spacing=10_000, agent="obi", concurrency=100, warm=(), load=None, jitter=0
+):
+    """A one-hop cell: request k sent at T0 + k*spacing µs, 5 ms round trip;
+    fake-upstream's start and end move by (7k mod (jitter + 1)) µs."""
+    tmp_path.mkdir(exist_ok=True)
     cell = tmp_path / "n1"
     cell.mkdir()
     meta = {"hops": 1, "fake_upstream_port": FU_PORT, "agent": agent}
@@ -70,7 +74,8 @@ def write_cell(tmp_path, n, spacing=10_000, agent="obi", concurrency=100, warm=(
         lg.append({"trace_id": truth(k), "timestamp_ns": t * 1000, "duration_ns": 5_000_000})
         spans.append(server(k, t + 100, t + 4_900, serverAddr="hop-1"))
         spans.append(client(k, t + 200, t + 4_800, clientAddr="hop-1"))
-        spans.append(server(k, t + 300, t + 4_700, handler=t + 310, port=FU_PORT))
+        j = (7 * k) % (jitter + 1)
+        spans.append(server(k, t + 300 + j, t + 4_700 + j, handler=t + 310 + j, port=FU_PORT))
     for k in warm:
         t = T0 + k * spacing
         spans.append(server(k, t + 300, t + 4_700, port=FU_PORT))
@@ -120,6 +125,7 @@ def params_file(tmp_path, body):
 J1 = """[obi.c100."hop-1 -> fake-upstream"]
 receiver_start = "start"
 margin_us = 0
+local_span_us = 20000
 signals = [{ name = "end", offset_us = 100, window_us = 50 }]
 """
 
@@ -147,6 +153,7 @@ def test_the_handler_start_is_used_only_when_calibration_chose_it(tmp_path):
     start_based = """[obi.c100."hop-1 -> fake-upstream"]
 receiver_start = "{receiver}"
 margin_us = 0
+local_span_us = 20000
 signals = [{{ name = "start", offset_us = {offset}, window_us = 5 }}]
 """
     for receiver, offset in (("start", 100), ("handlerStart", 110)):
@@ -291,3 +298,65 @@ def test_calibrations_under_different_loads_are_not_mixed(tmp_path):
     write_cell(b, 10, load=4)
     with pytest.raises(ValueError, match="different loads"):
         cal.main(["calibrate_timing.py", str(a), str(b), "--write", str(tmp_path / "p.toml")])
+
+
+def test_parameters_without_the_local_density_guard_are_refused(tmp_path):
+    write_cell(tmp_path, 3)
+    old = params_file(tmp_path, J1.replace("local_span_us = 20000\n", ""))
+    with pytest.raises(ValueError, match="local_span_us"):
+        tp.analyze_cell(tmp_path / "n1", old)
+
+
+def test_withdrawn_links_are_counted_as_dense(tmp_path):
+    # 90 µs apart, guard over ±1 ms: inside the run, 21 or 22 others x 50 µs > 1 000;
+    # at the edges, fewer: kept. Neighbours are never candidates (90 µs > 50 µs).
+    write_cell(tmp_path, 50, spacing=90)
+    narrow = params_file(tmp_path, J1.replace("local_span_us = 20000", "local_span_us = 1000"))
+    j = tp.analyze_cell(tmp_path / "n1", narrow)["joins"]["hop-1 -> fake-upstream"]
+    assert j["wrong"] == 0 and j["links"] == j["correct"] == 20 and j["dense"] == 30
+
+
+# -- calibration on two runs per cell -----------------------------------------
+
+
+def test_two_runs_per_cell_are_pooled_and_the_wider_noise_wins(tmp_path, capsys):
+    quiet, noisy = tmp_path / "r1", tmp_path / "r2"
+    write_cell(quiet, 1000, jitter=0)
+    write_cell(noisy, 1000, jitter=40)
+    out = tmp_path / "params.toml"
+    cal.main(
+        ["calibrate_timing.py", str(quiet), str(noisy), "--runs-per-cell", "2", "--write", str(out)]
+    )
+    text = out.read_text()
+    assert str(quiet / "n1") in text and str(noisy / "n1") in text
+    assert "local_span_us = 20000" in text
+    params, _ = tp.params_for(out, {"agent": "obi", "concurrency": 100, "load": 0})[
+        "hop-1 -> fake-upstream"
+    ]
+    one = cal.choose([p for p in cal.pairs(*_rows(noisy), *J1_SIDES)])
+    pooled = cal.choose(cal.pairs(*_rows(quiet), *J1_SIDES) + cal.pairs(*_rows(noisy), *J1_SIDES))
+    first = params.signals[0]
+    assert first.offset_us == pooled["stats"][first.name]["offset_us"]
+    widest = max(
+        cal.residual_quantile(
+            cal.pairs(*_rows(r), *J1_SIDES), first.name, "start", first.offset_us, 0.999
+        )
+        for r in (quiet, noisy)
+    )
+    assert first.window_us == max(1, widest)
+    assert first.window_us >= one["stats"][first.name]["p999"] - 1
+    assert params.local_span_us == 20_000
+
+
+def test_a_cell_without_the_required_number_of_runs_is_refused(tmp_path):
+    write_cell(tmp_path / "r1", 20)
+    with pytest.raises(ValueError, match="2 calibration runs"):
+        cal.main(["calibrate_timing.py", str(tmp_path / "r1"), "--runs-per-cell", "2"])
+
+
+J1_SIDES = (("hop-1", "outbound"), ("fake-upstream", "inbound"))
+
+
+def _rows(run):
+    cell = run / "n1"
+    return (tp.records(cell, tp.cell_meta(cell))[0],)

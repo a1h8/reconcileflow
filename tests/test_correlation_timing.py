@@ -174,6 +174,96 @@ def test_component_sizes_are_reported_per_hop():
     assert result.components == ((HOP, 2), (HOP, 2), (HOP, 3))
 
 
+# -- local density guard: no link where requests crowd the window ------------
+
+
+def guarded(span, params=END):
+    return JoinParams(params.signals, params.margin_us, params.max_component, local_span_us=span)
+
+
+def burst(n=10):
+    """n requests sent together, ending 40 µs apart, whose true partners end
+    150 µs off (outside the 100 µs window): each true pair is lost, and a
+    neighbour fits instead."""
+    obs = []
+    for k in range(n):
+        obs.append(up(k, 0, 1_000 + 40 * k))
+        obs.append(down(k, 0, 1_000 + 40 * k - 150))
+    return obs
+
+
+def test_without_the_guard_a_burst_links_neighbours():
+    result = timed_links(topology(), burst(), {HOP: END})
+    wrong = [x for x in result.links if x.upstream[1] != x.downstream[1]]
+    assert wrong  # the failure the guard is for
+
+
+def test_the_guard_withdraws_every_link_of_a_burst_and_reports_both_sides():
+    # Nine others x 100 µs = 900 > 800: crowded.
+    result = timed_links(topology(), burst(), {HOP: guarded(800)})
+    assert result.links == ()
+    dense = {(u.observation, u.side) for u in result.undecided if u.status is Status.DENSE}
+    linked_without_guard = timed_links(topology(), burst(), {HOP: END}).links
+    for x in linked_without_guard:
+        assert (x.upstream, "outbound") in dense and (x.downstream, "inbound") in dense
+
+
+def test_an_isolated_pair_is_kept_by_the_guard():
+    obs = [*burst(), up(99, 900_000, 901_000), down(99, 900_000, 901_000)]
+    result = timed_links(topology(), obs, {HOP: guarded(800)})
+    assert [(x.upstream, x.downstream) for x in result.links] == [(("s", 99), ("t", 99))]
+
+
+def crowd(side_extra, n):
+    """One true pair, plus n unrelated observations near it on one side only."""
+    obs = [up(0, 0, 1_000), down(0, 0, 1_000)]
+    for k in range(1, n + 1):
+        if side_extra == "upstream":
+            obs.append(up(k, 50, 50))  # starts 50 µs after up 0; no candidate
+        else:
+            obs.append(down(k, 1_200, 1_200))  # ends 200 µs after down 0; no candidate
+    return obs
+
+
+@pytest.mark.parametrize("side", ["upstream", "downstream"])
+def test_the_guard_limit_is_inclusive_on_either_side(side):
+    # Three others x window 100 µs = 300: kept with a 300 µs span, withdrawn with 299.
+    kept = timed_links(topology(), crowd(side, 3), {HOP: guarded(300)})
+    assert [(x.upstream, x.downstream) for x in kept.links] == [(("s", 0), ("t", 0))]
+    refused = timed_links(topology(), crowd(side, 3), {HOP: guarded(299)})
+    assert refused.links == ()
+    assert {(u.observation, u.status) for u in refused.undecided} >= {
+        (("s", 0), Status.DENSE),
+        (("t", 0), Status.DENSE),
+    }
+
+
+def test_observations_beyond_the_span_do_not_count():
+    obs = [up(0, 0, 1_000), down(0, 0, 1_000)] + [up(k, 301, 301) for k in range(1, 10)]
+    result = timed_links(topology(), obs, {HOP: guarded(300)})
+    assert len(result.links) == 1
+
+
+def test_the_guard_measures_downstream_crowding_on_the_first_signal():
+    # START first: crowding is measured on downstream starts, not on ends.
+    params = JoinParams(signals=(Signal("start", 0, 100),), margin_us=0, local_span_us=300)
+    base = [up(0, 0, 1_000), down(0, 0, 1_000)]
+    near_in_end = [down(k, 5_000, 5_000 + k) for k in range(1, 5)]
+    assert len(timed_links(topology(), base + near_in_end, {HOP: params}).links) == 1
+    near_in_start = [down(k, 200, 900_000) for k in range(1, 5)]
+    result = timed_links(topology(), base + near_in_start, {HOP: params})
+    assert result.links == ()
+    assert (("t", 0), "inbound", Status.DENSE) in {
+        (u.observation, u.side, u.status) for u in result.undecided
+    }
+
+
+def test_a_zero_span_turns_the_guard_off():
+    assert timed_links(topology(), burst(), {HOP: guarded(0)}) == timed_links(
+        topology(), burst(), {HOP: END}
+    )
+
+
 def test_a_hop_without_params_is_left_alone():
     obs = [up(1, 0, 1_000), down(1, 0, 1_000)]
     assert timed_links(topology(), obs, {}) == timed_links(topology(), [], {})
@@ -257,6 +347,8 @@ def test_same_identity_with_different_content_is_refused():
         (JoinParams(signals=(Signal("end", 0, 1),), margin_us=-1), "margin must be an integer"),
         (JoinParams(signals=(Signal("end", 0, 1),), margin_us=0.5), "margin must be an integer"),
         (JoinParams(signals=(Signal("end", 0, 10**9),), margin_us=0), "too wide"),
+        (JoinParams(signals=(Signal("end", 0, 1),), margin_us=0, local_span_us=-1), "local_span"),
+        (JoinParams(signals=(Signal("end", 0, 1),), margin_us=0, local_span_us=0.5), "local_span"),
     ],
 )
 def test_invalid_params_are_refused(params, reason):

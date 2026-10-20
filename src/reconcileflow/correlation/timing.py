@@ -15,6 +15,14 @@ for which calibrated parameters are given:
    component, with the calibrated margin: a near tie is AMBIGUOUS, never a
    guess. Only MATCHED pairs become links; every other observation is
    reported with its status, both sides included.
+3. Local density guard (``local_span_us`` > 0). After the decision, a MATCHED
+   pair is withdrawn, both sides DENSE, when either side is crowded: with n
+   other observations on that side within ``local_span_us`` of it (upstream:
+   by start; downstream: by the first signal's reference), crowded means
+   ``n * w1 > local_span_us``, w1 the first signal's window. That is the
+   density ``rate x 2 x w1`` measured around the pair instead of over the
+   whole input, above 1. In a burst, true pairs leave their windows while
+   neighbours enter them; the margin cannot see a partner that is missing.
 
 A link found this way is ``derived``: an inference, never an authored fact.
 Hops are joined one at a time; nothing here unions chains across hops.
@@ -59,6 +67,7 @@ class JoinParams:
     signals: tuple[Signal, ...]  # one or two
     margin_us: int  # >= 0: near-optimal assignments within this are a tie
     max_component: int = 32
+    local_span_us: int = 0  # >= 0: local density guard half-span; 0 turns it off
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,12 +154,17 @@ def timed_links(
             max_component=p.max_component,
         )
         components += [(where, len(c.left) + len(c.right)) for c in decided.components]
+        crowded = _crowding(ups, downs, p)
         for d in decided.left:
-            if d.status is Status.MATCHED:
-                pair = (back[d.id], back[d.partner])
-                links.append(DerivedLink(where, *pair, weights[pair]))
-            else:
+            if d.status is not Status.MATCHED:
                 undecided.append(Undecided(where, back[d.id], "outbound", d.status))
+                continue
+            pair = (back[d.id], back[d.partner])
+            if p.local_span_us and crowded(*pair):
+                undecided.append(Undecided(where, pair[0], "outbound", Status.DENSE))
+                undecided.append(Undecided(where, pair[1], "inbound", Status.DENSE))
+            else:
+                links.append(DerivedLink(where, *pair, weights[pair]))
         for d in decided.right:
             if d.status is not Status.MATCHED:
                 undecided.append(Undecided(where, back[d.id], "inbound", d.status))
@@ -160,6 +174,25 @@ def timed_links(
         duplicates_dropped=dropped,
         components=tuple(components),
     )
+
+
+def _crowding(ups: list[Timed], downs: list[Timed], p: JoinParams):
+    """Whether a matched (upstream, downstream) pair sits where it is too dense
+    (meaningful only when ``local_span_us`` > 0)."""
+    span = p.local_span_us
+    first = p.signals[0]
+    up_at = {(o.source, o.seq): o.start_us for o in ups}
+    down_at = {(o.source, o.seq): _reference(first.name, o) for o in downs}
+    up_sorted, down_sorted = sorted(up_at.values()), sorted(down_at.values())
+
+    def others(ordered: list[int], x: int) -> int:
+        return bisect.bisect_right(ordered, x + span) - bisect.bisect_left(ordered, x - span) - 1
+
+    def crowded(a: Identity, b: Identity) -> bool:
+        n = max(others(up_sorted, up_at[a]), others(down_sorted, down_at[b]))
+        return n * first.window_us > span
+
+    return crowded
 
 
 def _gap(name: str, a: Timed, b: Timed) -> int:
@@ -209,6 +242,8 @@ def _validate_params(p: JoinParams) -> None:
             raise ValueError(f"signal {s.name!r}: window must be > 0, got {s.window_us}")
     if 1 + sum(s.window_us for s in p.signals) > MAX_WEIGHT:
         raise ValueError(f"windows too wide: the weight would exceed {MAX_WEIGHT}")
+    if not (_is_int(p.local_span_us) and p.local_span_us >= 0):
+        raise ValueError(f"local_span_us must be an integer >= 0, got {p.local_span_us!r}")
     # margin_us and max_component are checked by assign(), with the same message.
 
 

@@ -12,8 +12,9 @@ never reaches the module, and neither does any trace id.
 Per join:
 - correct / wrong: links between two observations of the same / of different
   requests (wrong links are silent errors);
-- ambiguous, unmatched, no_candidate, oversized: measured requests seen on a
-  side and left undecided, counted on the upstream side;
+- ambiguous, unmatched, no_candidate, oversized, dense: measured requests seen
+  on a side and left undecided, counted on the upstream side (dense: linked,
+  then withdrawn by the local density guard);
 - both_seen: measured requests seen on both sides;
 - density: rate x 2 x window of the first signal, against D_MAX;
 - component sizes and observations processed per second.
@@ -162,8 +163,12 @@ def _place(span: dict, attrs: dict, meta: dict) -> tuple[str, str] | None:
 
 def join_params(table: dict) -> tuple[JoinParams, str]:
     """A join's parameters from its TOML table, and which receiver start it uses."""
+    if "local_span_us" not in table:
+        raise ValueError("parameters without local_span_us (before round 4): recalibrate")
     signals = tuple(Signal(s["name"], s["offset_us"], s["window_us"]) for s in table["signals"])
-    params = JoinParams(signals, table["margin_us"], table.get("max_component", 32))
+    params = JoinParams(
+        signals, table["margin_us"], table.get("max_component", 32), table["local_span_us"]
+    )
     return params, table.get("receiver_start", "start")
 
 
@@ -273,6 +278,7 @@ def main(argv: list[str]) -> None:
                 f"   {where}: links {r['links']} correct {r['correct']} wrong {r['wrong']}"
                 f" | both seen {r['both_seen']} ambiguous {r['ambiguous']} unmatched"
                 f" {r['unmatched']} no_candidate {r['no_candidate']} oversized {r['oversized']}"
+                f" dense {r['dense']}"
             )
             print(
                 f"      density {r['density']} ({'feasible' if r['feasible'] else 'above D_MAX'})"
