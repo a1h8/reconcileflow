@@ -360,3 +360,42 @@ J1_SIDES = (("hop-1", "outbound"), ("fake-upstream", "inbound"))
 def _rows(run):
     cell = run / "n1"
     return (tp.records(cell, tp.cell_meta(cell))[0],)
+
+
+# -- stress (round 5) ----------------------------------------------------------
+
+
+def test_stress_judges_a_loaded_cell_with_quiet_parameters_and_says_so(tmp_path, capsys):
+    write_cell(tmp_path, 5, load=4)
+    tp.main(["timing_path.py", str(tmp_path), str(params_file(tmp_path, J1)), "--stress"])
+    out = capsys.readouterr().out
+    assert out.startswith("STRESS: judged on wrong links only")
+    assert "params from c100" in out
+    assert "hop-1 -> fake-upstream: links 5 correct 5 wrong 0" in out
+
+
+def test_stress_takes_the_highest_calibrated_concurrency_below_the_cell(tmp_path):
+    write_cell(tmp_path, 5, concurrency=500)
+    body = J1 + J1.replace("c100", "c20").replace("window_us = 50", "window_us = 7")
+    body += J1.replace("obi.c100", "beyla.c200")
+    report = tp.analyze_cell(tmp_path / "n1", params_file(tmp_path, body), stress=True)
+    assert report["params_from"] == 100
+    assert report["joins"]["hop-1 -> fake-upstream"]["links"] == 5
+
+
+def test_stress_without_a_calibration_below_the_cell_has_no_join(tmp_path):
+    write_cell(tmp_path, 5, concurrency=50)
+    report = tp.analyze_cell(tmp_path / "n1", params_file(tmp_path, J1), stress=True)
+    assert report["params_from"] is None and report["joins"] == {}
+
+
+def test_without_stress_an_uncalibrated_concurrency_has_no_join(tmp_path):
+    write_cell(tmp_path, 5, concurrency=500)
+    report = tp.analyze_cell(tmp_path / "n1", params_file(tmp_path, J1))
+    assert report["params_from"] == 500 and report["joins"] == {}
+
+
+def test_reading_and_stress_exclude_each_other(tmp_path):
+    write_cell(tmp_path, 3)
+    with pytest.raises(ValueError, match="exclude each other"):
+        tp.main(["t", str(tmp_path), str(params_file(tmp_path, J1)), "--reading", "--stress"])

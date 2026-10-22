@@ -23,7 +23,12 @@ The parameters must have been calibrated under the run's load (LOAD_CORES);
 --reading lifts that check, to read how parameters hold under another load:
 the output is then labelled a reading, never a verdict.
 
-Usage: timing_path.py <run-dir> <params.toml> [--json] [--reading]
+--stress (round 5) judges a cell on wrong links only, with the parameters
+calibrated on a quiet machine: the load check is lifted, and a concurrency
+without its own calibration takes the agent's highest calibrated concurrency
+below it (c=500 -> c100). The output is labelled so.
+
+Usage: timing_path.py <run-dir> <params.toml> [--json] [--reading | --stress]
 """
 
 from __future__ import annotations
@@ -172,18 +177,29 @@ def join_params(table: dict) -> tuple[JoinParams, str]:
     return params, table.get("receiver_start", "start")
 
 
+def calibrated_concurrency(data: dict, meta: dict, stress: bool = False) -> int | None:
+    """The concurrency whose calibration applies: the cell's own; with stress,
+    the agent's highest calibrated one at most the cell's (None if there is none)."""
+    if not stress:
+        return meta["concurrency"]
+    agent = data.get(meta["agent"], {})
+    return max((int(k[1:]) for k in agent if int(k[1:]) <= meta["concurrency"]), default=None)
+
+
 def params_for(
-    params_file: Path, meta: dict, check_load: bool = True
+    params_file: Path, meta: dict, check_load: bool = True, stress: bool = False
 ) -> dict[str, tuple[JoinParams, str]]:
-    """The joins calibrated for this cell's agent and concurrency, under its load."""
+    """The joins calibrated for this cell's agent and concurrency, under its load
+    (with stress: whatever the load, see calibrated_concurrency)."""
     data = tomllib.loads(params_file.read_text())
     calibrated = data.get("load_cores", 0)
-    if check_load and calibrated != meta["load"]:
+    if check_load and not stress and calibrated != meta["load"]:
         raise ValueError(
             f"{params_file}: calibrated under a load of {calibrated} cores,"
             f" the run had {meta['load']}"
         )
-    cell = data.get(meta["agent"], {}).get(f"c{meta['concurrency']}", {})
+    used = calibrated_concurrency(data, meta, stress)
+    cell = data.get(meta["agent"], {}).get(f"c{used}", {})
     return {where: join_params(table) for where, table in cell.items()}
 
 
@@ -194,16 +210,20 @@ def rate(rows: list[dict]) -> float:
     return len(lg) / (span_us / 1e6) if span_us > 0 else 0.0
 
 
-def analyze_cell(cell_dir: Path, params_file: Path, check_load: bool = True) -> dict:
+def analyze_cell(
+    cell_dir: Path, params_file: Path, check_load: bool = True, stress: bool = False
+) -> dict:
     meta = cell_meta(cell_dir)
     topology = topology_for(meta["hops"])
     rows, measured = records(cell_dir, meta)
-    joins = params_for(params_file, meta, check_load)
+    joins = params_for(params_file, meta, check_load, stress)
+    used = calibrated_concurrency(tomllib.loads(params_file.read_text()), meta, stress)
     requests_per_s = rate(rows)
     report = {
         "meta": meta,
         "measured": len(measured),
         "rate_per_s": round(requests_per_s, 1),
+        "params_from": used,
         "joins": {},
     }
     for where, (params, receiver_start) in sorted(joins.items()):
@@ -258,18 +278,23 @@ def score_join(topology, rows, where, src, dst, params, receiver_start, requests
 def main(argv: list[str]) -> None:
     run_dir, params_file = Path(argv[1]), Path(argv[2])
     cells = sorted(p.parent for p in run_dir.glob("*/lg.jsonl"))
-    reading = "--reading" in argv
-    report = {cell.name: analyze_cell(cell, params_file, not reading) for cell in cells}
+    reading, stress = "--reading" in argv, "--stress" in argv
+    if reading and stress:
+        raise ValueError("--reading and --stress exclude each other")
+    report = {cell.name: analyze_cell(cell, params_file, not reading, stress) for cell in cells}
     if "--json" in argv:
         print(json.dumps(report, indent=2))
         return
     if reading:
         print("READING ONLY: parameters may come from another load; not a verdict")
+    if stress:
+        print("STRESS: judged on wrong links only, with the quiet calibration")
     for name, cell in report.items():
         meta = cell["meta"]
         print(
             f"== {name}: agent={meta['agent']} c={meta['concurrency']} measured={cell['measured']}"
             f" rate={cell['rate_per_s']}/s"
+            + (f" params from c{cell['params_from']}" if stress else "")
         )
         if not cell["joins"]:
             print("   no calibrated join for this agent and concurrency")
