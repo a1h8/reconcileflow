@@ -172,7 +172,11 @@ def join_params(table: dict) -> tuple[JoinParams, str]:
         raise ValueError("parameters without local_span_us (before round 4): recalibrate")
     signals = tuple(Signal(s["name"], s["offset_us"], s["window_us"]) for s in table["signals"])
     params = JoinParams(
-        signals, table["margin_us"], table.get("max_component", 32), table["local_span_us"]
+        signals,
+        table["margin_us"],
+        table.get("max_component", 32),
+        table["local_span_us"],
+        table.get("local_limit_permille", 1000),  # round 6; before it, a density of 1
     )
     return params, table.get("receiver_start", "start")
 

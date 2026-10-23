@@ -19,10 +19,11 @@ for which calibrated parameters are given:
    pair is withdrawn, both sides DENSE, when either side is crowded: with n
    other observations on that side within ``local_span_us`` of it (upstream:
    by start; downstream: by the first signal's reference), crowded means
-   ``n * w1 > local_span_us``, w1 the first signal's window. That is the
-   density ``rate x 2 x w1`` measured around the pair instead of over the
-   whole input, above 1. In a burst, true pairs leave their windows while
-   neighbours enter them; the margin cannot see a partner that is missing.
+   ``n * w1 > local_span_us * local_limit_permille / 1000``, w1 the first
+   signal's window. That is the density ``rate x 2 x w1`` measured around the
+   pair instead of over the whole input, above a limit (1 by default). In a
+   burst, true pairs leave their windows while neighbours enter them; the
+   margin cannot see a partner that is missing.
 
 A link found this way is ``derived``: an inference, never an authored fact.
 Hops are joined one at a time; nothing here unions chains across hops.
@@ -68,6 +69,7 @@ class JoinParams:
     margin_us: int  # >= 0: near-optimal assignments within this are a tie
     max_component: int = 32
     local_span_us: int = 0  # >= 0: local density guard half-span; 0 turns it off
+    local_limit_permille: int = 1000  # 1..1000: local density above this / 1000 is crowded
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +192,7 @@ def _crowding(ups: list[Timed], downs: list[Timed], p: JoinParams):
 
     def crowded(a: Identity, b: Identity) -> bool:
         n = max(others(up_sorted, up_at[a]), others(down_sorted, down_at[b]))
-        return n * first.window_us > span
+        return n * first.window_us * 1000 > span * p.local_limit_permille
 
     return crowded
 
@@ -244,6 +246,10 @@ def _validate_params(p: JoinParams) -> None:
         raise ValueError(f"windows too wide: the weight would exceed {MAX_WEIGHT}")
     if not (_is_int(p.local_span_us) and p.local_span_us >= 0):
         raise ValueError(f"local_span_us must be an integer >= 0, got {p.local_span_us!r}")
+    if not (_is_int(p.local_limit_permille) and 1 <= p.local_limit_permille <= 1000):
+        raise ValueError(
+            f"local_limit_permille must be an integer in 1..1000, got {p.local_limit_permille!r}"
+        )
     # margin_us and max_component are checked by assign(), with the same message.
 
 

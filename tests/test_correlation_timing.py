@@ -238,6 +238,24 @@ def test_the_guard_limit_is_inclusive_on_either_side(side):
     }
 
 
+@pytest.mark.parametrize("side", ["upstream", "downstream"])
+def test_a_lower_local_limit_is_inclusive_too(side):
+    # Three others x 100 µs = 300 on a 1 000 µs span: density 0.300, kept at a
+    # limit of 300 per mille, withdrawn at 299.
+    def limited(permille):
+        return JoinParams(END.signals, 0, local_span_us=1_000, local_limit_permille=permille)
+
+    kept = timed_links(topology(), crowd(side, 3), {HOP: limited(300)})
+    assert [(x.upstream, x.downstream) for x in kept.links] == [(("s", 0), ("t", 0))]
+    refused = timed_links(topology(), crowd(side, 3), {HOP: limited(299)})
+    assert refused.links == ()
+    assert (("s", 0), Status.DENSE) in {(u.observation, u.status) for u in refused.undecided}
+
+
+def test_the_default_local_limit_is_a_density_of_one():
+    assert JoinParams(END.signals, 0).local_limit_permille == 1_000
+
+
 def test_observations_beyond_the_span_do_not_count():
     obs = [up(0, 0, 1_000), down(0, 0, 1_000)] + [up(k, 301, 301) for k in range(1, 10)]
     result = timed_links(topology(), obs, {HOP: guarded(300)})
@@ -349,6 +367,15 @@ def test_same_identity_with_different_content_is_refused():
         (JoinParams(signals=(Signal("end", 0, 10**9),), margin_us=0), "too wide"),
         (JoinParams(signals=(Signal("end", 0, 1),), margin_us=0, local_span_us=-1), "local_span"),
         (JoinParams(signals=(Signal("end", 0, 1),), margin_us=0, local_span_us=0.5), "local_span"),
+        (JoinParams(signals=(Signal("end", 0, 1),), margin_us=0, local_limit_permille=0), "limit"),
+        (
+            JoinParams(signals=(Signal("end", 0, 1),), margin_us=0, local_limit_permille=1001),
+            "limit",
+        ),
+        (
+            JoinParams(signals=(Signal("end", 0, 1),), margin_us=0, local_limit_permille=0.5),
+            "limit",
+        ),
     ],
 )
 def test_invalid_params_are_refused(params, reason):

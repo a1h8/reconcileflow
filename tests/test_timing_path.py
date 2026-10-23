@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -254,6 +255,7 @@ def test_calibration_writes_parameters_the_adapter_reads_back(tmp_path, capsys):
     assert set(joins) == {"hop-1 -> fake-upstream", "load-gen -> hop-1"}
     params, receiver_start = joins["hop-1 -> fake-upstream"]
     assert receiver_start == "start" and params.signals[0].window_us >= 1
+    assert params.local_limit_permille == cal.LOCAL_LIMIT_PERMILLE == 400
     j = tp.analyze_cell(tmp_path / "n1", out)["joins"]["hop-1 -> fake-upstream"]
     assert j["correct"] == 40 and j["wrong"] == 0
 
@@ -399,3 +401,15 @@ def test_reading_and_stress_exclude_each_other(tmp_path):
     write_cell(tmp_path, 3)
     with pytest.raises(ValueError, match="exclude each other"):
         tp.main(["t", str(tmp_path), str(params_file(tmp_path, J1)), "--reading", "--stress"])
+
+
+def test_the_local_limit_is_read_and_defaults_to_one(tmp_path):
+    assert (
+        tp.join_params(tomllib.loads(J1)["obi"]["c100"]["hop-1 -> fake-upstream"])[
+            0
+        ].local_limit_permille
+        == 1000
+    )
+    low = J1.replace("local_span_us = 20000", "local_span_us = 20000\nlocal_limit_permille = 150")
+    table = tomllib.loads(low)["obi"]["c100"]["hop-1 -> fake-upstream"]
+    assert tp.join_params(table)[0].local_limit_permille == 150

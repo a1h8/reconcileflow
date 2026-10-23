@@ -17,7 +17,8 @@ each candidate signal, then apply the rule fixed before any calibration run
   receiver start and offsets come from the pooled true pairs; each window is
   the largest of the runs' p99.9 and the margin the largest of their p99
   (residuals around the pooled offset), and the rate the largest of theirs;
-- local density guard: local_span_us = LOCAL_SPAN_US, always written;
+- local density guard: local_span_us = LOCAL_SPAN_US and local_limit_permille
+  = LOCAL_LIMIT_PERMILLE (round 6: 400), always written;
 - receiver start: the downstream span's start, or its handler start, whichever
   gives the smaller p99.9 for its best signal;
 - density = rate x 2 x window of the first signal; feasible iff <= D_MAX = 1.
@@ -44,6 +45,7 @@ SIGNALS = ("start", "end", "duration")
 LOCATING = ("start", "end")  # signals that place a request in time
 CANDIDATE_RECEIVER_STARTS = ("start", "handlerStart")
 LOCAL_SPAN_US = 20_000  # round 4: the local density guard looks ±20 ms around a pair
+LOCAL_LIMIT_PERMILLE = 400  # round 6: a pair is withdrawn above a local density of 0.4
 JOINS = {
     "hop-1 -> fake-upstream": (("hop-1", "outbound"), ("fake-upstream", "inbound")),
     "load-gen -> hop-1": (("load-gen", "outbound"), ("hop-1", "inbound")),
@@ -140,6 +142,7 @@ def choose_across(per_run: list[list[tuple[dict, dict]]]) -> dict:
         residual_quantile(run, first["name"], rs, first["offset_us"], 0.99) for run in per_run
     )
     chosen["local_span_us"] = LOCAL_SPAN_US
+    chosen["local_limit_permille"] = LOCAL_LIMIT_PERMILLE
     return chosen
 
 
@@ -218,6 +221,7 @@ def to_toml(calibrations: list[tuple[list[Path], dict]]) -> str:
                 f'receiver_start = "{j["receiver_start"]}"',
                 f"margin_us = {j['margin_us']}",
                 f"local_span_us = {j['local_span_us']}",
+                f"local_limit_permille = {j['local_limit_permille']}",
                 f"max_component = {j['max_component']}",
                 f"density = {j['density']}",
                 f"feasible = {str(j['feasible']).lower()}",
