@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -49,7 +50,7 @@ func TestRequestAccounting(t *testing.T) {
 			defer server.Close()
 			client := newClient(true, time.Second)
 			defer client.CloseIdleConnections()
-			r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "", false, true)
+			r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "", false, wantH2)
 			if (r.Error != "") != tc.wantError {
 				t.Fatalf("record: %+v", r)
 			}
@@ -69,7 +70,7 @@ func TestFailuresKeepIdentity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	defer server.Close()
 	for _, target := range []string{"://invalid", server.URL} {
-		r := performRequest(client, newConnTracker(), target, "truth", "parent", "", "", false, true)
+		r := performRequest(client, newConnTracker(), target, "truth", "parent", "", "", false, wantH2)
 		if r.Error == "" || r.TraceID != "truth" || r.TimestampNS == 0 || r.DurationNS <= 0 {
 			t.Fatalf("failure disappeared: %+v", r)
 		}
@@ -104,8 +105,8 @@ func TestNoPoolingUsesDistinctConnections(t *testing.T) {
 	client := newClient(false, time.Second)
 	defer client.CloseIdleConnections()
 	tracker := newConnTracker()
-	a := performRequest(client, tracker, server.URL, "a", "parent", "", "", false, true)
-	b := performRequest(client, tracker, server.URL, "b", "parent", "", "", false, true)
+	a := performRequest(client, tracker, server.URL, "a", "parent", "", "", false, wantH2)
+	b := performRequest(client, tracker, server.URL, "b", "parent", "", "", false, wantH2)
 	if a.Error != "" || b.Error != "" || a.ConnKey == b.ConnKey {
 		t.Fatalf("no-pool witness: %+v %+v", a, b)
 	}
@@ -126,7 +127,7 @@ func TestRedirectIsNotFollowedAndMaskKeepsTruthLocal(t *testing.T) {
 	defer server.Close()
 	client := newClient(true, time.Second)
 	defer client.CloseIdleConnections()
-	record := performRequest(client, newConnTracker(), server.URL+"/start", "truth", "parent", "", "", true, true)
+	record := performRequest(client, newConnTracker(), server.URL+"/start", "truth", "parent", "", "", true, wantH2)
 	if record.TraceID != "truth" || record.StatusCode != 302 || record.Error == "" {
 		t.Fatalf("redirect must remain a failed logical attempt with its truth: %+v", record)
 	}
@@ -142,7 +143,7 @@ func TestWitnessControlIsLabelledOnTheWire(t *testing.T) {
 	defer server.Close()
 	client := newClient(true, time.Second)
 	defer client.CloseIdleConnections()
-	r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "positive", false, true)
+	r := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "positive", false, wantH2)
 	if r.Error != "" || r.Control != "positive" {
 		t.Fatalf("record: %+v", r)
 	}
@@ -162,14 +163,14 @@ func TestBaggageIsSentAndLoggedOnlyWhenAsked(t *testing.T) {
 	client := newClient(true, time.Second)
 	defer client.CloseIdleConnections()
 
-	with := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "exchange_id=abc", "", false, true)
+	with := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "exchange_id=abc", "", false, wantH2)
 	if with.Error != "" || with.Baggage != "exchange_id=abc" {
 		t.Fatalf("record: %+v", with)
 	}
 	if h := <-got; h != "exchange_id=abc" {
 		t.Fatalf("baggage on the wire = %q, want exchange_id=abc", h)
 	}
-	without := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "", false, true)
+	without := performRequest(client, newConnTracker(), server.URL, "truth", "parent", "", "", false, wantH2)
 	if without.Baggage != "" {
 		t.Fatalf("record: %+v", without)
 	}
@@ -422,5 +423,107 @@ func TestWarmUpRunsFirstToItsOwnLogOnTheSameConnections(t *testing.T) {
 	defer seen.mu.Unlock()
 	if len(seen.traceparents) != n+warm {
 		t.Fatalf("server saw %d requests, want %d", len(seen.traceparents), n+warm)
+	}
+}
+
+// Phase 4 (correlation-phase4-spec.md §3): -http1 negotiates HTTP/1.1 on
+// keep-alive connections, one request at a time per connection, and checks
+// the protocol it got; the server saw HTTP/1.1 too.
+func TestHTTP1ModeNegotiatesAndChecksHTTP11(t *testing.T) {
+	const n, c = 60, 8
+	var mu sync.Mutex
+	majors := map[int]int{}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		majors[r.ProtoMajor]++
+		mu.Unlock()
+		fmt.Fprint(w, "ok")
+	}))
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}} // offered both, as Traefik does: the client must pick HTTP/1.1
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	out := filepath.Join(t.TempDir(), "lg.jsonl")
+	if code := runLoadGen(t, "-target", server.URL, "-out", out, "-requests", fmt.Sprint(n),
+		"-concurrency", fmt.Sprint(c), "-http1"); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	conns := map[string]bool{}
+	for _, r := range readLog(t, out) {
+		if r.Error != "" || r.Protocol != "HTTP/1.1" || r.NegotiatedProtocol != "http/1.1" {
+			t.Fatalf("record: %+v", r)
+		}
+		conns[r.ConnKey] = true
+	}
+	if len(conns) < 2 || len(conns) > c {
+		t.Fatalf("%d connections for concurrency %d: keep-alive pool not used as expected", len(conns), c)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if majors[1] != n || len(majors) != 1 {
+		t.Fatalf("server saw protocol majors %v, want %d requests in HTTP/1", majors, n)
+	}
+}
+
+// A request expected in HTTP/1.1 that came back in HTTP/2 is a failure, and
+// the reverse; wantAny accepts both.
+func TestProtocolExpectationIsChecked(t *testing.T) {
+	server, _ := h2Server(t, http.StatusOK)
+	h2 := newClient(true, time.Second)
+	defer h2.CloseIdleConnections()
+	if r := performRequest(h2, newConnTracker(), server.URL, "t", "p", "", "", false, wantH1); !strings.HasPrefix(r.Error, "protocol: expected HTTP/1.1") {
+		t.Fatalf("HTTP/2 accepted as HTTP/1.1: %+v", r)
+	}
+	if r := performRequest(h2, newConnTracker(), server.URL, "t", "p", "", "", false, wantAny); r.Error != "" {
+		t.Fatalf("wantAny refused: %+v", r)
+	}
+	h1 := newHTTP1Client(time.Second, 4)
+	defer h1.CloseIdleConnections()
+	if r := performRequest(h1, newConnTracker(), server.URL, "t", "p", "", "", false, wantH2); !strings.HasPrefix(r.Error, "protocol: expected HTTP/2") {
+		t.Fatalf("HTTP/1.1 accepted as HTTP/2: %+v", r)
+	}
+}
+
+// -conns k opens exactly k HTTP/2 connections and spreads the requests over
+// them in turn: n/k requests on each.
+func TestConnsSpreadsRequestsOverThatManyConnections(t *testing.T) {
+	const n, k = 60, 3
+	server, _ := h2Server(t, http.StatusOK)
+	out := filepath.Join(t.TempDir(), "lg.jsonl")
+	if code := runLoadGen(t, "-target", server.URL, "-out", out, "-requests", fmt.Sprint(n),
+		"-concurrency", "8", "-conns", fmt.Sprint(k)); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	perConn := map[string]int{}
+	for _, r := range readLog(t, out) {
+		if r.Error != "" || r.Protocol != "HTTP/2.0" {
+			t.Fatalf("record: %+v", r)
+		}
+		perConn[r.ConnKey]++
+	}
+	if len(perConn) != k {
+		t.Fatalf("%d connections, want %d: %v", len(perConn), k, perConn)
+	}
+	for key, got := range perConn {
+		if got != n/k {
+			t.Fatalf("connection %s carried %d requests, want %d", key, got, n/k)
+		}
+	}
+}
+
+func TestPhase4ModesRejectContradictoryConfiguration(t *testing.T) {
+	for _, args := range [][]string{
+		{"-conns", "0"},
+		{"-conns", "2", "-http1"},
+		{"-conns", "2", "-pool=false"},
+		{"-http1", "-pool=false"},
+	} {
+		out := filepath.Join(t.TempDir(), "lg.jsonl")
+		if code := runLoadGen(t, append(args, "-out", out)...); code == 0 {
+			t.Fatalf("%v: exit 0", args)
+		}
+		if _, err := os.Stat(out); !os.IsNotExist(err) {
+			t.Fatalf("%v: output file created (%v)", args, err)
+		}
 	}
 }

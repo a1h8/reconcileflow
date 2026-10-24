@@ -47,6 +47,12 @@
 #   WARM_REQUESTS  requests load-gen sends first, at the measured concurrency and
 #             through the same connections, before the measured ones (default
 #             10 x CONCURRENCY; logged to warmup-inproc.jsonl, never scored)
+#   LG_HTTP1  1: load-gen sends HTTP/1.1 on keep-alive connections, at most
+#             CONCURRENCY of them (load-gen -http1; phase 4, 4a). Default 0: HTTP/2
+#   LG_CONNS  HTTP/2 connections load-gen spreads its requests over, in turn
+#             (load-gen -conns; phase 4, 4b). Default 1, as before phase 4
+#   HOP_UPSTREAM_PROTO  h2 (default) or h1: the protocol Traefik hops use towards
+#             the next hop (a serversTransport with disableHTTP2); Traefik only
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
 #             root, so phase 2 runs as your user and AGENT_BIN is not needed
 #   RUN_BASE  where run directories go (default: runs/ next to the repository)
@@ -73,11 +79,19 @@ LG_MASK=${LG_MASK:-0}
 CPU_SAMPLE=${CPU_SAMPLE:-0}
 LOAD_CORES=${LOAD_CORES:-0}
 WARM_REQUESTS=${WARM_REQUESTS:-$((10 * CONCURRENCY))}
+LG_HTTP1=${LG_HTTP1:-0}
+LG_CONNS=${LG_CONNS:-1}
+HOP_UPSTREAM_PROTO=${HOP_UPSTREAM_PROTO:-h2}
 
 die() { echo "error: $*" >&2; exit 1; }
 
 build() {
 	[[ $(id -u) -ne 0 ]] || die "run phase 1 as your normal user (it calls sudo itself)"
+	[[ $LG_HTTP1 == [01] && $LG_CONNS =~ ^[1-9][0-9]*$ && $HOP_UPSTREAM_PROTO =~ ^h[12]$ ]] ||
+		die "LG_HTTP1 must be 0 or 1, LG_CONNS a positive integer, HOP_UPSTREAM_PROTO h1 or h2"
+	! ((LG_HTTP1 && LG_CONNS > 1)) || die "LG_CONNS > 1 is for HTTP/2; with LG_HTTP1=1 load-gen opens up to CONCURRENCY connections"
+	[[ $HOP_UPSTREAM_PROTO == h2 || ($HOP_KIND == traefik && -z $HOP_KINDS) ]] ||
+		die "HOP_UPSTREAM_PROTO=h1 needs Traefik hops only (a relay has no such setting)"
 	[[ -f go.mod && -d cmd/load-gen ]] || die "run from m0-harness/"
 	local kind
 	for kind in $HOP_KIND $HOP_KINDS; do
@@ -119,7 +133,8 @@ build() {
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY WARM_REQUESTS=$WARM_REQUESTS STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
-			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}"
+			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}" \
+			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
@@ -128,7 +143,8 @@ build() {
 		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT"
 		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" HOP_KINDS="$HOP_KINDS" STRIP_HOP="$STRIP_HOP"
 		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK"
-		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS")
+		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS"
+		LG_HTTP1="$LG_HTTP1" LG_CONNS="$LG_CONNS" HOP_UPSTREAM_PROTO="$HOP_UPSTREAM_PROTO")
 	if ((NO_AGENT)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -173,8 +189,16 @@ hop_config() {
 		echo "  services:"
 		echo "    next:"
 		echo "      loadBalancer:"
+		[[ $HOP_UPSTREAM_PROTO == h1 ]] && echo "        serversTransport: h1"
 		echo "        servers:"
 		echo "          - url: $next"
+		if [[ $HOP_UPSTREAM_PROTO == h1 ]]; then
+			# A named transport does not inherit the static one: skip-verify again.
+			echo "  serversTransports:"
+			echo "    h1:"
+			echo "      insecureSkipVerify: true"
+			echo "      disableHTTP2: true"
+		fi
 	} >"$file"
 }
 
@@ -226,10 +250,11 @@ cell() {
 	done
 	local entry=$next
 	local uninstrumented_json; uninstrumented_json=$(printf '%s,' $UNINSTRUMENTED_HOPS)
-	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s"}\n' \
+	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s", "lg_http1": %d, "lg_conns": %d, "hop_upstream_proto": "%s"}\n' \
 		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" \
 		"$(printf '"%s",' "${kinds[@]}" | sed 's/,$//')" "$FRESH_HOP" "${uninstrumented_json%,}" "$LG_MASK" \
-		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" >"$dir/cell.json"
+		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" \
+		"$LG_HTTP1" "$LG_CONNS" "$HOP_UPSTREAM_PROTO" >"$dir/cell.json"
 	local first_instrumented=1
 	while ! instrumented "$first_instrumented" && ((first_instrumented <= n)); do
 		first_instrumented=$((first_instrumented + 1))
@@ -237,6 +262,8 @@ cell() {
 
 	local lg_flags=(-truth-in-path)
 	((BAGGAGE)) && lg_flags+=(-baggage)
+	((LG_HTTP1)) && lg_flags+=(-http1)
+	((LG_CONNS > 1)) && lg_flags+=(-conns "$LG_CONNS")
 
 	local agent=""
 	if ((!NO_AGENT)); then
@@ -300,7 +327,8 @@ cell() {
 	kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null || true
 	echo "$name: hops=$n kind=$HOP_KIND strip_hop=$strip_hop baggage=$BAGGAGE agent=$AGENT_KIND" \
 		"propagation=${CONTEXT_PROPAGATION:-agent-default}" \
-		"requests=$REQUESTS c=$CONCURRENCY load=$LOAD_CORES load-gen exit=$lg_exit" |
+		"requests=$REQUESTS c=$CONCURRENCY load=$LOAD_CORES http1=$LG_HTTP1 conns=$LG_CONNS upstream=$HOP_UPSTREAM_PROTO" \
+		"load-gen exit=$lg_exit" |
 		tee -a "$RUN_DIR/cells.txt"
 }
 
