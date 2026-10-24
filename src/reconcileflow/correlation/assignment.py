@@ -48,6 +48,8 @@ class Status(IntEnum):
     OVERSIZED = 4  # component above max_component: reported, not resolved
     NO_CANDIDATE = 5  # no edge at all
     DENSE = 6  # set by the timing path's local density guard, never by assign()
+    NO_KEY = 7  # set by the connection path: no usable four-tuple (or stream), never by assign()
+    KEY_TIME_CONFLICT = 8  # set by the connection path: same key, no fit in time, never by assign()
 
 
 @dataclass(frozen=True, slots=True)
