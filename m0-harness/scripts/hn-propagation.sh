@@ -53,6 +53,10 @@
 #             (load-gen -conns; phase 4, 4b). Default 1, as before phase 4
 #   HOP_UPSTREAM_PROTO  h2 (default) or h1: the protocol Traefik hops use towards
 #             the next hop (a serversTransport with disableHTTP2); Traefik only
+#   BPF_STATS 1: kernel eBPF statistics on while the measured requests run
+#             (kernel.bpf_stats_enabled, restored after), bpftool prog show -j
+#             written before and after them: bpf-before.json, bpf-after.json
+#             (phase 4, gate G4a). Default 0
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
 #             root, so phase 2 runs as your user and AGENT_BIN is not needed
 #   RUN_BASE  where run directories go (default: runs/ next to the repository)
@@ -82,11 +86,15 @@ WARM_REQUESTS=${WARM_REQUESTS:-$((10 * CONCURRENCY))}
 LG_HTTP1=${LG_HTTP1:-0}
 LG_CONNS=${LG_CONNS:-1}
 HOP_UPSTREAM_PROTO=${HOP_UPSTREAM_PROTO:-h2}
+BPF_STATS=${BPF_STATS:-0}
 
 die() { echo "error: $*" >&2; exit 1; }
 
 build() {
 	[[ $(id -u) -ne 0 ]] || die "run phase 1 as your normal user (it calls sudo itself)"
+	[[ $BPF_STATS == [01] ]] || die "BPF_STATS must be 0 or 1"
+	! ((BPF_STATS && NO_AGENT)) || die "BPF_STATS=1 measures the agent's programs: it needs an agent"
+	! ((BPF_STATS)) || command -v bpftool >/dev/null || die "BPF_STATS=1 needs bpftool"
 	[[ $LG_HTTP1 == [01] && $LG_CONNS =~ ^[1-9][0-9]*$ && $HOP_UPSTREAM_PROTO =~ ^h[12]$ ]] ||
 		die "LG_HTTP1 must be 0 or 1, LG_CONNS a positive integer, HOP_UPSTREAM_PROTO h1 or h2"
 	! ((LG_HTTP1 && LG_CONNS > 1)) || die "LG_CONNS > 1 is for HTTP/2; with LG_HTTP1=1 load-gen opens up to CONCURRENCY connections"
@@ -134,7 +142,7 @@ build() {
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY WARM_REQUESTS=$WARM_REQUESTS STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
 			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}" \
-			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO"
+			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO BPF_STATS=$BPF_STATS"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
@@ -144,7 +152,8 @@ build() {
 		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" HOP_KINDS="$HOP_KINDS" STRIP_HOP="$STRIP_HOP"
 		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK"
 		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS"
-		LG_HTTP1="$LG_HTTP1" LG_CONNS="$LG_CONNS" HOP_UPSTREAM_PROTO="$HOP_UPSTREAM_PROTO")
+		LG_HTTP1="$LG_HTTP1" LG_CONNS="$LG_CONNS" HOP_UPSTREAM_PROTO="$HOP_UPSTREAM_PROTO"
+		BPF_STATS="$BPF_STATS")
 	if ((NO_AGENT)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -250,11 +259,11 @@ cell() {
 	done
 	local entry=$next
 	local uninstrumented_json; uninstrumented_json=$(printf '%s,' $UNINSTRUMENTED_HOPS)
-	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s", "lg_http1": %d, "lg_conns": %d, "hop_upstream_proto": "%s"}\n' \
+	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s", "lg_http1": %d, "lg_conns": %d, "hop_upstream_proto": "%s", "bpf_stats": %d}\n' \
 		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" \
 		"$(printf '"%s",' "${kinds[@]}" | sed 's/,$//')" "$FRESH_HOP" "${uninstrumented_json%,}" "$LG_MASK" \
 		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" \
-		"$LG_HTTP1" "$LG_CONNS" "$HOP_UPSTREAM_PROTO" >"$dir/cell.json"
+		"$LG_HTTP1" "$LG_CONNS" "$HOP_UPSTREAM_PROTO" "$BPF_STATS" >"$dir/cell.json"
 	local first_instrumented=1
 	while ! instrumented "$first_instrumented" && ((first_instrumented <= n)); do
 		first_instrumented=$((first_instrumented + 1))
@@ -310,7 +319,12 @@ cell() {
 		LC_ALL=C pidstat -u -h 1 >"$dir/cpu-procs.txt" 2>&1 &
 		samplers+=($!)
 	fi
-	local lg_exit=0
+	local lg_exit=0 stats_was=""
+	if ((BPF_STATS)); then
+		stats_was=$(cat /proc/sys/kernel/bpf_stats_enabled)
+		echo 1 >/proc/sys/kernel/bpf_stats_enabled
+		bpftool -j prog show >"$dir/bpf-before.json"
+	fi
 	# The measured run starts with WARM_REQUESTS at the measured concurrency, through
 	# the same client, to their own log: without it every request held in the first
 	# ~100 ms was load-gen opening its connections, not the chain's steady state.
@@ -318,6 +332,10 @@ cell() {
 	"$bin/load-gen" -target "$entry" -out "$dir/lg.jsonl" "${measured_flags[@]}" \
 		-warmup "$WARM_REQUESTS" -warmup-out "$dir/warmup-inproc.jsonl" \
 		-requests "$REQUESTS" -concurrency "$CONCURRENCY" 2>"$dir/lg.log" || lg_exit=$?
+	if ((BPF_STATS)); then
+		bpftool -j prog show >"$dir/bpf-after.json"
+		echo "$stats_was" >/proc/sys/kernel/bpf_stats_enabled
+	fi
 	"$bin/load-gen" -target "$entry" -out "$dir/tail.jsonl" "${measured_flags[@]}" \
 		-requests "$TAIL" -concurrency 1 2>"$dir/tail.log" || true
 	((${#samplers[@]})) && { kill "${samplers[@]}" 2>/dev/null; wait "${samplers[@]}" 2>/dev/null || true; }
