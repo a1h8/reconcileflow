@@ -10,8 +10,9 @@ discrepancy and be able to replay every decision.
 
 ## Status
 
-**J1 matching semantics implemented; J2 local provenance now available for a narrow
-CAMT.053.001.08 profile.** The engine stays in memory and side-effect free;
+**J1 matching semantics implemented; J2 local provenance now available through a
+first adapter, for a narrow CAMT.053.001.08 profile.** The engine stays in memory
+and side-effect free;
 the optional provenance layer stores source bytes, normalised inputs and results
 in SQLite. No streaming or real customer data. See the
 [provenance contract and demo](docs/provenance.md) for supported input and limitations.
@@ -200,8 +201,10 @@ test. ✔
 **J2 — Provenance** · *local entry-level slice implemented*
 `RawEvent` persisted **before** normalisation, payload intact;
 `CanonicalRecord` carrying `adapter_version` and `normalizer_version`. A single
-adapter: **CAMT.053** — ISO 20022, public samples, a format that does not move
-every six months. The [adapter contract](docs/provenance.md) limits this first
+adapter so far: **CAMT.053**, chosen for its public samples and a format that does
+not move every six months. The engine itself does not depend on it: an adapter
+turns a source's bytes into `CanonicalRecord`s, each carrying the `Record` the
+engine matches. The [adapter contract](docs/provenance.md) limits this first
 implementation to booked entry-level CAMT.053.001.08 records with explicit value
 dates; it does not claim general CAMT support or full XSD validation. The adapter
 catalogue is not planned.
