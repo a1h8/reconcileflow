@@ -2,9 +2,9 @@
 
 **A reconciliation engine: declared rules, typed breaks, replayable decisions.**
 
-Match two sources of records that ought to agree — a bank statement and a
-ledger, a provider feed and an internal state — then explain every discrepancy
-and be able to replay every decision.
+Match two sources of records that ought to agree — a provider feed and an
+internal state, an export and the system it came from — then explain every
+discrepancy and be able to replay every decision.
 
 ---
 
@@ -44,30 +44,30 @@ from datetime import date
 from decimal import Decimal
 from reconcileflow import Record, Tolerance, reconcile
 
-bank = [
-    Record("B1", "FR76-1234", Decimal("1250.00"), date(2024, 3, 11)),
-    Record("B2", "FR76-1234", Decimal("89.90"), date(2024, 3, 12), reference="INV-4471"),
+left = [
+    Record("A1", "ACC-1", Decimal("1250.00"), date(2024, 3, 11)),
+    Record("A2", "ACC-1", Decimal("89.90"), date(2024, 3, 12), reference="INV-4471"),
 ]
-ledger = [
-    Record("L1", "FR76-1234", Decimal("800.00"), date(2024, 3, 11)),
-    Record("L2", "FR76-1234", Decimal("450.00"), date(2024, 3, 12)),
-    Record("L3", "FR76-1234", Decimal("91.40"), date(2024, 3, 10), reference="INV-4471"),
+right = [
+    Record("B1", "ACC-1", Decimal("800.00"), date(2024, 3, 11)),
+    Record("B2", "ACC-1", Decimal("450.00"), date(2024, 3, 12)),
+    Record("B3", "ACC-1", Decimal("91.40"), date(2024, 3, 10), reference="INV-4471"),
 ]
 
-result = reconcile(bank, ledger, Tolerance(amount_abs=Decimal("0.50"), date_days=3))
+result = reconcile(left, right, Tolerance(amount_abs=Decimal("0.50"), date_days=3))
 ```
 
 ```
-B2 -> L3        M0_REFERENCE     residual=-1.50
-B1 -> L1,L2     M3_AGGREGATE     residual=0.00
+A2 -> B3        M0_REFERENCE     residual=-1.50
+A1 -> B1,B2     M3_AGGREGATE     residual=0.00
 ruleset_id = 514101369862cbf6
 ```
 
 Two things to notice in that output:
 
-- **`B1` is matched against `L1 + L2`** — 1250 = 800 + 450. That is `M3`,
+- **`A1` is matched against `B1 + B2`** — 1250 = 800 + 450. That is `M3`,
   aggregation.
-- **`B2` is matched to `L3` despite a 1.50 discrepancy.** The reference
+- **`A2` is matched to `B3` despite a 1.50 discrepancy.** The reference
   `INV-4471` is identical: these are the same operation. An amount discrepancy
   is not a reason to leave them unmatched — it is an **"amount discrepancy"
   break**, and you must match first in order to qualify it. The residual is
