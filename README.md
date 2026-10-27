@@ -11,10 +11,11 @@ discrepancy and be able to replay every decision.
 ## Status
 
 **J1 matching semantics implemented; J2 local provenance now available through a
-first adapter, for a narrow CAMT.053.001.08 profile.** The engine stays in memory
+first adapter, for a narrow CAMT.053.001.08 profile; J3 stream semantics
+implemented in memory (`reconcileflow.stream`).** The engine stays in memory
 and side-effect free;
 the optional provenance layer stores source bytes, normalised inputs and results
-in SQLite. No streaming or real customer data. See the
+in SQLite. No streaming runtime or real customer data. See the
 [provenance contract and demo](docs/provenance.md) for supported input and limitations.
 
 ## What it is
@@ -211,22 +212,28 @@ catalogue is not planned.
 *Done when:* a matching decision can be traced back to the bytes received from
 the provider, with no gap in the chain.
 
-**J3 — Streaming**
-State is partitioned by reconciliation key. Event time, watermarks and timers
-drive business completeness; **TTL is a memory safety net and must never decide
+**J3 — Streaming** · *in-memory semantics implemented*
+State is partitioned by reconciliation key. Event time and watermarks drive
+business completeness; **TTL is a memory safety net and must never decide
 an outcome** — otherwise a memory setting silently changes reconciliation
-results.
+results. The watermark follows the **slower** of the two sources, minus a declared
+tolerated lateness: a fast source must not close the horizons of a slow one. A
+source with nothing to send declares its progress in the journal, not through a
+wall-clock timer, so a replay sees it at the same place.
 
 Decisions are append-only, versioned and deterministic. A break stays
 `PROVISIONAL` until its horizon closes. A match becomes `FINAL` only when the
 rule guarantees monotonicity, or when the horizon closes — and in practice only
 `M0` is monotone, under an explicitly declared reference-uniqueness assumption.
+J3 does not offer that declaration yet: every match waits for its horizon.
 Greedy resolution means a later arrival can always contend for `M1` and `M2`,
 and `M3` is never monotone since a new record may form a better combination. So
 "final at horizon close" is the rule, not the exception.
 
 A late arrival never rewrites an earlier decision: it emits a new one that
-explicitly supersedes it.
+explicitly supersedes it. A final decision withdraws its records, so a later arrival
+cannot contend for them: the final state can differ from matching the whole
+journal at once. That is the price of finality, and a test shows it.
 
 Minimum decision contract:
 
@@ -249,10 +256,13 @@ the same thing as decisions that are never revised.** The history is immutable;
 the *effective state* evolves by supersession and is a derived read model
 (`status != SUPERSEDED`) — never an in-place update.
 
-*Done when:* replaying the same events — including duplicates, in a different
-order — yields the same decision identifiers and the same effective state; and a
-late counterpart replaces a provisional break with a match without deleting
-anything.
+*Done when:* replaying the same journal, duplicates included, yields the same
+decisions byte for byte; replaying it in a different order, as long as no record
+arrives beyond the tolerated lateness, yields the same final decisions and the
+same final effective state (what was provisional depends on what was known when,
+by design); a counterpart arriving within the lateness replaces a provisional
+break with a match without deleting anything; and a record arriving beyond it is
+a typed `LATE` break that never alters a final decision.
 
 **J4 — Observation**
 Counters exposed as time series, aggregated by `reason × provider × day`. The
