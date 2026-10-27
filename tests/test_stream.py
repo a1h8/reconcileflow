@@ -162,8 +162,12 @@ def test_t4_a_counterpart_within_the_horizon_supersedes_the_break():
     assert brk in result.decisions
     assert result.status(brk) is SUPERSEDED and result.status(final) is FINAL
     # The three clocks: business horizon, decision position, finalisation position.
-    assert final.window_end == day(14)
-    assert final.final_at == 2  # the first progress signal closes the horizon
+    # A match's horizon is its latest input's: R1 (day 12) + 3 days. Until then a
+    # stricter rule could still claim R1 (T6), so the match cannot be final before.
+    assert final.window_end == day(15)
+    # The left signal (position 2) leaves the right side at day 12; the right one
+    # (position 3) moves the watermark to day 20 and closes the horizon.
+    assert final.final_at == 3
 
 
 # -- T5: M0 is provisional until its horizon (Q3) ----------------------------
@@ -283,3 +287,24 @@ def test_the_lateness_changes_the_ruleset_id_carried_by_every_decision():
     assert strict.ruleset_id() != lenient.ruleset_id()
     result = replay([left("A1", "100.00", 11)], strict)
     assert {d.ruleset_id for d in result.decisions} == {strict.ruleset_id()}
+
+
+# -- T12: the watermark never recedes ------------------------------------------
+
+
+def test_t12_an_older_arrival_within_the_lateness_does_not_move_the_watermark_back():
+    # Lateness 5: both sides at day 15 put the watermark at day 10. An older left
+    # record (day 12) is within the lateness and joins; the watermark stays at 10,
+    # so a right record of day 8 is late. Taking the last arrival's date instead of
+    # the latest would move the watermark back to day 7 and let it in.
+    config = StreamConfig(Tolerance(date_days=3), lateness_days=5)
+    journal = [
+        left("A1", "100.00", 15),
+        right("R1", "100.00", 15),
+        left("A2", "200.00", 12),
+        right("R2", "300.00", 8),
+    ]
+    result = replay(journal, config)
+    assert [d.reason for d in chain(result, LEFT, "A2")] != ["LATE"]
+    (late,) = chain(result, RIGHT, "R2")
+    assert (late.reason, late.status) == ("LATE", FINAL)
