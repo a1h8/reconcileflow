@@ -15,7 +15,7 @@ on:
 
 jobs:
   mutation:
-    name: Mutation testing (rules, engine, attribution, stability, correlation, topology)
+    name: Mutation testing (rules, engine, attribution, stability, correlation, topology, exact path, timing path)
     runs-on: ubuntu-latest
     # Past 20 minutes this moves to a nightly run on main (docs/mutation-testing.md).
     timeout-minutes: 45

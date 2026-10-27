@@ -176,6 +176,7 @@ class HopCeiling:
     link: LinkKind
     density: Fraction | None  # only for a timing-derived hop with a declared rate
     max_fanout: int | None
+    key: str | None  # identifier the exact path joins on (shared_header, message_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +184,7 @@ class CrossingCeiling:
     point: str
     evidence: Evidence
     link: LinkKind
+    key: str | None  # identifier the point copies through (propagated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,21 +416,21 @@ def _parse_hop(raw: Mapping, known: set, refusals: list) -> Hop | None:
 # --- ceilings -------------------------------------------------------------------
 
 
-def _wire_header(src: Point, dst: Point) -> bool:
-    """A header identifier recorded on both ends of the wire, as it was on it."""
+def _wire_header(src: Point, dst: Point) -> str | None:
+    """The first header identifier recorded on both ends of the wire, as it was on it."""
     for header in HEADERS:
         # A point that sets its own header: its agent's outbound record still
         # carries the incoming one (measured), so only the point's own log counts.
         replaced = header in src.sets and src.visibility == "kernel"
         if header in src.outbound and header in dst.inbound and not replaced:
-            return True
-    return False
+            return header
+    return None
 
 
 def _missing(hop: Hop, src: Point, dst: Point) -> dict[LinkKind, list[Reason]]:
     """For each link kind, every condition the hop does not meet (empty: it holds)."""
     both = src.outbound & dst.inbound
-    shared = [] if _wire_header(src, dst) else [Reason.NO_SHARED_HEADER]
+    shared = [] if _wire_header(src, dst) is not None else [Reason.NO_SHARED_HEADER]
     key = []
     if hop.relation != "async" or "message_id" not in both:
         key.append(Reason.NO_MESSAGE_KEY)
@@ -485,23 +487,27 @@ def _hop_ceiling(hop: Hop, src: Point, dst: Point) -> HopCeiling:
             1_000 * (hop.noise_us or 0),
         )
         density = Fraction(hop.rate * window_ns, 1_000_000_000)
-    return HopCeiling(hop.src, hop.dst, hop.relation, evidence, link, density, hop.max_fanout)
+    key = {LinkKind.SHARED_HEADER: _wire_header(src, dst), LinkKind.MESSAGE_KEY: "message_id"}
+    return HopCeiling(
+        hop.src, hop.dst, hop.relation, evidence, link, density, hop.max_fanout, key.get(link)
+    )
 
 
 def _crossing_ceiling(point: Point) -> CrossingCeiling:
-    for header, _who in point.propagates:
+    copied = {name for name, _who in point.propagates}
+    for header in (*HEADERS, "message_id"):
         if (
-            header in ("traceparent", "request_id", "message_id")
+            header in copied
             and header in point.inbound
             and header in point.outbound
             and header not in point.sets
         ):
-            return CrossingCeiling(point.name, Evidence.AUTHORED, LinkKind.PROPAGATED)
+            return CrossingCeiling(point.name, Evidence.AUTHORED, LinkKind.PROPAGATED, header)
     if point.visibility == "kernel":
-        return CrossingCeiling(point.name, Evidence.OBSERVED, LinkKind.INSIDE_PROCESS)
+        return CrossingCeiling(point.name, Evidence.OBSERVED, LinkKind.INSIDE_PROCESS, None)
     if point.visibility in ("log", "app"):
-        return CrossingCeiling(point.name, Evidence.DERIVED, LinkKind.LOGGED_TIMING)
-    return CrossingCeiling(point.name, Evidence.UNRESOLVED, LinkKind.NONE)
+        return CrossingCeiling(point.name, Evidence.DERIVED, LinkKind.LOGGED_TIMING, None)
+    return CrossingCeiling(point.name, Evidence.UNRESOLVED, LinkKind.NONE, None)
 
 
 # --- rules ----------------------------------------------------------------------

@@ -27,6 +27,9 @@ witness cells before trusting any measurement.
 - `cmd/join` — offline join of the two logs on `(conn_key, stream_id)`,
   reporting `D_acc`. Deliberately a separate process: the measurement must
   not run inside either side it measures.
+- `cmd/cpu-load` — keeps a fixed number of cores busy while the measured
+  requests run (`LOAD_CORES` in `scripts/hn-propagation.sh`): a known,
+  reproducible foreign load, reported apart from any other by `freezes.py`.
 - `internal/oracle` — shared record format and the **single** `ConnKey`
   function. Both binaries must call it, not reformat the key by hand — see
   "Lesson" below for why that matters.

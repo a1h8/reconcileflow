@@ -83,6 +83,7 @@ func main() {
 			return context.WithValue(ctx, connKeyCtx, cs)
 		},
 		Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			arrival := time.Now().UnixNano()
 			cs, _ := r.Context().Value(connKeyCtx).(*connState)
 			streamID := int(cs.streamSeq.Add(1))
 			ci := oracle.ConnectionInstance{
@@ -111,6 +112,7 @@ func main() {
 				StreamID:     streamID,
 				TraceID:      traceID,
 				TimestampNS:  time.Now().UnixNano(),
+				ArrivalNS:    arrival,
 				Control:      control,
 				ResponseSize: int64(len(body)),
 				Baggage:      r.Header.Get("baggage"),
