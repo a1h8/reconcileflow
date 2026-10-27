@@ -252,6 +252,15 @@ def test_a_lower_local_limit_is_inclusive_too(side):
     assert (("s", 0), Status.DENSE) in {(u.observation, u.status) for u in refused.undecided}
 
 
+@pytest.mark.parametrize("side", ["upstream", "downstream"])
+def test_the_lowest_local_limit_is_accepted_and_withdraws_at_the_first_neighbour(side):
+    # 1 per mille: a pair alone is kept, one other observation in the span is a crowd.
+    lowest = JoinParams(END.signals, 0, local_span_us=1_000, local_limit_permille=1)
+    alone = timed_links(topology(), crowd(side, 0), {HOP: lowest})
+    assert [(x.upstream, x.downstream) for x in alone.links] == [(("s", 0), ("t", 0))]
+    assert timed_links(topology(), crowd(side, 1), {HOP: lowest}).links == ()
+
+
 def test_the_default_local_limit_is_a_density_of_one():
     assert JoinParams(END.signals, 0).local_limit_permille == 1_000
 
