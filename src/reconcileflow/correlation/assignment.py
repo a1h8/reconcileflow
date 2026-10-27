@@ -47,6 +47,7 @@ class Status(IntEnum):
     AMBIGUOUS = 3  # the near-optimal assignments disagree
     OVERSIZED = 4  # component above max_component: reported, not resolved
     NO_CANDIDATE = 5  # no edge at all
+    DENSE = 6  # set by the timing path's local density guard, never by assign()
 
 
 @dataclass(frozen=True, slots=True)

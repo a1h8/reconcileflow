@@ -363,6 +363,9 @@ func TestLoadGenRejectsInvalidConfigurationWithoutWritingALog(t *testing.T) {
 		{"-concurrency", "0"},
 		{"-timeout", "0s"},
 		{"-seed-policy", "fixed"},
+		{"-warmup", "5"},
+		{"-warmup", "-1", "-warmup-out", "w.jsonl"},
+		{"-warmup-out", "w.jsonl"},
 	} {
 		out := filepath.Join(t.TempDir(), "lg.jsonl")
 		if code := runLoadGen(t, append(args, "-out", out)...); code == 0 {
@@ -378,5 +381,46 @@ func TestLoadGenFailsOnAnUnwritableOutput(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "missing-dir", "lg.jsonl")
 	if code := runLoadGen(t, "-out", out, "-requests", "1"); code == 0 {
 		t.Fatal("exit 0 with an unwritable output path")
+	}
+}
+
+// The warm-up goes through the same client before the measured requests, to
+// its own log: the measured requests start on connections already open.
+func TestWarmUpRunsFirstToItsOwnLogOnTheSameConnections(t *testing.T) {
+	const n, warm = 30, 15
+	server, seen := h2Server(t, http.StatusOK)
+	dir := t.TempDir()
+	out, warmOut := filepath.Join(dir, "lg.jsonl"), filepath.Join(dir, "warmup.jsonl")
+	if code := runLoadGen(t, "-target", server.URL, "-out", out, "-requests", fmt.Sprint(n),
+		"-concurrency", "5", "-warmup", fmt.Sprint(warm), "-warmup-out", warmOut); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	measured, warmed := readLog(t, out), readLog(t, warmOut)
+	if len(measured) != n || len(warmed) != warm {
+		t.Fatalf("%d measured and %d warm-up records, want %d and %d", len(measured), len(warmed), n, warm)
+	}
+	conns := map[string]bool{}
+	ids := map[string]bool{}
+	var lastWarm int64
+	for _, r := range warmed {
+		conns[r.ConnKey] = true
+		ids[r.TraceID] = true
+		lastWarm = max(lastWarm, r.TimestampNS)
+	}
+	for _, r := range measured {
+		if ids[r.TraceID] {
+			t.Fatalf("trace_id %s in both logs", r.TraceID)
+		}
+		if !conns[r.ConnKey] {
+			t.Fatalf("measured request on connection %s, not opened by the warm-up", r.ConnKey)
+		}
+		if r.TimestampNS < lastWarm {
+			t.Fatalf("measured request sent before the warm-up ended")
+		}
+	}
+	seen.mu.Lock()
+	defer seen.mu.Unlock()
+	if len(seen.traceparents) != n+warm {
+		t.Fatalf("server saw %d requests, want %d", len(seen.traceparents), n+warm)
 	}
 }

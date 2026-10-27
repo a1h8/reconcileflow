@@ -760,3 +760,47 @@ def test_taking_a_capability_away_never_raises_a_ceiling(decl, change):
     before = ceilings(load(decl))["a", "b"].evidence
     after = ceilings(load(weakened(decl, change)))["a", "b"].evidence
     assert after <= before
+
+
+# --- join keys exposed to the exact path ---------------------------------------
+
+
+def test_each_authored_hop_names_the_identifier_it_joins_on():
+    keys = {name: ceilings(load(declaration(name)))[EXPECTED[name][0]].key for name in EXPECTED}
+    assert keys == {
+        "t1a": None,
+        "t1b": "request_id",
+        "t2a": "traceparent",
+        "t2b": None,
+        "t2c": None,
+        "t3a": None,
+        "t3b": None,
+        "t4": None,
+        "t5a": "message_id",
+        "t5b": None,
+        "t6": None,
+    }
+
+
+def test_request_id_is_preferred_when_both_headers_cross_the_wire():
+    decl = declaration("t2a")
+    decl["points"]["ingress"]["outbound"].append("request_id")
+    decl["points"]["app"]["inbound"].append("request_id")
+    assert ceilings(load(decl))["ingress", "app"].key == "request_id"
+
+
+def test_crossing_names_the_identifier_it_copies():
+    crossings = {c.point: c.key for c in load(declaration("t1b")).crossings}
+    assert crossings == {"ingress": "traceparent"}
+    assert {c.point: c.key for c in load(declaration("t5a")).crossings} == {"queue": "message_id"}
+    decl = declaration("t1b")
+    decl["points"]["ingress"]["propagates"] = {}
+    assert {c.point: c.key for c in load(decl).crossings} == {"ingress": None}
+
+
+def test_crossing_prefers_request_id_over_traceparent():
+    decl = declaration("t1b")
+    ingress = decl["points"]["ingress"]
+    ingress["outbound"].append("request_id")
+    ingress["propagates"] = {"traceparent": "agent", "request_id": "app"}
+    assert {c.point: c.key for c in load(decl).crossings} == {"ingress": "request_id"}

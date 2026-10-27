@@ -290,3 +290,16 @@ func TestBaggageAndTruthPathReachTheLogUnchanged(t *testing.T) {
 		seen[want.Baggage] = true
 	}
 }
+
+func TestArrivalPrecedesTheAnswerAndFollowsTheSend(t *testing.T) {
+	r := pipeline(t, "-truth-in-path", "-requests", "20", "-concurrency", "4")
+	observed := byTraceID(t, r.fakeUpstream)
+	for _, sent := range r.loadGen {
+		got := observed[sent.TraceID]
+		if got.ArrivalNS < sent.TimestampNS || got.TimestampNS < got.ArrivalNS ||
+			sent.TimestampNS+sent.DurationNS < got.TimestampNS {
+			t.Fatalf("trace_id %s: sent %d, arrived %d, answered %d, received back %d", sent.TraceID,
+				sent.TimestampNS, got.ArrivalNS, got.TimestampNS, sent.TimestampNS+sent.DurationNS)
+		}
+	}
+}

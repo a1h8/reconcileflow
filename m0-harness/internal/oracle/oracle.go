@@ -58,7 +58,12 @@ type Record struct {
 	StreamID           int    `json:"stream_id"` // local ordinal, NOT the HTTP/2 protocol stream ID
 	TraceID            string `json:"trace_id"`  // W3C traceparent trace-id field
 	TimestampNS        int64  `json:"timestamp_ns"`
-	Control            string `json:"control,omitempty"` // "" | "positive" | "negative" — witness cell tag
+	// ArrivalNS is when fake-upstream's handler received the request, before
+	// its injected latency; TimestampNS on that side is just before it
+	// answers. A receiver-side reference that owes nothing to the agent.
+	// Zero/omitted on load-gen's side.
+	ArrivalNS int64  `json:"arrival_ns,omitempty"`
+	Control   string `json:"control,omitempty"` // "" | "positive" | "negative" — witness cell tag
 	// DurationNS is load-gen's own client-measured round-trip time (send to
 	// response received) — a correlation signal independent of temporal
 	// proximity: injectLatencyProfileC gives each request a genuinely
