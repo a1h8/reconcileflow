@@ -308,3 +308,10 @@ removed = "1_000 * (hop.noise_us or 0),"
 added = "1_000 * (hop.noise_us or 1),"
 reason = "an undeclared noise of 1 us never widens the window: every timestamp class is at least 1 us coarse"
 assumes = "the finest entry of PRECISION_NS is 1_000 ns"
+
+[[survivor]]
+function = "reconcileflow.stream._engine_version"
+removed = "return version(\"reconcileflow\")"
+added = "return version(\"RECONCILEFLOW\")"
+reason = "importlib.metadata normalises distribution names: the lookup ignores case"
+assumes = "nothing"
