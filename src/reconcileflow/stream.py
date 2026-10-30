@@ -232,26 +232,29 @@ class _Replay:
     def _settle(self, block: _Block) -> None:
         """Finalise every decision whose horizon has closed, re-evaluate what is
         left, and repeat until nothing more closes."""
-        while True:
-            watermark = self._watermark(block)
-            if watermark is None:
-                return
-            closing = []
-            for side in SIDES:
-                for record_id in sorted(block.pool[side]):
-                    decision = self.current[(side, record_id)]
-                    if decision.window_end < watermark:
-                        closing.append(decision)
-            if not closing:
-                return
+        while closing := self._closing(block):
             for decision in closing:
                 proposal = _Proposal(
                     decision.decision_type, decision.input_ids, decision.reason, decision.window_end
                 )
                 self._emit(decision.business_key, proposal, Status.FINAL)
-                block.pool[decision.business_key[0]].pop(decision.business_key[1], None)
+                side, record_id = decision.business_key
+                del block.pool[side][record_id]
             if any(block.pool[side] for side in SIDES):
                 self._evaluate(block)
+
+    def _closing(self, block: _Block) -> list[Decision]:
+        """The open decisions whose horizon the watermark has passed."""
+        watermark = self._watermark(block)
+        if watermark is None:
+            return []
+        closing = []
+        for side in SIDES:
+            for record_id in sorted(block.pool[side]):
+                decision = self.current[(side, record_id)]
+                if decision.window_end < watermark:
+                    closing.append(decision)
+        return closing
 
     # -- evaluation ------------------------------------------------------------------
 

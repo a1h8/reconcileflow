@@ -308,3 +308,152 @@ def test_t12_an_older_arrival_within_the_lateness_does_not_move_the_watermark_ba
     assert [d.reason for d in chain(result, LEFT, "A2")] != ["LATE"]
     (late,) = chain(result, RIGHT, "R2")
     assert (late.reason, late.status) == ("LATE", FINAL)
+
+
+# -- mutation testing: what T1-T12 left unpinned ------------------------------
+
+
+@pytest.mark.parametrize("lateness", [-1, True, 1.5, "2"])
+def test_a_lateness_that_is_not_an_integer_ge_0_is_refused(lateness):
+    with pytest.raises(ValueError, match="lateness_days must be an integer >= 0"):
+        replay([], StreamConfig(lateness_days=lateness))
+
+
+def test_a_side_other_than_left_or_right_is_refused():
+    record = rec("A1", "100.00", 11)
+    with pytest.raises(ValueError, match="side must be 'left' or 'right', got 'middle'"):
+        replay([Arrival("middle", record)], CFG)
+    with pytest.raises(ValueError, match="side must be"):
+        replay([Progress("middle", day(11))], CFG)
+
+
+def test_an_entry_that_is_neither_an_arrival_nor_a_progress_is_refused():
+    with pytest.raises(ValueError, match="unknown journal entry"):
+        replay([rec("A1", "100.00", 11)], CFG)
+
+
+def test_the_ruleset_id_depends_on_the_tolerance_too():
+    assert StreamConfig(Tolerance(date_days=3)).ruleset_id() != (
+        StreamConfig(Tolerance(date_days=4)).ruleset_id()
+    )
+
+
+def test_identifiers_are_the_same_bytes_in_every_process():
+    # T1 replays twice in one process; this pins the bytes, so a change to the
+    # fingerprints shows up as a change to every stored decision.
+    result = replay([left("A1", "100.00", 11), right("R1", "100.00", 12), *done(20)], CFG)
+    assert CFG.ruleset_id() == "a4a217fc0021c77c"
+    assert [d.decision_id for d in result.decisions] == [
+        "02fa57c650f8b328",
+        "24de4ccf54a08eca",
+        "4246a8b827201f51",
+        "4f2d65c41bbe8113",
+        "083171247a62fdba",
+    ]
+
+
+def test_every_decision_carries_the_installed_engine_version():
+    from importlib.metadata import version
+
+    result = replay([left("A1", "100.00", 11)], CFG)
+    assert {d.engine_version for d in result.decisions} == {version("reconcileflow")}
+
+
+def test_the_engine_version_is_unknown_outside_an_installed_package(monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    from reconcileflow import stream
+
+    def missing(name):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr(stream, "version", missing)
+    assert stream._engine_version() == "unknown"
+
+
+def test_chain_versions_count_from_one_and_only_finals_have_a_final_clock():
+    result = replay([left("A1", "100.00", 11), right("R1", "100.00", 12), *done(20)], CFG)
+    a1 = chain(result, LEFT, "A1")
+    assert [d.chain_version for d in a1] == [1, 2, 3]
+    assert [d.final_at for d in a1] == [None, None, 3]
+
+
+def test_decision_ids_are_unique_even_when_a_content_comes_back():
+    # A1 has no candidate, then R1 out of tolerance; R1 closes at day 15 and
+    # leaves the block, so A1 has no candidate again: versions 1 and 3 share
+    # their content. A left and a right record, alone in their blocks, share X.
+    journal = [
+        left("A1", "100.00", 13),
+        right("R1", "700.00", 11),
+        Arrival(LEFT, Record("X", "P", D("1.00"), day(11))),
+        Arrival(RIGHT, Record("X", "Q", D("1.00"), day(11))),
+        *done(15),
+    ]
+    result = replay(journal, CFG)
+    reasons = [d.reason for d in chain(result, LEFT, "A1")]
+    assert reasons == ["NO_CANDIDATE", "AMOUNT_OUT_OF_TOLERANCE", "NO_CANDIDATE"]
+    assert state(result)[(LEFT, "X")][2] == state(result)[(RIGHT, "X")][2] == "NO_CANDIDATE"
+    ids = [d.decision_id for d in result.decisions]
+    assert len(ids) == len(set(ids))
+
+
+def test_an_unrelated_arrival_does_not_reissue_unchanged_decisions():
+    result = replay([left("A1", "100.00", 11), right("R9", "700.00", 11)], CFG)
+    assert len(chain(result, LEFT, "A1")) == 2  # NO_CANDIDATE, then the amount reason
+    result = replay(
+        [left("A1", "100.00", 11), right("R9", "700.00", 11), left("A2", "900.00", 11)], CFG
+    )
+    assert len(chain(result, LEFT, "A1")) == 2
+    assert len(chain(result, RIGHT, "R9")) == 1
+    # A match has two inputs or more: its fingerprint joins them.
+    result = replay(
+        [left("A1", "100.00", 11), right("R1", "100.00", 11), left("A2", "900.00", 11)], CFG
+    )
+    assert [d.decision_type for d in chain(result, LEFT, "A1")] == [BREAK, MATCH]
+    assert len(chain(result, RIGHT, "R1")) == 1
+
+
+def test_a_break_carries_every_distinct_reason_on_each_side():
+    result = replay(
+        [left("A1", "100.00", 11), right("R1", "250.00", 11), right("R2", "100.00", 20)], CFG
+    )
+    now = state(result)
+    assert now[(LEFT, "A1")][2] == "DATE_OUT_OF_WINDOW+AMOUNT_OUT_OF_TOLERANCE"
+    assert now[(RIGHT, "R1")][2] == "AMOUNT_OUT_OF_TOLERANCE"
+    assert now[(RIGHT, "R2")][2] == "DATE_OUT_OF_WINDOW"
+
+
+def test_a_late_break_has_the_late_record_s_horizon():
+    journal = [left("A1", "100.00", 11), right("R9", "50.00", 20), Progress(LEFT, day(20))]
+    (late,) = chain(replay([*journal, right("R1", "100.00", 12)], CFG), RIGHT, "R1")
+    assert late.window_end == day(15)
+
+
+def test_an_arrival_exactly_at_the_watermark_is_not_late():
+    # Both sides at day 20, lateness 0: the watermark is day 20.
+    journal = [left("A9", "50.00", 20), right("R9", "60.00", 20), right("R1", "100.00", 20)]
+    assert chain(replay(journal, CFG), RIGHT, "R1")[0].reason != "LATE"
+
+
+def test_a_horizon_exactly_at_the_watermark_is_still_open():
+    # A1's horizon is day 14: a watermark of day 14 does not close it, day 15 does.
+    journal = [left("A1", "100.00", 11)]
+    assert chain(replay([*journal, *done(14)], CFG), LEFT, "A1")[-1].status is PROVISIONAL
+    assert chain(replay([*journal, *done(15)], CFG), LEFT, "A1")[-1].status is FINAL
+
+
+def test_each_block_has_its_own_watermark():
+    # Account B is at day 20 on both sides; account ACC has not moved.
+    other = [
+        Arrival(LEFT, Record("B1", "B", D("50.00"), day(20))),
+        Arrival(RIGHT, Record("B2", "B", D("60.00"), day(20))),
+    ]
+    result = replay([*other, left("A1", "100.00", 11), right("R1", "100.00", 12)], CFG)
+    assert state(result)[(LEFT, "A1")][:2] == (MATCH, ("A1", "R1"))
+
+
+def test_an_older_progress_signal_does_not_move_a_side_back():
+    journal = [left("A1", "100.00", 11), *done(20), Progress(LEFT, day(5))]
+    result = replay([*journal, right("R1", "100.00", 12)], CFG)
+    (late,) = chain(result, RIGHT, "R1")
+    assert late.reason == "LATE"
