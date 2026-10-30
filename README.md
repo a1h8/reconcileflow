@@ -125,16 +125,29 @@ and mature:
 - [Zingg](https://github.com/zinggAI/zingg),
   [dedupe](https://github.com/dedupeio/dedupe) — entity resolution through
   learning
-- [reconPy](https://pypi.org/project/reconPy/) — financial reconciliation, 1:1
-  matching
 
-These tools do **batch entity resolution with learned weights**: "do these two
-records denote the same entity?". They do not answer "do these two movements
-offset each other, and if not, why?".
+These answer "do these two records denote the same entity?", in batch, with
+learned weights. Closer to this project, several tools reconcile two sets of
+records with **declared** rules:
 
-What remains specific to this project, stated narrowly: **declared** rules (vs.
-learned), **typed breaks** (vs. a score), **1:n aggregation**, **replayable
-traceability**. A substantial part of the need is covered by Splink plus a
+- [Blnk](https://github.com/blnkfinance/blnk) — an open-source ledger whose
+  reconciliation engine takes declared matching rules with an allowed drift,
+  one-to-one, one-to-many and many-to-one
+- [reconcile-py](https://pypi.org/project/reconcile-py/) — deterministic,
+  explainable matching with amount and date tolerances, one-to-many by subset
+  search, near ties flagged for review
+- [Reconcile.NET](https://www.nuget.org/packages/Reconcile.Net) — successive
+  passes from exact reference to looser keys, one-to-many on a supplied group key
+- [reconPy](https://pypi.org/project/reconPy/) — scored reconciliation between
+  dataframes, one-to-one
+
+So declared rules and one-to-many matching are not what sets this project apart.
+What does, as far as these tools document it, stated narrowly: **an enumerated
+reason for every unmatched record** (not only an explanation for the matched
+ones); **stream semantics** — provisional, final and superseded decisions, a
+replayable journal, finality decided per group of competing records; and
+**provenance** back to the bytes received. Their documentation describes batch
+runs only. A substantial part of the need is covered by one of them plus a
 scheduled job — that is acknowledged, not hidden.
 
 ## Design notes
