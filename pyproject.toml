@@ -12,8 +12,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "coverage>=7.6"]
 # Pinned exactly: survivors and their ids depend on mutmut's operators, and
-# tools/mutation_check.py reads its internal diff helper.
-mutation = ["mutmut==3.8.0"]
+# tools/mutation_check.py reads its internal diff helper. pytest too: mutmut's
+# plugin reads pytest internals (`_nodeid`, gone in pytest 9.2).
+mutation = ["mutmut==3.8.0", "pytest==9.1.1"]
 
 [build-system]
 requires = ["hatchling"]
@@ -48,6 +49,7 @@ source_paths = [
     "src/reconcileflow/correlation/topology.py",
     "src/reconcileflow/correlation/exact.py",
     "src/reconcileflow/correlation/timing.py",
+    "src/reconcileflow/stream.py",
 ]
 pytest_add_cli_args_test_selection = ["tests/"]
 # A fixed seed: property tests then kill the same mutants on every run.
