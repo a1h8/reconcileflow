@@ -55,6 +55,9 @@ being excluded from the denominator.
 | Negative control (shuffled trace_id) | n=500, c=100 | 0.0000 | 0 |
 | **Normal, sustained load** | **n=10000, c=200** | **0.9631** | **369** |
 
+Raw data not kept: these runs' logs are no longer on disk, so the table cannot be
+rescored; runs are kept on persistent disk from 2026-10-12 on.
+
 **The scale result is the one that matters, not the small-n ones.** All 369 misses share one
 signature: the client-side and server-side processes disagree on the reuse generation of the same
 underlying 5-tuple. Both count 5-tuple recurrences correctly; under sustained concurrency the OS

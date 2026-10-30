@@ -35,6 +35,13 @@ log line-count markers — the line-marker approach used in earlier sections of
 flush-timing race; keying on identity instead eliminates that artifact class
 entirely.
 
+**Raw data not kept.** The capture logs and load-generator output of these runs
+are no longer on disk, and the `old` binary was not kept:
+the table below cannot be rescored. Runs from 2026-10-12 on are kept on persistent
+disk. The `new` side agrees with later kept runs (one hop, pooled connection, every
+request linked correctly; PR #13); the `old` side and the size of the gain rest on
+this record alone.
+
 **Result — correct-attribution rate, by concurrency:**
 
 | Concurrency | `old` (`5016ad00`) | `new` (`335c1c9e`) |
