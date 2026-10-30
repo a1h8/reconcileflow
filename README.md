@@ -150,6 +150,10 @@ replayable journal, finality decided per group of competing records; and
 runs only. A substantial part of the need is covered by one of them plus a
 scheduled job — that is acknowledged, not hidden.
 
+The stream semantics borrow Flink's concepts — event time, watermarks, keyed
+state — without its distributed machinery. A compiled core under a Python
+surface is not a claim here either: Bytewax and Pathway already do it.
+
 ## Design notes
 
 The decisions below are the load-bearing ones. Each is a constraint the code
