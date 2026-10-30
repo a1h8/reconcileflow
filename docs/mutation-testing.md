@@ -46,7 +46,8 @@ A result is a function of the code, the tests, the mutmut version and the
 Hypothesis seed. All four are pinned:
 
 - `[tool.mutmut]` in `pyproject.toml` is the only configuration;
-- mutmut is pinned to an exact version in a `mutation` optional dependency;
+- mutmut is pinned to an exact version in a `mutation` optional dependency, and
+  pytest with it: mutmut's plugin reads pytest internals;
 - tests run with `--hypothesis-seed=0`. A fixed seed means property tests kill
   only what that seed generates: boundaries must also be pinned by example
   tests, which is the existing practice;
