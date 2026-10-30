@@ -7,19 +7,26 @@ outputs into an append-only history of decisions (README, "J3 — Streaming"):
 - the input is a journal of arrivals and source progress signals, in order;
 - each arrival re-evaluates its block with the engine; a decision whose
   content changes is superseded by a new one, never edited;
-- a decision becomes FINAL when its horizon closes: the watermark, the slower
-  side's progress minus the tolerated lateness, passes value date + window. A
-  match's horizon is its latest input's: until then a stricter rule could still
-  take one of its right records;
-- a final decision withdraws its records: a later arrival cannot contend for
-  them. The final state can therefore differ from matching the whole journal at
-  once, when a late arrival would have won; that is the price of finality;
-- an arrival already under its block's watermark is a final LATE break;
+- decisions become FINAL by component, not one by one. Two open records of
+  opposite sides are linked when they are within the date window, or carry the
+  same reference; greedy resolution can carry a change along a chain of links,
+  so a component is final only when none of its members can gain a neighbour:
+  the watermark, the slower side's progress minus the tolerated lateness, has
+  passed every member's horizon (value date + window, or + the reference
+  horizon for a record carrying a reference);
+- a component whose dates span more than a declared bound is cut instead: its
+  decisions past their own horizon become final and are marked forced, since
+  their content may then depend on the arrival order;
+- a final decision withdraws its records. An arrival already under its block's
+  watermark is a final LATE break; one whose reference is that of an already
+  final record of the other side is a final REFERENCE_AFTER_FINAL break;
+- a break's reasons count only pairs within the date window: at finality those
+  are all known, so a reason does not depend on what else arrived first;
 - SUPERSEDED is derived (another decision replaces this one), never written.
 
 Every clock in a decision is replayable: the business horizon, and positions
 among the journal's distinct entries for "decided" and "final". There is no
-wall-clock time, so the same journal always yields the same bytes.
+wall-clock time, so the same journal always yields the same decisions.
 """
 
 from __future__ import annotations
@@ -36,8 +43,10 @@ from .models import Record, RejectReason, Tolerance
 
 LEFT, RIGHT = "left", "right"
 SIDES = (LEFT, RIGHT)
+OTHER = {LEFT: RIGHT, RIGHT: LEFT}
 BusinessKey = tuple[str, str]  # (side, record id)
 LATE = "LATE"
+REFERENCE_AFTER_FINAL = "REFERENCE_AFTER_FINAL"
 AS_COUNTERPART = "AS_COUNTERPART"
 _SEP = "\x1f"  # as in models._digest: no field can run into the next
 
@@ -84,11 +93,26 @@ class DecisionType(Enum):
 class StreamConfig:
     tolerance: Tolerance = field(default_factory=Tolerance)
     lateness_days: int = 0  # tolerated lateness, in value days
+    # Declared assumption: two records with the same reference are at most this
+    # many days apart. M0 ignores dates, so without it a reference has no
+    # horizon. None: the date window.
+    reference_horizon_days: int | None = None
+    # A component spanning more days than this is cut (forced finality). None:
+    # never cut, exact, but a dense stream may then never become final.
+    max_component_days: int | None = None
 
     def ruleset_id(self) -> str:
-        """The engine's ruleset fingerprint, extended with the lateness: it
-        changes decisions, so two lateness settings must not look the same."""
-        return _digest(self.tolerance.ruleset_id(), "lateness", str(self.lateness_days))
+        """The engine's ruleset fingerprint, extended with the stream settings:
+        they change decisions, so two settings must not look the same."""
+        return _digest(
+            self.tolerance.ruleset_id(),
+            "lateness",
+            str(self.lateness_days),
+            "reference_horizon",
+            str(self.reference_horizon_days),
+            "max_component",
+            str(self.max_component_days),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +124,9 @@ class Decision:
     decision_type: DecisionType
     input_ids: tuple[str, ...]  # left id first, then right ids
     # A RuleId name for a match; the distinct RejectReason names joined by "+",
-    # or LATE, for a break. A right record's chain points to the left key's
-    # match with AS_COUNTERPART: a match is counted once, on its left key.
+    # LATE or REFERENCE_AFTER_FINAL, for a break. A right record's chain points
+    # to the left key's match with AS_COUNTERPART: a match is counted once, on
+    # its left key.
     reason: str
     ruleset_id: str
     engine_version: str
@@ -109,6 +134,7 @@ class Decision:
     decided_at: int  # processing clock: position among distinct journal entries
     final_at: int | None  # finalisation clock: position where the horizon closed
     supersedes: str | None
+    forced: bool  # final because its component was cut, not because it closed
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,18 +176,28 @@ class _Proposal:
 class _Block:
     pool: dict[str, dict[str, Record]] = field(default_factory=lambda: {s: {} for s in SIDES})
     latest: dict[str, date | None] = field(default_factory=lambda: dict.fromkeys(SIDES))
+    # References of the records each side has already withdrawn as final.
+    final_references: dict[str, set[str]] = field(default_factory=lambda: {s: set() for s in SIDES})
+
+
+def _check_days(name: str, value: object, minimum: int) -> None:
+    if not (isinstance(value, int) and not isinstance(value, bool) and value >= minimum):
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
 
 
 class _Replay:
     def __init__(self, config: StreamConfig):
-        if not (
-            isinstance(config.lateness_days, int)
-            and not isinstance(config.lateness_days, bool)
-            and config.lateness_days >= 0
-        ):
-            raise ValueError(f"lateness_days must be an integer >= 0, got {config.lateness_days!r}")
+        _check_days("lateness_days", config.lateness_days, 0)
         self.tol = config.tolerance
+        reference_days = config.reference_horizon_days
+        if reference_days is None:
+            reference_days = self.tol.date_days
+        _check_days("reference_horizon_days", reference_days, self.tol.date_days)
+        if config.max_component_days is not None:
+            _check_days("max_component_days", config.max_component_days, 0)
+        self.max_component_days = config.max_component_days
         self.window = timedelta(days=self.tol.date_days)
+        self.reference_window = timedelta(days=reference_days)
         self.lateness = timedelta(days=config.lateness_days)
         self.ruleset = config.ruleset_id()
         self.engine_version = _engine_version()
@@ -172,6 +208,9 @@ class _Replay:
         self.current: dict[BusinessKey, Decision] = {}
         self.decisions: list[Decision] = []
         self.position = -1
+
+    def _horizon(self, record: Record) -> date:
+        return record.value_date + (self.reference_window if record.reference else self.window)
 
     # -- journal ---------------------------------------------------------------
 
@@ -204,10 +243,14 @@ class _Replay:
         block = self.blocks.setdefault(blocking_key(record), _Block())
         watermark = self._watermark(block)
         if watermark is not None and record.value_date < watermark:
-            late = _Proposal(
-                DecisionType.BREAK, (record.id,), LATE, record.value_date + self.window
-            )
-            self._emit(key, late, Status.FINAL)
+            reason = LATE
+        elif record.reference in block.final_references[OTHER[entry.side]]:
+            reason = REFERENCE_AFTER_FINAL
+        else:
+            reason = None
+        if reason is not None:
+            alone = _Proposal(DecisionType.BREAK, (record.id,), reason, self._horizon(record))
+            self._emit(key, alone, Status.FINAL)
             return
         block.pool[entry.side][record.id] = record
         previous = block.latest[entry.side]
@@ -230,31 +273,57 @@ class _Replay:
         return min(progress) - self.lateness
 
     def _settle(self, block: _Block) -> None:
-        """Finalise every decision whose horizon has closed, re-evaluate what is
-        left, and repeat until nothing more closes."""
+        """Finalise every component whose horizon has closed, or that is cut,
+        re-evaluate what is left, and repeat until nothing more closes."""
         while closing := self._closing(block):
-            for decision in closing:
+            for decision, forced in closing:
                 proposal = _Proposal(
                     decision.decision_type, decision.input_ids, decision.reason, decision.window_end
                 )
-                self._emit(decision.business_key, proposal, Status.FINAL)
+                self._emit(decision.business_key, proposal, Status.FINAL, forced)
                 side, record_id = decision.business_key
-                del block.pool[side][record_id]
+                record = block.pool[side].pop(record_id)
+                if record.reference:
+                    block.final_references[side].add(record.reference)
             if any(block.pool[side] for side in SIDES):
                 self._evaluate(block)
 
-    def _closing(self, block: _Block) -> list[Decision]:
-        """The open decisions whose horizon the watermark has passed."""
+    def _closing(self, block: _Block) -> list[tuple[Decision, bool]]:
+        """The decisions to finalise now, each with whether it is forced."""
         watermark = self._watermark(block)
         if watermark is None:
             return []
         closing = []
-        for side in SIDES:
-            for record_id in sorted(block.pool[side]):
-                decision = self.current[(side, record_id)]
-                if decision.window_end < watermark:
-                    closing.append(decision)
+        for component in self._components(block):
+            records = [block.pool[side][record_id] for side, record_id in component]
+            decisions = [self.current[key] for key in component]
+            if max(self._horizon(r) for r in records) < watermark:
+                closing += [(d, False) for d in decisions]
+            elif self.max_component_days is not None and (
+                max(r.value_date for r in records) - min(r.value_date for r in records)
+            ) > timedelta(days=self.max_component_days):
+                closing += [(d, True) for d in decisions if d.window_end < watermark]
         return closing
+
+    def _components(self, block: _Block) -> list[list[BusinessKey]]:
+        """Open records linked by the date window or a shared reference, grouped
+        into connected components, each sorted, in a deterministic order."""
+        parent: dict[BusinessKey, BusinessKey] = {
+            (side, record_id): (side, record_id) for side in SIDES for record_id in block.pool[side]
+        }
+
+        def root(key: BusinessKey) -> BusinessKey:
+            return key if parent[key] == key else root(parent[key])
+
+        for left_id, lrec in block.pool[LEFT].items():
+            for right_id, rrec in block.pool[RIGHT].items():
+                near = abs((lrec.value_date - rrec.value_date).days) <= self.tol.date_days
+                if near or (lrec.reference and lrec.reference == rrec.reference):
+                    parent[root((RIGHT, right_id))] = root((LEFT, left_id))
+        groups: dict[BusinessKey, list[BusinessKey]] = {}
+        for key in sorted(parent):
+            groups.setdefault(root(key), []).append(key)
+        return sorted(groups.values())
 
     # -- evaluation ------------------------------------------------------------------
 
@@ -265,10 +334,10 @@ class _Replay:
         proposals: dict[BusinessKey, _Proposal] = {}
         for match in result.matches:
             inputs = (match.left_id, *match.right_ids)
-            horizon = max(
-                lefts[match.left_id].value_date, *(rights[r].value_date for r in match.right_ids)
+            window_end = max(
+                self._horizon(lefts[match.left_id]),
+                *(self._horizon(rights[r]) for r in match.right_ids),
             )
-            window_end = horizon + self.window
             proposals[(LEFT, match.left_id)] = _Proposal(
                 DecisionType.MATCH, inputs, match.rule.name, window_end
             )
@@ -278,8 +347,13 @@ class _Replay:
                 )
         reasons: dict[BusinessKey, set[RejectReason]] = {}
         for reject in result.rejects:
-            reasons.setdefault((LEFT, reject.left_id), set()).add(reject.reason)
-            if reject.right_id is not None:
+            if reject.right_id is None:
+                reasons.setdefault((LEFT, reject.left_id), set()).add(reject.reason)
+            elif (
+                abs((lefts[reject.left_id].value_date - rights[reject.right_id].value_date).days)
+                <= self.tol.date_days
+            ):
+                reasons.setdefault((LEFT, reject.left_id), set()).add(reject.reason)
                 reasons.setdefault((RIGHT, reject.right_id), set()).add(reject.reason)
         for side, pool in ((LEFT, lefts), (RIGHT, rights)):
             for record_id, record in pool.items():
@@ -290,19 +364,22 @@ class _Replay:
                         DecisionType.BREAK,
                         (record_id,),
                         "+".join(r.name for r in found),
-                        record.value_date + self.window,
+                        self._horizon(record),
                     )
         for key in sorted(proposals):
             current = self.current.get(key)
             if current is None or _fingerprint(current) != proposals[key].fingerprint:
                 self._emit(key, proposals[key], Status.PROVISIONAL)
 
-    def _emit(self, key: BusinessKey, proposal: _Proposal, status: Status) -> None:
+    def _emit(
+        self, key: BusinessKey, proposal: _Proposal, status: Status, forced: bool = False
+    ) -> None:
         previous = self.current.get(key)
         chain_version = 1 if previous is None else previous.chain_version + 1
         if status is Status.FINAL:
             # Content only: the chain's length depends on the arrival order.
-            decision_id = _digest(*key, proposal.fingerprint, Status.FINAL.value)
+            finality = "FORCED" if forced else Status.FINAL.value
+            decision_id = _digest(*key, proposal.fingerprint, finality)
         else:
             decision_id = _digest(*key, str(chain_version), proposal.fingerprint)
         decision = Decision(
@@ -319,6 +396,7 @@ class _Replay:
             decided_at=self.position,
             final_at=self.position if status is Status.FINAL else None,
             supersedes=None if previous is None else previous.decision_id,
+            forced=forced,
         )
         self.current[key] = decision
         self.decisions.append(decision)
