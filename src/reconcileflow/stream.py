@@ -34,7 +34,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
 
@@ -57,10 +57,17 @@ def _digest(*parts: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Arrival:
-    """A record arriving on one side."""
+    """A record arriving on one side.
+
+    ``source`` and ``captured_at`` are read only by observation (J4): where the
+    record came from, and when it was captured, as data in the journal. Replay
+    never reads them, so no clock decides anything.
+    """
 
     side: str  # LEFT | RIGHT
     record: Record
+    source: str = ""
+    captured_at: datetime | None = None  # timezone-aware, UTC
 
 
 @dataclass(frozen=True, slots=True)

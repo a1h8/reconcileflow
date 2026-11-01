@@ -12,7 +12,8 @@ discrepancy and be able to replay every decision.
 
 **J1 matching semantics implemented; J2 local provenance now available through a
 first adapter, for a narrow CAMT.053.001.08 profile; J3 stream semantics
-implemented in memory (`reconcileflow.stream`).** The engine stays in memory
+implemented in memory (`reconcileflow.stream`); J4 observation of its final
+decisions (`reconcileflow.observation`).** The engine stays in memory
 and side-effect free;
 the optional provenance layer stores source bytes, normalised inputs and results
 in SQLite. No streaming runtime or real customer data. See the
@@ -299,11 +300,23 @@ horizon apart, for decisions that are not `forced`, and while no block exceeds
 break with a match without deleting anything; and a record arriving beyond it is
 a typed `LATE` break that never alters a final decision.
 
-**J4 — Observation**
+**J4 — Observation** · *in-memory observation implemented* (`reconcileflow.observation`)
 Counters exposed as time series, aggregated by `reason × provider × day`. The
 rejection taxonomy *is* the root-cause taxonomy: a query, not an inference.
+Only final decisions are counted — a provisional one may still change — so a
+series lags by the time finality takes. The day is the capture day each arrival
+carries as data: observation reads no clock, and the same journal yields the
+same series and alerts.
+
+A drop is decided by a **declared drift rule**, not a learned model: a rule's
+daily share is compared with the previous days of the same provider through
+Wilson bounds and a margin; a day with too few decisions is *insufficient*,
+never *normal*. A drop is a typed alert carrying the rule's fingerprint. The
+evidence itself is watched the same way: a silent provider, capture failures
+above their bound, a rise of late or undecided outcomes.
+
 *Done when:* a drop in the `M0` match rate for one provider is detected without
-anyone opening a ticket.
+anyone opening a ticket, and stable providers raise none.
 
 **J5 — Performance**
 Profile first. Extract the hot path **if and only if** measurement points to
