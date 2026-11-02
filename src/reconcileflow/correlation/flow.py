@@ -1,4 +1,5 @@
-"""Correlation as a stream (step A: authored links), with a replayable proof.
+"""Correlation as a stream (steps A and B: authored and observed links), with a
+replayable proof.
 
 Observations from n declared sources arrive in a journal, each with its event
 time on a common reference. Observations that share a join identifier value
@@ -21,6 +22,13 @@ of the topology and the settings, the engine version, the journal positions.
 - a declared source that has never reported holds the watermark at the
   journal's first event time; one that lags the fastest by more than a declared
   bound stops holding it, and what closes meanwhile is final and marked forced;
+- a hop whose two ends record the connection (and the stream, when pooled)
+  has a second signal next to the propagated identifier. Both naming the same
+  pair corroborate the link; naming different pairs, or the second recorded on
+  both ends with other values, is CONFLICTED: no link. A second signal missing
+  on one end leaves the link standing, marked SIGNAL_ABSENT: never silent. A
+  connection comes back legitimately, so only authored values are told after
+  their group closed;
 - SUPERSEDED is derived, never written; the same journal yields the same bytes.
 """
 
@@ -34,8 +42,16 @@ from enum import Enum
 from fractions import Fraction
 
 from ..stream import _engine_version
-from .exact import Identity, Observation, _validate, exact_links
-from .topology import Topology
+from .exact import (
+    Identity,
+    Observation,
+    _composite_of,
+    _validate,
+    exact_links,
+    observed_key,
+    observed_links,
+)
+from .topology import Evidence, Topology
 
 _SEP = "\x1f"  # as in models._digest: no field can run into the next
 
@@ -95,6 +111,16 @@ class Kind(Enum):
     UNLINKED = "UNLINKED"
     LATE = "LATE"
     VALUE_AFTER_FINAL = "VALUE_AFTER_FINAL"  # carries a value of an already closed group
+    CONFLICTED = "CONFLICTED"
+
+
+class Corroboration(Enum):
+    """How a hop's second signal stands against its first (step B)."""
+
+    CORROBORATED = "CORROBORATED"
+    SIGNAL_ABSENT = "SIGNAL_ABSENT"
+    SIGNAL_UNMATCHED = "SIGNAL_UNMATCHED"
+    SIGNAL_OTHER_PARTNER = "SIGNAL_OTHER_PARTNER"
 
 
 Where = str  # a join: "src -> dst" for a hop, the point name for a crossing; "" for LATE
@@ -115,6 +141,9 @@ class FlowDecision:
     final_at: int | None
     forced: bool
     supersedes: str | None
+    evidence: Evidence | None = None
+    corroboration: Corroboration | None = None
+    missing_on: tuple[Identity, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +177,14 @@ class FlowResult:
         """For each business key, its last decision."""
         return {d.business_key: d for d in self.decisions}
 
+    def signal_counts(self) -> Mapping[tuple[Where, Corroboration], int]:
+        """Final decisions by join and corroboration: series for observation (J4)."""
+        counts: dict[tuple[Where, Corroboration], int] = {}
+        for (where, _), d in self.effective().items():
+            if d.status is Status.FINAL and d.corroboration is not None:
+                counts[where, d.corroboration] = counts.get((where, d.corroboration), 0) + 1
+        return counts
+
 
 @dataclass(frozen=True, slots=True)
 class _Proposal:
@@ -155,11 +192,32 @@ class _Proposal:
     key: str | None
     value: str | None
     partners: tuple[Identity, ...]
+    evidence: Evidence | None = None
+    corroboration: Corroboration | None = None
+    missing_on: tuple[Identity, ...] = ()
 
     @property
     def fingerprint(self) -> str:
         partners = [f"{source}{_SEP}{seq}" for source, seq in self.partners]
-        return _digest(self.kind.value, self.key or "", self.value or "", *partners)
+        # The evidence follows from the key and the topology (fingerprinted apart);
+        # a join with one signal hashes as in step A, so its ids do not move.
+        second = []
+        if self.corroboration is not None:
+            missing = [f"{source}{_SEP}{seq}" for source, seq in self.missing_on]
+            second = ["corroboration", self.corroboration.value, *missing]
+        return _digest(self.kind.value, self.key or "", self.value or "", *partners, *second)
+
+    @classmethod
+    def of(cls, decision: FlowDecision) -> _Proposal:
+        return cls(
+            decision.kind,
+            decision.key,
+            decision.value,
+            decision.partners,
+            decision.evidence,
+            decision.corroboration,
+            decision.missing_on,
+        )
 
 
 def _canonical(value):
@@ -216,6 +274,10 @@ class _Flow:
             f"{h.src} -> {h.dst}": h.key for h in topology.hops if h.key
         } | {c.point: c.key for c in topology.crossings if c.key}
         self.join_keys = frozenset(self.join_key.values())
+        # The second signal of each hop that has one: its connection identifiers.
+        self.observed: dict[Where, tuple[str, ...]] = {
+            f"{h.src} -> {h.dst}": h.observed for h in topology.hops if h.observed
+        }
         self.topology_id = topology_id(topology)
         self.config_id = config.config_id()
         self.engine_version = _engine_version()
@@ -320,14 +382,22 @@ class _Flow:
 
         holder: dict[tuple[str, str], Identity] = {}
         for identity in sorted(self.open):
-            keys = self.open[identity].observation.keys
-            for key in sorted(self.join_keys.intersection(keys)):
-                other = holder.setdefault((key, keys[key]), identity)
+            for value in self._values(self.open[identity].observation):
+                other = holder.setdefault(value, identity)
                 parent[root(identity)] = root(other)
         groups: dict[Identity, list[Identity]] = {}
         for identity in sorted(parent):
             groups.setdefault(root(identity), []).append(identity)
         return sorted(groups.values())
+
+    def _values(self, obs: Observation) -> list[tuple[str, str]]:
+        """The (key, value) pairs a group is united by: authored and observed."""
+        values = [(key, obs.keys[key]) for key in sorted(self.join_keys.intersection(obs.keys))]
+        for identifiers in sorted(set(self.observed.values())):
+            composite = _composite_of(obs, identifiers)
+            if composite is not None:
+                values.append((observed_key(identifiers), composite))
+        return values
 
     def _settle(self) -> None:
         watermark, forced = self._watermark()
@@ -339,8 +409,7 @@ class _Flow:
         finals = []
         for identity in group:
             for business_key in sorted(self.keys_of[identity]):
-                d = self.current[business_key]
-                proposal = _Proposal(d.kind, d.key, d.value, d.partners)
+                proposal = _Proposal.of(self.current[business_key])
                 finals.append(self._emit(business_key, proposal, Status.FINAL, forced).decision_id)
             keys = self.open.pop(identity).observation.keys
             self.closed_values.update((k, keys[k]) for k in self.join_keys.intersection(keys))
@@ -371,33 +440,70 @@ class _Flow:
 
     def _evaluate(self, group: list[Identity]) -> None:
         observations = [self.open[i].observation for i in group]
-        result = exact_links(self.topology, observations)
+        authored = _outcomes(exact_links(self.topology, observations), self._authored_value)
+        observed = _outcomes(observed_links(self.topology, observations), self._observed_value)
         proposals: dict[BusinessKey, _Proposal] = {}
-        for link in result.links:
-            proposals[(link.where, link.upstream)] = _Proposal(
-                Kind.LINKED, link.key, link.value, (link.downstream,)
-            )
-            proposals[(link.where, link.downstream)] = _Proposal(
-                Kind.LINKED, link.key, link.value, (link.upstream,)
-            )
-        for c in result.collisions:
-            for identity in c.upstream:
-                proposals[(c.where, identity)] = _Proposal(
-                    Kind.COLLIDED, c.key, c.value, c.downstream
+        for business_key in sorted(authored.keys() | observed.keys()):
+            where = business_key[0]
+            if where in self.observed and where in self.join_key:
+                proposals[business_key] = self._combined(
+                    business_key, authored.get(business_key), observed.get(business_key)
                 )
-            for identity in c.downstream:
-                proposals[(c.where, identity)] = _Proposal(
-                    Kind.COLLIDED, c.key, c.value, c.upstream
-                )
-        for where, identity in result.unlinked:
-            key = self.join_key[where]
-            value = self.open[identity].observation.keys[key]
-            proposals[(where, identity)] = _Proposal(Kind.UNLINKED, key, value, ())
+            else:
+                outcome = authored.get(business_key) or observed[business_key]
+                evidence = Evidence.AUTHORED if where in self.join_key else Evidence.OBSERVED
+                proposals[business_key] = _single(outcome, evidence)
         for business_key in sorted(proposals):
             self.keys_of[business_key[1]].add(business_key)
             current = self.current.get(business_key)
             if current is None or _fingerprint(current) != proposals[business_key].fingerprint:
                 self._emit(business_key, proposals[business_key], Status.PROVISIONAL)
+
+    def _combined(
+        self, business_key: BusinessKey, authored: _Outcome | None, observed: _Outcome | None
+    ) -> _Proposal:
+        """A hop with two signals: corroborated, traced when one is missing, no
+        link when they disagree."""
+        where, identity = business_key
+        for outcome in (authored, observed):
+            if outcome is not None and outcome[0] is Kind.COLLIDED:
+                return _Proposal(*outcome)
+        a_linked = authored is not None and authored[0] is Kind.LINKED
+        o_linked = observed is not None and observed[0] is Kind.LINKED
+        if a_linked and o_linked:
+            if authored[3] == observed[3]:
+                return _Proposal(*authored, Evidence.AUTHORED, Corroboration.CORROBORATED)
+            partners = tuple(sorted({*authored[3], *observed[3]}))
+            return _Proposal(
+                Kind.CONFLICTED, *authored[1:3], partners, None, Corroboration.SIGNAL_OTHER_PARTNER
+            )
+        if a_linked or o_linked:
+            linked, evidence = (
+                (authored, Evidence.AUTHORED) if a_linked else (observed, Evidence.OBSERVED)
+            )
+            pair = (identity, *linked[3])
+            other = self._has_observed if a_linked else self._has_authored
+            missing = tuple(sorted(i for i in pair if not other(where, i)))
+            if missing:
+                return _Proposal(*linked, evidence, Corroboration.SIGNAL_ABSENT, missing)
+            return _Proposal(Kind.CONFLICTED, *linked[1:], None, Corroboration.SIGNAL_UNMATCHED)
+        return _Proposal(*(authored or observed))
+
+    def _authored_value(self, where: Where, identity: Identity) -> tuple[str, str]:
+        key = self.join_key[where]
+        return key, self.open[identity].observation.keys[key]
+
+    def _observed_value(self, where: Where, identity: Identity) -> tuple[str, str]:
+        identifiers = self.observed[where]
+        return observed_key(identifiers), _composite_of(
+            self.open[identity].observation, identifiers
+        )
+
+    def _has_authored(self, where: Where, identity: Identity) -> bool:
+        return self.join_key[where] in self.open[identity].observation.keys
+
+    def _has_observed(self, where: Where, identity: Identity) -> bool:
+        return _composite_of(self.open[identity].observation, self.observed[where]) is not None
 
     def _emit(
         self, key: BusinessKey, proposal: _Proposal, status: Status, forced: bool = False
@@ -424,6 +530,9 @@ class _Flow:
             final_at=self.position if status is Status.FINAL else None,
             forced=forced,
             supersedes=None if previous is None else previous.decision_id,
+            evidence=proposal.evidence,
+            corroboration=proposal.corroboration,
+            missing_on=proposal.missing_on,
         )
         self.current[key] = decision
         self.decisions.append(decision)
@@ -431,7 +540,34 @@ class _Flow:
 
 
 def _fingerprint(decision: FlowDecision) -> str:
-    return _Proposal(decision.kind, decision.key, decision.value, decision.partners).fingerprint
+    return _Proposal.of(decision).fingerprint
+
+
+_Outcome = tuple[Kind, str, str, tuple[Identity, ...]]  # kind, key, value, partners
+
+
+def _single(outcome: _Outcome, evidence: Evidence) -> _Proposal:
+    """A join with one declared signal: step A's decision."""
+    kind, key, value, partners = outcome
+    if kind is Kind.LINKED:
+        return _Proposal(kind, key, value, partners, evidence)
+    return _Proposal(kind, key, value, partners)
+
+
+def _outcomes(result, value_of) -> dict[BusinessKey, _Outcome]:
+    """Each observation's outcome at each join of one signal's result."""
+    out: dict[BusinessKey, _Outcome] = {}
+    for link in result.links:
+        out[(link.where, link.upstream)] = (Kind.LINKED, link.key, link.value, (link.downstream,))
+        out[(link.where, link.downstream)] = (Kind.LINKED, link.key, link.value, (link.upstream,))
+    for c in result.collisions:
+        for identity in c.upstream:
+            out[(c.where, identity)] = (Kind.COLLIDED, c.key, c.value, c.downstream)
+        for identity in c.downstream:
+            out[(c.where, identity)] = (Kind.COLLIDED, c.key, c.value, c.upstream)
+    for where, identity in result.unlinked:
+        out[(where, identity)] = (Kind.UNLINKED, *value_of(where, identity), ())
+    return out
 
 
 def replay_flow(topology: Topology, journal: Iterable[Entry], config: FlowConfig) -> FlowResult:

@@ -622,7 +622,7 @@ def test_every_decision_of_one_request_is_pinned_whole():
     (dossier,) = result.dossiers
     assert dossier == replace(
         dossier,
-        dossier_id="2d03877311ed933f",
+        dossier_id="564c981674db8bd0",
         observations=(A0, A1, B0, EL),
         decisions=(
             "2846f028b2428714",
@@ -633,13 +633,13 @@ def test_every_decision_of_one_request_is_pinned_whole():
             "dedffee3f724346d",
         ),
         forced=False,
-        topology_id="39b23e5b8d25d615",
+        topology_id="524cb3c3f4583ea0",
         config_id="964457471600987f",
         engine_version=_engine_version(),
         positions=(1, 2, 3, 0),
         closed_at=6,
     )
-    assert dossier.dossier_id == "2d03877311ed933f" and dossier.closed_at == 6
+    assert dossier.dossier_id == "564c981674db8bd0" and dossier.closed_at == 6
 
 
 def test_forced_identifiers_are_pinned():
@@ -650,7 +650,7 @@ def test_forced_identifiers_are_pinned():
         "6c01133f603ef777",
         "105a7f9fa997db71",
     ]
-    assert result.dossiers[0].dossier_id == "2d90377d061bfa9f"
+    assert result.dossiers[0].dossier_id == "e120561120b788e7"
 
 
 def test_collisions_and_reused_values_carry_their_key_and_value():

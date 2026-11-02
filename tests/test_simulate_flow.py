@@ -111,3 +111,60 @@ def test_with_every_fault_each_expectation_is_met():
     assert report["late"]["found"] == report["late"]["injected"] > 0
     assert result.duplicates == report["duplicates"]["injected"] > 0
     assert report["wrong_unexplained"] == 0 and report["open"] == 0
+
+
+# -- step B: the connection as a second signal on every hop (spec §8.3) -----------
+
+
+def connected(exchanges, hops, **faults):
+    return sim.Plan(exchanges=exchanges, hops=hops, connection=True, faults=sim.Faults(**faults))
+
+
+def test_with_the_connection_and_no_fault_every_hop_link_is_corroborated():
+    _, _, report = run(connected(200, 3))
+    hop_sides = 200 * 4 * 2  # four hops between points, both sides
+    assert report["corroboration"] == {"CORROBORATED": hop_sides}
+    assert report["wrong"] == 0 and report["linked"] == 200 * 7 * 2
+
+
+def test_with_the_connection_a_swap_on_a_hop_is_a_conflict_never_a_link():
+    _, _, report = run(connected(300, 3, swap=0.05))
+    assert report["swap"]["injected"] > 3
+    assert report["swap"]["conflicted_at_start"] == 4 * report["swap"]["injected"]
+    assert report["wrong"] == 0
+
+
+def test_a_swap_inside_a_point_still_gives_wrong_links_at_its_crossing_explained():
+    # The crossing has one signal; the hops after it agree with the swapped ids.
+    _, _, report = run(connected(300, 3, swap_inside=0.05))
+    assert report["swap"]["injected"] > 3
+    assert report["wrong"] == report["wrong_at_crossings"] == 4 * report["swap"]["injected"]
+    assert report["wrong_explained"]["swap"] == report["wrong"]
+    assert report["wrong_at_hops"] == 0
+
+
+def test_a_missing_connection_key_leaves_the_link_traced_absent():
+    _, _, report = run(connected(300, 3, keyless=0.1))
+    assert report["keyless"]["injected"] > 30
+    assert report["keyless"]["absent_found"] == report["keyless"]["absent_expected"] > 0
+    assert report["wrong"] == 0
+
+
+def test_with_every_fault_and_the_connection_no_wrong_link_at_a_hop_goes_untraced():
+    faults = dict(
+        reuse=0.05,
+        swap=0.02,
+        swap_inside=0.02,
+        loss=0.02,
+        keyless=0.05,
+        duplicates=0.05,
+        late=0.01,
+        disorder_us=1_500,
+    )
+    _, _, report = run(connected(500, 5, **faults))
+    assert report["wrong_unexplained"] == 0 and report["open"] == 0
+    # A swap or a reuse on a hop is caught unless the connection key is missing
+    # there, and then the link says so: none is silent.
+    assert report["wrong_at_hops_untraced"] == 0
+    assert report["decisions"]["CONFLICTED"] > 0
+    assert report["loss"]["unlinked_found"] == report["loss"]["unlinked_expected"] > 0

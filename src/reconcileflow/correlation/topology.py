@@ -177,6 +177,7 @@ class HopCeiling:
     density: Fraction | None  # only for a timing-derived hop with a declared rate
     max_fanout: int | None
     key: str | None  # identifier the exact path joins on (shared_header, message_key)
+    observed: tuple[str, ...] | None = None  # identifiers of the same-connection signal
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,8 +489,21 @@ def _hop_ceiling(hop: Hop, src: Point, dst: Point) -> HopCeiling:
         )
         density = Fraction(hop.rate * window_ns, 1_000_000_000)
     key = {LinkKind.SHARED_HEADER: _wire_header(src, dst), LinkKind.MESSAGE_KEY: "message_id"}
+    # A second signal, whatever the ceiling: both ends record the connection.
+    # Through NAT the two ends see different tuples, and nothing translates them yet.
+    observed = None
+    if not missing[LinkKind.SAME_CONNECTION] and hop.nat == "none":
+        observed = ("tuple5", "h2_stream_id") if hop.pooling else ("tuple5",)
     return HopCeiling(
-        hop.src, hop.dst, hop.relation, evidence, link, density, hop.max_fanout, key.get(link)
+        hop.src,
+        hop.dst,
+        hop.relation,
+        evidence,
+        link,
+        density,
+        hop.max_fanout,
+        key.get(link),
+        observed,
     )
 
 
