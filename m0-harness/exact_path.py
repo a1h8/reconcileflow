@@ -40,18 +40,26 @@ SERVER, CLIENT = "SPAN_KIND_SERVER", "SPAN_KIND_CLIENT"
 NO_TRACE = re.compile(r"^0*$")
 
 
-def topology_for(hops: int, kinds: list[str], propagation: str) -> Topology:
-    """The lab chain as a declared topology: what each point records and copies."""
+def topology_for(
+    hops: int, kinds: list[str], propagation: str, connection: bool = False
+) -> Topology:
+    """The lab chain as a declared topology: what each point records and copies.
+
+    With ``connection``, every end also records the HTTP/2 stream of its
+    connection, load-gen included: each hop gets a second, observed signal.
+    """
+    stream = ["h2_stream_id"] if connection else []
 
     def timed(visibility: str, timestamps: str) -> dict:
         return {"host": "lab", "visibility": visibility, "clock": "lab", "timestamps": timestamps}
 
-    points = {"load-gen": {**timed("app", "precise_sync"), "outbound": ["traceparent"]}}
+    load_gen = ["traceparent", *(["tuple5", *stream] if connection else [])]
+    points = {"load-gen": {**timed("app", "precise_sync"), "outbound": load_gen}}
     for k, kind in enumerate(kinds, start=1):
         point = {
             **timed("kernel", "kernel_monotonic"),
-            "inbound": ["traceparent", "tuple5"],
-            "outbound": ["traceparent", "tuple5"],
+            "inbound": ["traceparent", "tuple5", *stream],
+            "outbound": ["traceparent", "tuple5", *stream],
         }
         # Traefik forwards headers itself; a relay copies none, so only an agent
         # writing headers carries the context through it.
@@ -62,7 +70,7 @@ def topology_for(hops: int, kinds: list[str], propagation: str) -> Topology:
         points[f"hop-{k}"] = point
     points["fake-upstream"] = {
         **timed("kernel", "kernel_monotonic"),
-        "inbound": ["traceparent", "tuple5"],
+        "inbound": ["traceparent", "tuple5", *stream],
     }
     names = ["load-gen", *(f"hop-{k}" for k in range(1, hops + 1)), "fake-upstream"]
     hop_list = [{"from": a, "to": b, "pooling": True} for a, b in pairwise(names)]

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from .topology import IDENTIFIERS, Topology
 
 SIDES = ("inbound", "outbound")
+SEP = "\x1f"  # between the parts of a composite value: no part can run into the next
 Identity = tuple[str, int]  # (source, seq)
 
 
@@ -80,16 +81,54 @@ def exact_links(topology: Topology, observations: Iterable[Observation]) -> Resu
         for c in topology.crossings
         if c.key is not None
     ]
+    return _join(joins, by_side, _value_of, dropped)
+
+
+def observed_links(topology: Topology, observations: Iterable[Observation]) -> Result:
+    """Join every hop with an observed signal on its connection identifiers.
+
+    The value is the identifiers' values together; an observation missing one
+    of them is outside the join (absent), not unlinked.
+    """
+    distinct, dropped = _deduplicated(topology, observations)
+    by_side: dict[tuple[str, str], list[Observation]] = defaultdict(list)
+    for obs in distinct:
+        by_side[obs.point, obs.side].append(obs)
+    joins = [
+        (f"{hop.src} -> {hop.dst}", hop.observed, (hop.src, "outbound"), (hop.dst, "inbound"))
+        for hop in topology.hops
+        if hop.observed is not None
+    ]
+    return _join(joins, by_side, _composite_of, dropped)
+
+
+def observed_key(identifiers: tuple[str, ...]) -> str:
+    """The name of an observed join's key: its identifiers, in order."""
+    return "+".join(identifiers)
+
+
+def _value_of(obs: Observation, key: str) -> str | None:
+    return obs.keys.get(key)
+
+
+def _composite_of(obs: Observation, identifiers: tuple[str, ...]) -> str | None:
+    if not all(i in obs.keys for i in identifiers):
+        return None
+    return SEP.join(obs.keys[i] for i in identifiers)
+
+
+def _join(joins, by_side, value_of, dropped: int) -> Result:
     links, collisions, unlinked = [], [], []
     for where, key, up_side, down_side in joins:
-        up = _by_value(by_side[up_side], key)
-        down = _by_value(by_side[down_side], key)
+        up = _by_value(by_side[up_side], key, value_of)
+        down = _by_value(by_side[down_side], key, value_of)
+        name = key if isinstance(key, str) else observed_key(key)
         for value in sorted(up.keys() | down.keys()):
             ups, downs = up.get(value, []), down.get(value, [])
             if len(ups) > 1 or len(downs) > 1:
-                collisions.append(Collision(where, key, value, tuple(ups), tuple(downs)))
+                collisions.append(Collision(where, name, value, tuple(ups), tuple(downs)))
             elif ups and downs:
-                links.append(Link(where, key, value, ups[0], downs[0]))
+                links.append(Link(where, name, value, ups[0], downs[0]))
             else:
                 unlinked.append((where, (ups or downs)[0]))
     return Result(
@@ -100,11 +139,12 @@ def exact_links(topology: Topology, observations: Iterable[Observation]) -> Resu
     )
 
 
-def _by_value(observations: list[Observation], key: str) -> dict[str, list[Identity]]:
+def _by_value(observations: list[Observation], key, value_of) -> dict[str, list[Identity]]:
     out: dict[str, list[Identity]] = defaultdict(list)
     for obs in observations:
-        if key in obs.keys:
-            out[obs.keys[key]].append((obs.source, obs.seq))
+        value = value_of(obs, key)
+        if value is not None:
+            out[value].append((obs.source, obs.seq))
     return {value: sorted(ids) for value, ids in out.items()}
 
 
