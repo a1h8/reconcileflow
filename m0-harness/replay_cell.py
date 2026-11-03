@@ -119,8 +119,11 @@ def _rows(cell_dir: Path, meta: dict) -> tuple[list[_Row], list[str]]:
         )
         for seq, r in enumerate(log)
     ]
-    agent_out = cell_dir / "agent.out"
-    lines = agent_out.read_text().splitlines() if agent_out.exists() else []
+    # The earliest kept runs name this file after the agent.
+    agent_out = next(
+        (p for p in (cell_dir / "agent.out", cell_dir / "obi.out") if p.exists()), None
+    )
+    lines = agent_out.read_text().splitlines() if agent_out else []
     seq = 0
     for line in lines:
         if not line.startswith("["):

@@ -94,6 +94,20 @@ def report(cell, **faults):
 # -- what enters the journal ---------------------------------------------------
 
 
+def test_the_earliest_runs_output_named_after_the_agent_is_read_the_same(tmp_path):
+    cell = write_cell(tmp_path, hops=2)
+    expected = report(cell)
+    (cell / "agent.out").rename(cell / "obi.out")
+    assert report(cell) == expected
+
+
+def test_the_agent_output_is_preferred_over_a_file_named_after_the_agent(tmp_path):
+    cell = write_cell(tmp_path, hops=2)
+    expected = report(cell)
+    (cell / "obi.out").write_text(json.dumps([{"attributes": {"url": "/nothing"}}]) + "\n")
+    assert report(cell) == expected
+
+
 def test_a_clean_cell_links_every_join_with_nothing_wrong(tmp_path):
     out = report(write_cell(tmp_path, hops=2))
     assert set(out["joins"]) == {
