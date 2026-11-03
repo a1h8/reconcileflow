@@ -28,6 +28,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Collection
 from itertools import pairwise
 from pathlib import Path
 
@@ -41,14 +42,27 @@ NO_TRACE = re.compile(r"^0*$")
 
 
 def topology_for(
-    hops: int, kinds: list[str], propagation: str, connection: bool = False
+    hops: int,
+    kinds: list[str],
+    propagation: str,
+    connection: bool = False,
+    second_signal: Collection[str] = (),
 ) -> Topology:
     """The lab chain as a declared topology: what each point records and copies.
 
     With ``connection``, every end also records the HTTP/2 stream of its
     connection, load-gen included: each hop gets a second, observed signal.
+    ``second_signal`` names the hops ("src -> dst") between agents that get one
+    when only some can: both their ends record the stream.
     """
+    names = ["load-gen", *(f"hop-{k}" for k in range(1, hops + 1)), "fake-upstream"]
+    links = {f"{a} -> {b}": (a, b) for a, b in pairwise(names)}
+    sending = {links[where][0] for where in second_signal}
+    receiving = {links[where][1] for where in second_signal}
     stream = ["h2_stream_id"] if connection else []
+
+    def recorded(point: str, ends: set[str]) -> list[str]:
+        return ["traceparent", "tuple5", *(["h2_stream_id"] if point in ends else stream)]
 
     def timed(visibility: str, timestamps: str) -> dict:
         return {"host": "lab", "visibility": visibility, "clock": "lab", "timestamps": timestamps}
@@ -58,8 +72,8 @@ def topology_for(
     for k, kind in enumerate(kinds, start=1):
         point = {
             **timed("kernel", "kernel_monotonic"),
-            "inbound": ["traceparent", "tuple5", *stream],
-            "outbound": ["traceparent", "tuple5", *stream],
+            "inbound": recorded(f"hop-{k}", receiving),
+            "outbound": recorded(f"hop-{k}", sending),
         }
         # Traefik forwards headers itself; a relay copies none, so only an agent
         # writing headers carries the context through it.
@@ -70,9 +84,8 @@ def topology_for(
         points[f"hop-{k}"] = point
     points["fake-upstream"] = {
         **timed("kernel", "kernel_monotonic"),
-        "inbound": ["traceparent", "tuple5", *stream],
+        "inbound": recorded("fake-upstream", receiving),
     }
-    names = ["load-gen", *(f"hop-{k}" for k in range(1, hops + 1)), "fake-upstream"]
     hop_list = [{"from": a, "to": b, "pooling": True} for a, b in pairwise(names)]
     return load({"points": points, "hops": hop_list})
 
