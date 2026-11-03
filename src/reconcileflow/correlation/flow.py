@@ -35,6 +35,7 @@ of the topology and the settings, the engine version, the journal positions.
 from __future__ import annotations
 
 import hashlib
+import heapq
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
@@ -287,6 +288,10 @@ class _Flow:
         self.open: dict[Identity, Seen] = {}
         self.positions: dict[Identity, int] = {}
         self.keys_of: dict[Identity, set[BusinessKey]] = {}
+        # Who holds each join value, and open observations by event time: a group
+        # is found from its members, never by going over all that is open.
+        self.holders: dict[tuple[str, str], set[Identity]] = {}
+        self.pending: list[tuple[int, Identity]] = []
         self.closed_values: set[tuple[str, str]] = set()  # (join key, value) of closed groups
         self.current: dict[BusinessKey, FlowDecision] = {}
         self.decisions: list[FlowDecision] = []
@@ -356,8 +361,10 @@ class _Flow:
             return
         self.open[identity] = entry
         self.keys_of[identity] = set()
-        group = next(g for g in self._groups() if identity in g)
-        self._evaluate(group)
+        for value in self._values(obs):
+            self.holders.setdefault(value, set()).add(identity)
+        heapq.heappush(self.pending, (entry.at, identity))
+        self._evaluate(self._group_of(identity))
         self._settle()
 
     # -- watermark and groups --------------------------------------------------
@@ -373,22 +380,17 @@ class _Flow:
         holding = [p for p in effective.values() if bound is None or fastest - p <= bound]
         return min(holding) - self.config.lateness_us, len(holding) < len(effective)
 
-    def _groups(self) -> list[list[Identity]]:
-        """Open observations linked by a shared join identifier value."""
-        parent = {identity: identity for identity in self.open}
-
-        def root(identity: Identity) -> Identity:
-            return identity if parent[identity] == identity else root(parent[identity])
-
-        holder: dict[tuple[str, str], Identity] = {}
-        for identity in sorted(self.open):
-            for value in self._values(self.open[identity].observation):
-                other = holder.setdefault(value, identity)
-                parent[root(identity)] = root(other)
-        groups: dict[Identity, list[Identity]] = {}
-        for identity in sorted(parent):
-            groups.setdefault(root(identity), []).append(identity)
-        return sorted(groups.values())
+    def _group_of(self, identity: Identity) -> list[Identity]:
+        """The open observations reached from ``identity`` through shared join
+        identifier values, sorted."""
+        group = {identity}
+        todo = [identity]
+        while todo:
+            for value in self._values(self.open[todo.pop()].observation):
+                others = self.holders[value] - group
+                group |= others
+                todo += others
+        return sorted(group)
 
     def _values(self, obs: Observation) -> list[tuple[str, str]]:
         """The (key, value) pairs a group is united by: authored and observed."""
@@ -399,11 +401,21 @@ class _Flow:
                 values.append((observed_key(identifiers), composite))
         return values
 
+    def _ripe_groups(self, watermark: int) -> list[list[Identity]]:
+        """The groups whose latest event the watermark has passed, sorted. Each is
+        found when its latest member comes out of the queue: until then, a member
+        coming out has a later one holding its group open."""
+        groups = {}
+        while self.pending and self.pending[0][0] + self.config.window_us < watermark:
+            group = self._group_of(heapq.heappop(self.pending)[1])
+            if max(self.open[i].at for i in group) + self.config.window_us < watermark:
+                groups[group[0]] = group
+        return sorted(groups.values())
+
     def _settle(self) -> None:
         watermark, forced = self._watermark()
-        for group in self._groups():
-            if max(self.open[i].at for i in group) + self.config.window_us < watermark:
-                self._close(group, forced)
+        for group in self._ripe_groups(watermark):
+            self._close(group, forced)
 
     def _close(self, group: list[Identity], forced: bool) -> None:
         finals = []
@@ -411,6 +423,10 @@ class _Flow:
             for business_key in sorted(self.keys_of[identity]):
                 proposal = _Proposal.of(self.current[business_key])
                 finals.append(self._emit(business_key, proposal, Status.FINAL, forced).decision_id)
+            for value in self._values(self.open[identity].observation):
+                self.holders[value].discard(identity)
+                if not self.holders[value]:
+                    del self.holders[value]
             keys = self.open.pop(identity).observation.keys
             self.closed_values.update((k, keys[k]) for k in self.join_keys.intersection(keys))
         decisions = tuple(sorted(finals))
