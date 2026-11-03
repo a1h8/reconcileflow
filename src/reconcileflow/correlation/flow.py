@@ -29,12 +29,20 @@ of the topology and the settings, the engine version, the journal positions.
   on one end leaves the link standing, marked SIGNAL_ABSENT: never silent. A
   connection comes back legitimately, so only authored values are told after
   their group closed;
+- more observations never undo a collision. Past ``max_collision_members`` on a
+  join and a value, that collision is definitive and names no partner, only the
+  value: N decisions naming N partners would be quadratic. An observation whose
+  joins are all so, and whose only join value is that one, is not evaluated
+  again and goes final alone past the horizon, with a proof of its own, so a
+  value repeated without end holds only the window's traffic. The group closes
+  when it would have: its latest member never leaves before;
 - SUPERSEDED is derived, never written; the same journal yields the same bytes.
 """
 
 from __future__ import annotations
 
 import hashlib
+import heapq
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
@@ -54,6 +62,7 @@ from .exact import (
 from .topology import Evidence, Topology
 
 _SEP = "\x1f"  # as in models._digest: no field can run into the next
+DEFAULT_MAX_COLLISION_MEMBERS = 32
 
 
 def _digest(*parts: str) -> str:
@@ -84,8 +93,12 @@ class FlowConfig:
     window_us: int  # how long after an event another observation of it may come
     lateness_us: int = 0
     max_silence_us: int | None = None  # None: a silent source holds everything
+    max_collision_members: int = DEFAULT_MAX_COLLISION_MEMBERS
 
     def config_id(self) -> str:
+        # The limit enters only once declared: other fingerprints do not move.
+        limit = self.max_collision_members
+        declared = [] if limit == DEFAULT_MAX_COLLISION_MEMBERS else ["max_collision", str(limit)]
         return _digest(
             "flow",
             "sources",
@@ -96,6 +109,7 @@ class FlowConfig:
             str(self.lateness_us),
             "max_silence",
             str(self.max_silence_us),
+            *declared,
         )
 
 
@@ -159,6 +173,7 @@ class Dossier:
     engine_version: str
     positions: tuple[int, ...]  # journal positions of the observations, in identity order
     closed_at: int
+    cites: tuple[str, str] | None = None  # one member of a definitive collision: (key, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +276,9 @@ def _check(config: FlowConfig) -> None:
         isinstance(bound, int) and not isinstance(bound, bool) and bound >= 1
     ):
         raise ValueError(f"max_silence_us must be None or an integer >= 1, got {bound!r}")
+    limit = config.max_collision_members
+    if not (isinstance(limit, int) and not isinstance(limit, bool) and limit >= 2):
+        raise ValueError(f"max_collision_members must be an integer >= 2, got {limit!r}")
 
 
 class _Flow:
@@ -287,7 +305,16 @@ class _Flow:
         self.open: dict[Identity, Seen] = {}
         self.positions: dict[Identity, int] = {}
         self.keys_of: dict[Identity, set[BusinessKey]] = {}
+        # Who holds each join value, and open observations by event time: a group
+        # is found from its members, never by going over all that is open.
+        self.holders: dict[tuple[str, str], set[Identity]] = {}
+        self.pending: list[tuple[int, Identity]] = []
         self.closed_values: set[tuple[str, str]] = set()  # (join key, value) of closed groups
+        # Authored values whose collision is definitive, and on which joins; the
+        # open observations with nothing left to decide; those of them to let go.
+        self.crowded: dict[tuple[str, str], set[Where]] = {}
+        self.settled: set[Identity] = set()
+        self.due: set[Identity] = set()
         self.current: dict[BusinessKey, FlowDecision] = {}
         self.decisions: list[FlowDecision] = []
         self.dossiers: list[Dossier] = []
@@ -356,8 +383,10 @@ class _Flow:
             return
         self.open[identity] = entry
         self.keys_of[identity] = set()
-        group = next(g for g in self._groups() if identity in g)
-        self._evaluate(group)
+        for value in self._values(obs):
+            self.holders.setdefault(value, set()).add(identity)
+        heapq.heappush(self.pending, (entry.at, identity))
+        self._evaluate(self._group_of(identity))
         self._settle()
 
     # -- watermark and groups --------------------------------------------------
@@ -373,22 +402,18 @@ class _Flow:
         holding = [p for p in effective.values() if bound is None or fastest - p <= bound]
         return min(holding) - self.config.lateness_us, len(holding) < len(effective)
 
-    def _groups(self) -> list[list[Identity]]:
-        """Open observations linked by a shared join identifier value."""
-        parent = {identity: identity for identity in self.open}
-
-        def root(identity: Identity) -> Identity:
-            return identity if parent[identity] == identity else root(parent[identity])
-
-        holder: dict[tuple[str, str], Identity] = {}
-        for identity in sorted(self.open):
-            for value in self._values(self.open[identity].observation):
-                other = holder.setdefault(value, identity)
-                parent[root(identity)] = root(other)
-        groups: dict[Identity, list[Identity]] = {}
-        for identity in sorted(parent):
-            groups.setdefault(root(identity), []).append(identity)
-        return sorted(groups.values())
+    def _group_of(self, identity: Identity) -> list[Identity]:
+        """The open observations reached from ``identity`` through shared join
+        identifier values, sorted."""
+        group = {identity}
+        todo = [identity]
+        while todo:
+            for value in self._values(self.open[todo.pop()].observation):
+                others = self.holders[value] - group
+                group.update(others)  # no mutant of this can loop for ever
+                # A settled member has that one value: nothing more to reach from it.
+                todo += others - self.settled
+        return sorted(group)
 
     def _values(self, obs: Observation) -> list[tuple[str, str]]:
         """The (key, value) pairs a group is united by: authored and observed."""
@@ -399,28 +424,80 @@ class _Flow:
                 values.append((observed_key(identifiers), composite))
         return values
 
+    def _ripe_groups(self, watermark: int) -> list[list[Identity]]:
+        """The groups whose latest event the watermark has passed, sorted. Each is
+        found when its latest member comes out of the queue: until then, a member
+        coming out has a later one holding its group open."""
+        groups = {}
+        while self.pending and self.pending[0][0] + self.config.window_us < watermark:
+            identity = heapq.heappop(self.pending)[1]
+            group = self._group_of(identity)
+            if max(self.open[i].at for i in group) + self.config.window_us < watermark:
+                groups[group[0]] = group
+            elif identity in self.settled:
+                self.due.add(identity)
+        return sorted(groups.values())
+
     def _settle(self) -> None:
         watermark, forced = self._watermark()
-        for group in self._groups():
-            if max(self.open[i].at for i in group) + self.config.window_us < watermark:
-                self._close(group, forced)
+        for group in self._ripe_groups(watermark):
+            self._close(group, forced)
+        # Those in a group closed above have gone; their group is not ripe otherwise.
+        for identity in sorted(self.due.intersection(self.open)):
+            self._let_go(identity, forced)
+        self.due.clear()
 
     def _close(self, group: list[Identity], forced: bool) -> None:
         finals = []
+        whole = []
         for identity in group:
-            for business_key in sorted(self.keys_of[identity]):
-                proposal = _Proposal.of(self.current[business_key])
-                finals.append(self._emit(business_key, proposal, Status.FINAL, forced).decision_id)
-            keys = self.open.pop(identity).observation.keys
-            self.closed_values.update((k, keys[k]) for k in self.join_keys.intersection(keys))
-        decisions = tuple(sorted(finals))
-        observations = tuple(group)  # groups are sorted
+            obs = self.open[identity].observation
+            values = self._values(obs)
+            self.closed_values.update(v for v in values if v[0] in self.join_keys)
+            if identity in self.settled:
+                self._let_go(identity, forced)
+            else:
+                finals += self._finalise(identity, forced)
+                whole.append(identity)
+            for value in values:
+                self.crowded.pop(value, None)
+        if whole:  # groups are sorted
+            self._prove(tuple(whole), tuple(sorted(finals)), forced)
+
+    def _let_go(self, identity: Identity, forced: bool) -> None:
+        """One member of a definitive collision goes final, its group still open."""
+        cites = self._values(self.open[identity].observation)[0]
+        finals = self._finalise(identity, forced)
+        self.settled.discard(identity)
+        self._prove((identity,), tuple(sorted(finals)), forced, cites)
+
+    def _finalise(self, identity: Identity, forced: bool) -> list[str]:
+        finals = []
+        for business_key in sorted(self.keys_of[identity]):
+            proposal = _Proposal.of(self.current[business_key])
+            finals.append(self._emit(business_key, proposal, Status.FINAL, forced).decision_id)
+        for value in self._values(self.open[identity].observation):
+            self.holders[value].discard(identity)
+            if not self.holders[value]:
+                del self.holders[value]
+        del self.open[identity]
+        return finals
+
+    def _prove(
+        self,
+        observations: tuple[Identity, ...],
+        decisions: tuple[str, ...],
+        forced: bool,
+        cites: tuple[str, str] | None = None,
+    ) -> None:
+        cited = [] if cites is None else ["cites", *cites]
         dossier_id = _digest(
             "dossier",
             self.topology_id,
             self.config_id,
             *(f"{s}{_SEP}{q}" for s, q in observations),
             *decisions,
+            *cited,
         )
         self.dossiers.append(
             Dossier(
@@ -433,14 +510,23 @@ class _Flow:
                 engine_version=self.engine_version,
                 positions=tuple(self.positions[i] for i in observations),
                 closed_at=self.position,
+                cites=cites,
             )
         )
 
     # -- evaluation --------------------------------------------------------------
 
     def _evaluate(self, group: list[Identity]) -> None:
+        group = [i for i in group if i not in self.settled]
         observations = [self.open[i].observation for i in group]
-        authored = _outcomes(exact_links(self.topology, observations), self._authored_value)
+        joined = exact_links(self.topology, observations)
+        for c in joined.collisions:
+            if len(c.upstream) + len(c.downstream) > self.config.max_collision_members:
+                self.crowded.setdefault((c.key, c.value), set()).add(c.where)
+        authored = {
+            business_key: self._definitive(business_key[0], outcome)
+            for business_key, outcome in _outcomes(joined, self._authored_value).items()
+        }
         observed = _outcomes(observed_links(self.topology, observations), self._observed_value)
         proposals: dict[BusinessKey, _Proposal] = {}
         for business_key in sorted(authored.keys() | observed.keys()):
@@ -458,6 +544,26 @@ class _Flow:
             current = self.current.get(business_key)
             if current is None or _fingerprint(current) != proposals[business_key].fingerprint:
                 self._emit(business_key, proposals[business_key], Status.PROVISIONAL)
+        if self.crowded:
+            for identity in group:
+                self._settle_if_decided(identity)
+
+    def _definitive(self, where: Where, outcome: _Outcome) -> _Outcome:
+        _, key, value, _ = outcome
+        if where in self.crowded.get((key, value), ()):
+            return Kind.COLLIDED, key, value, ()
+        return outcome
+
+    def _settle_if_decided(self, identity: Identity) -> None:
+        """Nothing can change for it. With one value only: leaving cannot split
+        its group, and the others at that value still find each other."""
+        values = self._values(self.open[identity].observation)
+        if len(values) != 1 or values[0] not in self.crowded:
+            return
+        if all(where in self.crowded[values[0]] for where, _ in self.keys_of[identity]):
+            self.settled.add(identity)
+            if self.open[identity].at + self.config.window_us < self._watermark()[0]:
+                self.due.add(identity)
 
     def _combined(
         self, business_key: BusinessKey, authored: _Outcome | None, observed: _Outcome | None
