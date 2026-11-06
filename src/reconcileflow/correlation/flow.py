@@ -1,5 +1,5 @@
-"""Correlation as a stream (steps A and B: authored and observed links), with a
-replayable proof.
+"""Correlation as a stream (steps A, B and C: authored, observed and derived
+links), with a replayable proof.
 
 Observations from n declared sources arrive in a journal, each with its event
 time on a common reference. Observations that share a join identifier value
@@ -36,6 +36,9 @@ of the topology and the settings, the engine version, the journal positions.
   again and goes final alone past the horizon, with a proof of its own, so a
   value repeated without end holds only the window's traffic. The group closes
   when it would have: its latest member never leaves before;
+- a hop with no identifier, given calibrated parameters, is linked by time: see
+  ``flow_timed``. Its links are ``derived``, its state apart: no union with the
+  authored joins, each with its own proof;
 - SUPERSEDED is derived, never written; the same journal yields the same bytes.
 """
 
@@ -59,7 +62,9 @@ from .exact import (
     observed_key,
     observed_links,
 )
-from .topology import Evidence, Topology
+from .flow_timed import METHOD, Reason, TimedJoin, Verdict
+from .timing import JoinParams, Timed
+from .topology import Evidence, LinkKind, Topology
 
 _SEP = "\x1f"  # as in models._digest: no field can run into the next
 DEFAULT_MAX_COLLISION_MEMBERS = 32
@@ -74,6 +79,8 @@ class Seen:
     observation: Observation
     at: int  # event time, microseconds, on the common reference
     captured_at: datetime | None = None  # data for observation (J4), never read here
+    start_us: int | None = None  # with end_us, or neither; then ``at`` is end_us
+    end_us: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,11 +101,20 @@ class FlowConfig:
     lateness_us: int = 0
     max_silence_us: int | None = None  # None: a silent source holds everything
     max_collision_members: int = DEFAULT_MAX_COLLISION_MEMBERS
+    timing: Mapping[str, JoinParams] | None = None  # hops linked by time, and how
+    max_duration_us: int | None = None  # longer: outside the timed joins, told
+    calibration: Mapping[str, tuple[str, ...]] | None = None  # fingerprints, per hop
 
     def config_id(self) -> str:
         # The limit enters only once declared: other fingerprints do not move.
         limit = self.max_collision_members
         declared = [] if limit == DEFAULT_MAX_COLLISION_MEMBERS else ["max_collision", str(limit)]
+        if self.timing:
+            calibration = self.calibration or {}
+            for where in sorted(self.timing):
+                declared += ["timing", where, repr(_canonical(self.timing[where]))]
+                declared += ["calibration", *calibration.get(where, ())]
+            declared += ["max_duration", str(self.max_duration_us)]
         return _digest(
             "flow",
             "sources",
@@ -126,6 +142,7 @@ class Kind(Enum):
     LATE = "LATE"
     VALUE_AFTER_FINAL = "VALUE_AFTER_FINAL"  # carries a value of an already closed group
     CONFLICTED = "CONFLICTED"
+    UNDECIDED = "UNDECIDED"  # a timed observation left without a link, with its reason
 
 
 class Corroboration(Enum):
@@ -158,6 +175,8 @@ class FlowDecision:
     evidence: Evidence | None = None
     corroboration: Corroboration | None = None
     missing_on: tuple[Identity, ...] = ()
+    reason: Reason | None = None
+    weight: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +193,10 @@ class Dossier:
     positions: tuple[int, ...]  # journal positions of the observations, in identity order
     closed_at: int
     cites: tuple[str, str] | None = None  # one member of a definitive collision: (key, value)
+    where: Where | None = None  # a timed hop's proof: the hop, how, and from what
+    method: str | None = None
+    params_id: str | None = None
+    calibration: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +233,8 @@ class _Proposal:
     evidence: Evidence | None = None
     corroboration: Corroboration | None = None
     missing_on: tuple[Identity, ...] = ()
+    reason: Reason | None = None
+    weight: int | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -220,19 +245,13 @@ class _Proposal:
         if self.corroboration is not None:
             missing = [f"{source}{_SEP}{seq}" for source, seq in self.missing_on]
             second = ["corroboration", self.corroboration.value, *missing]
+        if self.evidence is Evidence.DERIVED or self.reason is not None:
+            second = ["timed", self.reason.value if self.reason else "", str(self.weight)]
         return _digest(self.kind.value, self.key or "", self.value or "", *partners, *second)
 
     @classmethod
     def of(cls, decision: FlowDecision) -> _Proposal:
-        return cls(
-            decision.kind,
-            decision.key,
-            decision.value,
-            decision.partners,
-            decision.evidence,
-            decision.corroboration,
-            decision.missing_on,
-        )
+        return cls(**{f.name: getattr(decision, f.name) for f in fields(cls)})
 
 
 def _canonical(value):
@@ -279,6 +298,11 @@ def _check(config: FlowConfig) -> None:
     limit = config.max_collision_members
     if not (isinstance(limit, int) and not isinstance(limit, bool) and limit >= 2):
         raise ValueError(f"max_collision_members must be an integer >= 2, got {limit!r}")
+    longest = config.max_duration_us
+    if longest is not None and not (
+        isinstance(longest, int) and not isinstance(longest, bool) and longest >= 1
+    ):
+        raise ValueError(f"max_duration_us must be None or an integer >= 1, got {longest!r}")
 
 
 class _Flow:
@@ -296,6 +320,7 @@ class _Flow:
         self.observed: dict[Where, tuple[str, ...]] = {
             f"{h.src} -> {h.dst}": h.observed for h in topology.hops if h.observed
         }
+        self.timed = self._timed_joins()
         self.topology_id = topology_id(topology)
         self.config_id = config.config_id()
         self.engine_version = _engine_version()
@@ -320,6 +345,18 @@ class _Flow:
         self.dossiers: list[Dossier] = []
         self.duplicates = 0
         self.position = -1
+
+    def _timed_joins(self) -> dict[Where, TimedJoin]:
+        hops = {
+            f"{h.src} -> {h.dst}": h for h in self.topology.hops if h.link is LinkKind.NESTED_TIMING
+        }
+        joins = {}
+        for where, params in sorted((self.config.timing or {}).items()):
+            if where not in hops:
+                raise ValueError(f"{where!r} is not a timing-derived hop of the topology")
+            hop = hops[where]
+            joins[where] = TimedJoin(where, hop.src, hop.dst, params, self.config.max_duration_us)
+        return joins
 
     # -- journal ---------------------------------------------------------------
 
@@ -354,10 +391,11 @@ class _Flow:
         _validate(obs, self.points)
         self._declared(obs.source)
         self._time(entry.at, "at")
+        self._times(entry)
         identity = (obs.source, obs.seq)
         if identity in self.seen:
             before = self.seen[identity]
-            if (before.observation, before.at) != (obs, entry.at):
+            if _content(before) != _content(entry):
                 raise ValueError(f"observation {identity!r} delivered with different content")
             self.duplicates += 1
             return
@@ -369,6 +407,7 @@ class _Flow:
         if late:
             self._emit(("", identity), _Proposal(Kind.LATE, None, None, ()), Status.FINAL)
             return
+        self._enter_timed(entry)
         reused = sorted(
             (key, obs.keys[key])
             for key in self.join_keys.intersection(obs.keys)
@@ -388,6 +427,54 @@ class _Flow:
         heapq.heappush(self.pending, (entry.at, identity))
         self._evaluate(self._group_of(identity))
         self._settle()
+
+    def _times(self, entry: Seen) -> None:
+        start, end = entry.start_us, entry.end_us
+        if start is None and end is None:
+            return
+        if start is None or end is None:
+            raise ValueError("start_us and end_us are given together, or not at all")
+        self._time(start, "start_us")
+        self._time(end, "end_us")
+        if end < start:
+            raise ValueError(f"an observation ends before it starts: {start} > {end}")
+        if entry.at != end:
+            raise ValueError(f"at must be end_us for a timed observation: {entry.at} != {end}")
+
+    def _enter_timed(self, entry: Seen) -> None:
+        obs = entry.observation
+        identity = (obs.source, obs.seq)
+        for where, join in self.timed.items():
+            side = join.side_of(obs)
+            if side is None:
+                continue
+            start, end = entry.start_us, entry.end_us
+            if start is None or join.too_long(start, end):
+                reason = Reason.TIME_ABSENT if start is None else Reason.TOO_LONG
+                proposal = _timed_proposal(Verdict(reason))
+                final = self._emit((where, identity), proposal, Status.FINAL)
+                self._prove_timed(join, (identity,), (final.decision_id,), False)
+                continue
+            verdicts = join.add(Timed(obs.source, obs.seq, obs.point, side, start, end))
+            for member, verdict in sorted(verdicts.items()):
+                key, proposal = (where, member), _timed_proposal(verdict)
+                current = self.current.get(key)
+                if current is None or _fingerprint(current) != proposal.fingerprint:
+                    self._emit(key, proposal, Status.PROVISIONAL)
+
+    def _settle_timed(self, watermark: int, forced: bool) -> None:
+        for where, join in self.timed.items():
+            for closing in join.closing(watermark):
+                finals = [
+                    self._emit(
+                        (where, member),
+                        _timed_proposal(closing.verdicts[member]),
+                        Status.FINAL,
+                        forced,
+                    ).decision_id
+                    for member in closing.members
+                ]
+                self._prove_timed(join, closing.members, tuple(sorted(finals)), forced)
 
     # -- watermark and groups --------------------------------------------------
 
@@ -446,6 +533,7 @@ class _Flow:
         for identity in sorted(self.due.intersection(self.open)):
             self._let_go(identity, forced)
         self.due.clear()
+        self._settle_timed(watermark, forced)
 
     def _close(self, group: list[Identity], forced: bool) -> None:
         finals = []
@@ -489,8 +577,13 @@ class _Flow:
         decisions: tuple[str, ...],
         forced: bool,
         cites: tuple[str, str] | None = None,
+        join: TimedJoin | None = None,
     ) -> None:
         cited = [] if cites is None else ["cites", *cites]
+        calibration = ()
+        if join is not None:
+            calibration = tuple((self.config.calibration or {}).get(join.where, ()))
+            cited = ["timed", join.where, METHOD, join.params_id, *calibration]
         dossier_id = _digest(
             "dossier",
             self.topology_id,
@@ -511,8 +604,21 @@ class _Flow:
                 positions=tuple(self.positions[i] for i in observations),
                 closed_at=self.position,
                 cites=cites,
+                where=None if join is None else join.where,
+                method=None if join is None else METHOD,
+                params_id=None if join is None else join.params_id,
+                calibration=calibration,
             )
         )
+
+    def _prove_timed(
+        self,
+        join: TimedJoin,
+        observations: tuple[Identity, ...],
+        decisions: tuple[str, ...],
+        forced: bool,
+    ) -> None:
+        self._prove(observations, decisions, forced, join=join)
 
     # -- evaluation --------------------------------------------------------------
 
@@ -639,10 +745,29 @@ class _Flow:
             evidence=proposal.evidence,
             corroboration=proposal.corroboration,
             missing_on=proposal.missing_on,
+            reason=proposal.reason,
+            weight=proposal.weight,
         )
         self.current[key] = decision
         self.decisions.append(decision)
         return decision
+
+
+def _content(entry: Seen) -> tuple:
+    return entry.observation, entry.at, entry.start_us, entry.end_us
+
+
+def _timed_proposal(verdict: Verdict) -> _Proposal:
+    if verdict.reason is None:
+        return _Proposal(
+            Kind.LINKED,
+            None,
+            None,
+            (verdict.partner,),
+            Evidence.DERIVED,
+            weight=verdict.weight,
+        )
+    return _Proposal(Kind.UNDECIDED, None, None, (), reason=verdict.reason)
 
 
 def _fingerprint(decision: FlowDecision) -> str:
