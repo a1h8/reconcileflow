@@ -182,6 +182,7 @@ def _crowding(ups: list[Timed], downs: list[Timed], p: JoinParams):
     """Whether a matched (upstream, downstream) pair sits where it is too dense
     (meaningful only when ``local_span_us`` > 0)."""
     span = p.local_span_us
+    # Each side is placed in time: upstream by its start, downstream by the first signal.
     first = p.signals[0]
     up_at = {(o.source, o.seq): o.start_us for o in ups}
     down_at = {(o.source, o.seq): _reference(first.name, o) for o in downs}
@@ -191,10 +192,14 @@ def _crowding(ups: list[Timed], downs: list[Timed], p: JoinParams):
         return bisect.bisect_right(ordered, x + span) - bisect.bisect_left(ordered, x - span) - 1
 
     def crowded(a: Identity, b: Identity) -> bool:
-        n = max(others(up_sorted, up_at[a]), others(down_sorted, down_at[b]))
-        return n * first.window_us * 1000 > span * p.local_limit_permille
+        return _crowded(max(others(up_sorted, up_at[a]), others(down_sorted, down_at[b])), p)
 
     return crowded
+
+
+def _crowded(others: int, p: JoinParams) -> bool:
+    """Whether this many other observations within the span is too dense."""
+    return others * p.signals[0].window_us * 1000 > p.local_span_us * p.local_limit_permille
 
 
 def _gap(name: str, a: Timed, b: Timed) -> int:
