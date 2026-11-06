@@ -592,8 +592,8 @@ propagation can break on its own. `docs/target/m0-correlation-spike-protocol.md`
 wants a full `gateway → upstream-service → outbound-connector` pipeline for
 this; no spec exists for that (see architecture overview). Built the smallest
 faithful substitute instead: a standalone Traefik container (`docker run
-traefik:v3.1`, **not** the pre-existing `patchtst` k3s cluster found running on
-this machine — confirmed to be an unrelated parallel project, left untouched),
+traefik:v3.1`, **not** a pre-existing k3s cluster found running on this machine,
+which belongs to another project and was left untouched),
 with two routes in front of `fake-upstream`:
 
 - `/compliant` — passes the `traceparent` header through unchanged.
