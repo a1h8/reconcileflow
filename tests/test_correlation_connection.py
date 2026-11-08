@@ -1,6 +1,7 @@
 """Connection path: the timing path inside one connection (phase 4)."""
 
 import random
+from dataclasses import replace
 
 import pytest
 
@@ -83,19 +84,58 @@ def test_a_lost_observation_leaves_its_partner_alone_and_shifts_nothing():
     assert statuses(result) == {("outbound", 4): Status.NO_CANDIDATE}
 
 
-def test_the_density_guard_counts_neighbours_on_the_same_connection_only():
-    guarded = JoinParams(signals=(Signal("end", 0, 100),), margin_us=0, local_span_us=1_000)
+GUARDED = JoinParams(signals=(Signal("end", 0, 100),), margin_us=0, local_span_us=1_000)
+
+
+def back_to_back(n=30, stream=0):
+    """n requests one after the other on one connection, 150 µs apart: each has a
+    single candidate in its window, but some twenty neighbours within the guard's span."""
+    c = conn(5001)
+    obs = []
+    for k in range(n):
+        t = 150 * k
+        obs += [up(k, t, t + 100, c, stream), down(k, t + 10, t + 100, c, stream)]
+    return obs
+
+
+def test_inside_one_http1_connection_the_density_guard_is_off():
+    # 4a': one request at a time on the connection, so its neighbours cannot be mistaken for it.
+    obs = back_to_back()
+    by_time = timed_links(topology(), [o.timed for o in obs], {HOP: GUARDED})
+    assert Status.DENSE in {u.status for u in by_time.undecided}
+    result = connection_links(topology(), obs, {HOP: GUARDED})
+    assert pairs(result) == {(k, k) for k in range(30)}
+    assert not result.undecided
+    assert dict(result.params)[HOP].local_span_us == 0  # the parameters actually applied
+
+
+def test_the_stream_key_keeps_the_density_guard():
+    obs = back_to_back(stream=1)  # one stream reused: not decided for 4b
+    result = connection_links(topology(), obs, {HOP: GUARDED}, key="h2-stream")
+    assert Status.DENSE in {u.status for u in result.undecided}
+    assert dict(result.params)[HOP] == GUARDED
+
+
+def test_two_requests_at_once_on_one_connection_stay_ambiguous_without_the_guard():
+    c = conn(5001)
+    obs = [up(0, 0, 1_000, c), down(0, 50, 1_000, c), up(1, 5, 1_000, c), down(1, 55, 1_000, c)]
+    result = connection_links(topology(), obs, {HOP: GUARDED})
+    assert not result.links
+    assert set(statuses(result).values()) == {Status.AMBIGUOUS}
+
+
+def test_the_stream_key_counts_neighbours_on_the_same_key_only():
     # One pair alone on its connection, crowded by 20 requests on others.
-    obs = [up(0, 0, 5_000, conn(6000)), down(0, 10, 5_000, conn(6000))]
+    obs = [up(0, 0, 5_000, conn(6000), 1), down(0, 10, 5_000, conn(6000), 1)]
     # Their starts are within the span of the pair's; their ends are far from its window.
     for k in range(1, 21):
         obs += [
-            up(k, 40 * k, 9_000 + 40 * k, conn(6000 + k)),
-            down(k, 40 * k + 10, 9_000 + 40 * k, conn(6000 + k)),
+            up(k, 40 * k, 9_000 + 40 * k, conn(6000 + k), 1),
+            down(k, 40 * k + 10, 9_000 + 40 * k, conn(6000 + k), 1),
         ]
-    by_time = timed_links(topology(), [o.timed for o in obs], {HOP: guarded})
+    by_time = timed_links(topology(), [o.timed for o in obs], {HOP: GUARDED})
     assert (0, 0) not in {(x.upstream[1], x.downstream[1]) for x in by_time.links}
-    assert (0, 0) in pairs(connection_links(topology(), obs, {HOP: guarded}))
+    assert (0, 0) in pairs(connection_links(topology(), obs, {HOP: GUARDED}, key="h2-stream"))
 
 
 @pytest.mark.parametrize(
@@ -121,8 +161,8 @@ def test_an_unusable_four_tuple_is_no_key_and_never_linked(bad):
     assert statuses(result) == {("outbound", 0): Status.NO_KEY, ("inbound", 0): Status.NO_CANDIDATE}
 
 
-def test_on_one_connection_the_result_is_the_timing_path():
-    # K4: with a single four-tuple, nothing may change from phase 3.
+def test_on_one_connection_the_result_is_the_timing_path_without_its_guard():
+    # K4: with a single four-tuple, phase 3's path, less the density guard (4a').
     rng = random.Random(4)
     guarded = JoinParams(
         signals=(Signal("start", 50, 120), Signal("end", 0, 120)), margin_us=5, local_span_us=2_000
@@ -137,7 +177,9 @@ def test_on_one_connection_the_result_is_the_timing_path():
                 obs.append(
                     down(n, start + rng.randint(0, 100), end - rng.randint(0, 100), conn(7000))
                 )
-        alone = timed_links(topology(), [o.timed for o in obs], {HOP: guarded})
+        alone = timed_links(
+            topology(), [o.timed for o in obs], {HOP: replace(guarded, local_span_us=0)}
+        )
         result = connection_links(topology(), obs, {HOP: guarded})
         assert (result.links, result.undecided, result.components) == (
             alone.links,

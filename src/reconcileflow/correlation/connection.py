@@ -16,8 +16,12 @@ partition:
   KEY_TIME_CONFLICT. Time only catches a wrong key whose partner is outside the
   window; the stream number is otherwise trusted as the agent reported it.
 
-Windows, margin and the local density guard are the timing path's own; the
-guard therefore counts neighbours on the same key only. An observation with no
+Windows and margin are the timing path's own. The local density guard is not
+applied with ``key="connection"`` (4a'): its neighbours on one HTTP/1.1
+connection are the requests before and after, which cannot be mistaken for it;
+two requests at once on it stay AMBIGUOUS through the margin. With
+``key="h2-stream"`` the guard is kept and counts neighbours on the same key only.
+``Result.params`` gives the parameters actually applied. An observation with no
 usable key (empty address, port outside 1..65535, no stream number for
 ``h2-stream``) is NO_KEY and never linked here; falling back to the timing path
 for it is the caller's choice, not this module's.
@@ -31,7 +35,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .assignment import Status
 from .timing import DerivedLink, JoinParams, Timed, Undecided, _is_int, _validate, timed_links
@@ -63,6 +67,7 @@ class Result:
     undecided: tuple[Undecided, ...]  # sorted by (where, side, observation)
     duplicates_dropped: int
     components: tuple[tuple[str, int], ...] = ()  # (where, records), partitions in key order
+    params: tuple[tuple[str, JoinParams], ...] = ()  # (where, parameters applied), by where
 
 
 def connection_links(
@@ -76,6 +81,10 @@ def connection_links(
         raise ValueError(f"key must be one of {KEYS}, got {key!r}")
     timed_links(topology, (), params)  # refuses bad params and hops, observations or not
     distinct, dropped = _deduplicated(topology, observations)
+    applied = {
+        where: replace(p, local_span_us=0) if key == "connection" else p
+        for where, p in params.items()
+    }
 
     links, undecided, components = [], [], []
     for where in sorted(params):
@@ -92,7 +101,7 @@ def connection_links(
                 groups[k].append(obs)
         for k in sorted(groups):
             group = groups[k]
-            found = timed_links(topology, [o.timed for o in group], {where: params[where]})
+            found = timed_links(topology, [o.timed for o in group], {where: applied[where]})
             both_sides = len({o.timed.side for o in group}) == 2
             links += found.links
             components += found.components
@@ -106,6 +115,7 @@ def connection_links(
         undecided=tuple(sorted(undecided, key=lambda x: (x.where, x.side, x.observation))),
         duplicates_dropped=dropped,
         components=tuple(components),
+        params=tuple(sorted(applied.items())),
     )
 
 

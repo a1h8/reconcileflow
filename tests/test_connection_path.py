@@ -235,21 +235,3 @@ def test_stress_judges_wrong_links_only(tmp_path, capsys):
     cp.main(["connection_path.py", str(tmp_path), str(params_file(tmp_path)), "--stress"])
     out = capsys.readouterr().out
     assert "params from c100" in out and "S-4a" not in out
-
-
-def test_the_reading_without_the_guard_is_labelled_and_never_a_verdict(tmp_path, capsys):
-    # Requests back to back on one connection: the guard counts them as neighbours.
-    cell = write_cell(tmp_path, 40, conns=1, spacing=6_000)
-    dense = tmp_path / "dense.toml"
-    dense.write_text(
-        params_file(tmp_path)
-        .read_text()
-        .replace("local_span_us = 20000", "local_span_us = 20000\nlocal_limit_permille = 1")
-    )
-    guarded = j1(cp.analyze_cell(cell, dense))
-    free = j1(cp.analyze_cell(cell, dense, reading_no_guard=True))
-    assert guarded["dense"] > 0 and free["dense"] == 0 and free["wrong"] == 0
-    cp.main(["connection_path.py", str(tmp_path), str(dense), "--reading-no-guard"])
-    out = capsys.readouterr().out
-    assert "READING, rule not frozen: local density guard off inside each connection" in out
-    assert "S-4a" not in out

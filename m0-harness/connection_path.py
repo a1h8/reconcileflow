@@ -25,18 +25,18 @@ and reopened).
 Controls (one at a time, seed recorded):
 - --permute SEED (K1): fake-upstream's four-tuples shuffled across connections;
 - --drop PERMILLE --seed SEED (K2): that share of fake-upstream's observations removed;
-- --no-connection (K4): one key for everything, i.e. the timing path itself; the
-  validity check is skipped, so that it runs on round 6's HTTP/2 cells.
+- --no-connection (K4): one key for everything, i.e. the timing path less its
+  density guard; the validity check is skipped, so that it runs on round 6's
+  HTTP/2 cells.
 
 --stress: judged on wrong links only, with the parameters of the highest
 calibrated concurrency at most the cell's (c=200 -> c100).
 
---reading-no-guard: the density guard off inside each four-tuple (decided on
-2026-11-07, option a): a reading printed beside the verdict, never one.
+The density guard is not applied inside a four-tuple (4a', in the engine);
+round 4a's reading without it (--reading-no-guard, commit 59c80cb) is gone.
 
 Usage: connection_path.py <run-dir> <connection-params.toml> [--json] [--stress]
        [--permute SEED | --drop PERMILLE --seed SEED | --no-connection]
-       [--reading-no-guard]
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ import random
 import sys
 import tomllib
 from collections import Counter
-from dataclasses import replace
 from pathlib import Path
 
 from timing_path import (
@@ -149,7 +148,6 @@ def analyze_cell(
     drop: int | None = None,
     seed: int = 0,
     no_connection: bool = False,
-    reading_no_guard: bool = False,
 ) -> dict:
     meta = cell_meta(cell_dir)
     meta["hop_max_idle"] = json.loads((cell_dir / "cell.json").read_text()).get("hop_max_idle")
@@ -168,9 +166,6 @@ def analyze_cell(
     )
     report["rate_per_s"] = round(rate(rows), 1)
     topology = topology_for(meta["hops"])
-    if reading_no_guard:  # a reading beside the verdict, never the verdict
-        joins = {w: (replace(p, local_span_us=0), r) for w, (p, r) in joins.items()}
-        report["reading"] = "local density guard off inside each connection"
     for where, (params, receiver_start) in sorted(joins.items()):
         src, dst = where.split(" -> ")
         report["joins"][where] = score_join(
@@ -224,7 +219,6 @@ def main(argv: list[str]) -> None:
         "drop": _arg(argv, "--drop"),
         "seed": _arg(argv, "--seed") or 0,
         "no_connection": "--no-connection" in argv,
-        "reading_no_guard": "--reading-no-guard" in argv,
     }
     cells = sorted(p.parent for p in run_dir.glob("*/lg.jsonl"))
     report = {cell.name: analyze_cell(cell, params_file, **options) for cell in cells}
@@ -233,8 +227,6 @@ def main(argv: list[str]) -> None:
         return
     if stress:
         print("STRESS: judged on wrong links only, with the quiet calibration")
-    if options["reading_no_guard"]:
-        print("READING, rule not frozen: local density guard off inside each connection")
     wrong = 0
     for name, cell in report.items():
         meta = cell["meta"]
@@ -261,11 +253,7 @@ def main(argv: list[str]) -> None:
             )
             if judged:
                 wrong += j["wrong"]
-                applies = (
-                    not stress
-                    and not options["reading_no_guard"]
-                    and (meta["concurrency"] or 0) <= S_4A_UP_TO
-                )
+                applies = not stress and (meta["concurrency"] or 0) <= S_4A_UP_TO
                 verdict = ""
                 if applies:
                     verdict = f" (S-4a >= 99%: {'pass' if j['coverage'] >= S_4A else 'FAIL'})"
