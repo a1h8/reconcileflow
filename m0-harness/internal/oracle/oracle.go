@@ -84,6 +84,11 @@ type Record struct {
 	// carries the request's own id, so the two halves join without relying on
 	// a traceparent that may have been lost on the way. Empty on load-gen's side.
 	Path string `json:"path,omitempty"`
+	// StreamOffset is, with fake-upstream -stream-offsets, the position of the
+	// request's first byte in the client's raw TCP stream, counted from the
+	// connection's first byte: the truth stream-probe's offset is judged
+	// against (4c). Absent when not counted or not exact; 0 is never a request.
+	StreamOffset *int64 `json:"stream_offset,omitempty"`
 }
 
 // Writer is a concurrency-safe JSONL appender — both binaries write to their
