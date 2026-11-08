@@ -15,16 +15,23 @@ partition:
   fit: a key present on both sides with no pair inside the windows is
   KEY_TIME_CONFLICT. Time only catches a wrong key whose partner is outside the
   window; the stream number is otherwise trusted as the agent reported it.
+- ``key="tcp-seq"`` (4c): the four-tuple and the offset of the message's first
+  byte in the TCP stream, the same at both ends whatever the clocks, and given
+  to one message only. Time only checks, as for ``h2-stream``: a key present on
+  both sides with no pair inside the windows is KEY_TIME_CONFLICT; a wrong
+  offset whose partner is inside the window is not caught.
 
 Windows and margin are the timing path's own. The local density guard is not
 applied with ``key="connection"`` (4a'): its neighbours on one HTTP/1.1
 connection are the requests before and after, which cannot be mistaken for it;
-two requests at once on it stay AMBIGUOUS through the margin. With
-``key="h2-stream"`` the guard is kept and counts neighbours on the same key only.
+two requests at once on it stay AMBIGUOUS through the margin. Nor with
+``key="tcp-seq"``: an offset designates one message. With ``key="h2-stream"``
+the guard is kept and counts neighbours on the same key only.
 ``Result.params`` gives the parameters actually applied. An observation with no
 usable key (empty address, port outside 1..65535, no stream number for
-``h2-stream``) is NO_KEY and never linked here; falling back to the timing path
-for it is the caller's choice, not this module's.
+``h2-stream``, no offset for ``tcp-seq``) is NO_KEY and never linked here;
+falling back to the timing path for it is the caller's choice, not this
+module's.
 
 A link found this way is ``derived``: the key narrows the candidates, time
 decides. Hops are joined one at a time. Duplicates are dropped first. The
@@ -41,7 +48,9 @@ from .assignment import Status
 from .timing import DerivedLink, JoinParams, Timed, Undecided, _is_int, _validate, timed_links
 from .topology import Topology
 
-KEYS = ("connection", "h2-stream")
+KEYS = ("connection", "h2-stream", "tcp-seq")
+UNGUARDED = ("connection", "tcp-seq")  # keys inside which the density guard is not applied
+CHECKED = ("h2-stream", "tcp-seq")  # keys whose time misfit is a KEY_TIME_CONFLICT
 MAX_STREAM = 2**31 - 1  # HTTP/2 stream identifiers are 31 bits
 
 
@@ -58,6 +67,7 @@ class Connected:
     timed: Timed
     conn: Conn | None  # None: the source gave no four-tuple
     stream: int = 0  # HTTP/2 stream number; 0: unknown or not HTTP/2
+    offset: int | None = None  # first byte of the message in the TCP stream; None: unknown
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +92,7 @@ def connection_links(
     timed_links(topology, (), params)  # refuses bad params and hops, observations or not
     distinct, dropped = _deduplicated(topology, observations)
     applied = {
-        where: replace(p, local_span_us=0) if key == "connection" else p
-        for where, p in params.items()
+        where: replace(p, local_span_us=0) if key in UNGUARDED else p for where, p in params.items()
     }
 
     links, undecided, components = [], [], []
@@ -106,7 +115,7 @@ def connection_links(
             links += found.links
             components += found.components
             for u in found.undecided:
-                if key == "h2-stream" and both_sides and u.status is Status.NO_CANDIDATE:
+                if key in CHECKED and both_sides and u.status is Status.NO_CANDIDATE:
                     u = Undecided(u.where, u.observation, u.side, Status.KEY_TIME_CONFLICT)
                 undecided.append(u)
     return Result(
@@ -132,6 +141,8 @@ def _key(obs: Connected, key: str) -> tuple | None:
     four = (c.client_addr, c.client_port, c.server_addr, c.server_port)
     if key == "connection":
         return four
+    if key == "tcp-seq":
+        return None if obs.offset is None else (*four, obs.offset)
     return (*four, obs.stream) if 1 <= obs.stream <= MAX_STREAM else None
 
 
@@ -143,7 +154,7 @@ def _deduplicated(topology: Topology, observations: Iterable[Connected]):
     for obs in observations:
         _validate_connected(obs, points)
         identity = _identity(obs)
-        content = (obs.timed, obs.conn, obs.stream)
+        content = (obs.timed, obs.conn, obs.stream, obs.offset)
         if identity in seen:
             if seen[identity] != content:
                 raise ValueError(f"observation {identity!r} delivered with different content")
@@ -166,3 +177,5 @@ def _validate_connected(obs: Connected, points: set[str]) -> None:
             raise ValueError(f"ports must be integers in {c!r}")
     if not (_is_int(obs.stream) and obs.stream >= 0):
         raise ValueError(f"stream must be an integer >= 0, got {obs.stream!r}")
+    if obs.offset is not None and not (_is_int(obs.offset) and obs.offset >= 0):
+        raise ValueError(f"offset must be an integer >= 0 or None, got {obs.offset!r}")

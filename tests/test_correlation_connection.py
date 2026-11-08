@@ -285,6 +285,115 @@ def test_a_reused_four_tuple_and_stream_is_told_apart_by_time():
     assert set(statuses(result).values()) == {Status.AMBIGUOUS}
 
 
+# -- the TCP stream offset (4c) ----------------------------------------------
+
+WIDE = JoinParams(signals=(Signal("end", 0, 50_000),), margin_us=0, local_span_us=1_000)
+
+
+def at(obs, offset):
+    """The same observation, with the offset of its first byte in the TCP stream."""
+    return Connected(obs.timed, obs.conn, obs.stream, offset)
+
+
+def with_offsets(obs, size=100):
+    """Request k on its connection starts at byte k * size, on both sides."""
+    return [at(o, o.timed.seq * size) for o in obs]
+
+
+def frozen(obs):
+    """An uneven freeze: even downstream observations dated 250 µs late, odd ones
+    10 µs, so each even one is seen after the next request's (150 µs apart)."""
+    out = []
+    for o in obs:
+        t = o.timed
+        if t.side == "inbound":
+            d = 250 if t.seq % 2 == 0 else 10
+            t = Timed(t.source, t.seq, t.point, t.side, t.start_us + d, t.end_us + d)
+        out.append(Connected(t, o.conn, o.stream, o.offset))
+    return out
+
+
+def test_the_tcp_offset_links_messages_that_time_refuses_in_a_freeze():
+    obs = frozen(with_offsets(back_to_back()))
+    by_time = connection_links(topology(), obs, {HOP: WIDE})
+    assert not by_time.links
+    assert {u.status for u in by_time.undecided} == {Status.AMBIGUOUS}
+    result = connection_links(topology(), obs, {HOP: WIDE}, key="tcp-seq")
+    assert pairs(result) == {(k, k) for k in range(30)}
+    assert not result.undecided
+    assert result.key == "tcp-seq"
+
+
+def test_a_lost_message_shifts_nothing_with_the_tcp_offset():
+    obs = [o for o in with_offsets(back_to_back()) if (o.timed.side, o.timed.seq) != ("inbound", 7)]
+    result = connection_links(topology(), obs, {HOP: WIDE}, key="tcp-seq")
+    assert pairs(result) == {(k, k) for k in range(30) if k != 7}
+    assert statuses(result) == {("outbound", 7): Status.NO_CANDIDATE}
+
+
+def test_one_offset_is_one_message_so_the_density_guard_is_off():
+    result = connection_links(topology(), with_offsets(back_to_back()), {HOP: WIDE}, key="tcp-seq")
+    assert dict(result.params)[HOP].local_span_us == 0
+
+
+def test_a_shifted_offset_beyond_the_window_is_a_key_time_conflict():
+    # K5: downstream offsets one message ahead; requests 10 ms apart, windows of 100 µs.
+    c = conn(5001)
+    obs = []
+    for k in range(5):
+        t = 10_000 * k
+        obs += [
+            at(up(k, t, t + 1_000, c), 100 * k),
+            at(down(k, t + 50, t + 1_000, c), 100 * (k + 1)),
+        ]
+    result = connection_links(topology(), obs, {HOP: END}, key="tcp-seq")
+    assert not result.links
+    s = statuses(result)
+    assert s[("outbound", 0)] == Status.NO_CANDIDATE  # offset 0: nothing downstream
+    assert s[("inbound", 4)] == Status.NO_CANDIDATE  # offset 500: nothing upstream
+    assert all(s["outbound", k] == Status.KEY_TIME_CONFLICT for k in range(1, 5))
+
+
+def test_a_shifted_offset_inside_the_window_is_not_caught():
+    # The limit of K5, written down: time only catches a shift wider than its window.
+    obs = with_offsets(back_to_back(5))
+    shifted = [at(o, o.offset + 100) if o.timed.side == "inbound" else o for o in obs]
+    result = connection_links(topology(), shifted, {HOP: WIDE}, key="tcp-seq")
+    assert pairs(result) == {(k + 1, k) for k in range(4)}  # wrong links: the offset is trusted
+
+
+def test_a_missing_offset_is_no_key_and_offset_zero_is_usable():
+    c = conn(5001)
+    obs = [
+        at(up(0, 0, 1_000, c), 0),
+        at(down(0, 50, 1_000, c), 0),
+        up(1, 5_000, 6_000, c),
+        at(down(1, 5_050, 6_000, c), 100),
+    ]
+    result = connection_links(topology(), obs, {HOP: END}, key="tcp-seq")
+    assert pairs(result) == {(0, 0)}
+    assert statuses(result) == {("outbound", 1): Status.NO_KEY, ("inbound", 1): Status.NO_CANDIDATE}
+
+
+def test_the_offset_is_ignored_by_the_other_keys():
+    obs = two_connections_ending_together()
+    assert connection_links(topology(), with_offsets(obs), {HOP: END}) == connection_links(
+        topology(), obs, {HOP: END}
+    )
+
+
+@pytest.mark.parametrize("offset", [-1, True, "0", 1.0])
+def test_an_invalid_offset_is_refused(offset):
+    with pytest.raises(ValueError, match="offset"):
+        connection_links(topology(), [at(up(0, 0, 1, conn(5001)), offset)], {HOP: END})
+
+
+def test_same_identity_with_a_different_offset_is_refused():
+    a, b = at(up(0, 0, 1_000, conn(5001)), 0), at(up(0, 0, 1_000, conn(5001)), 100)
+    with pytest.raises(ValueError, match="different content"):
+        connection_links(topology(), [a, b], {HOP: END})
+
+
 # -- inputs --------------------------------------------------------------------
 
 
