@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 HARNESS = Path(__file__).resolve().parents[1] / "m0-harness"
 sys.path.insert(0, str(HARNESS))
 _spec = importlib.util.spec_from_file_location("stream_gate", HARNESS / "stream_gate.py")
@@ -198,7 +200,8 @@ def test_g4b_holds_inside_the_range_of_the_shipped_runs(tmp_path):
     assert gate_mod.gate(inside, shipped)["G4b"] is True
     assert gate_mod.gate(above, shipped)["G4b"] is False
     # 10 samples x 3.9 % of a core = 0.39 CPU s for 20 requests: 19.5 s per 1,000
-    assert gate_mod.gate(inside, shipped)["cpu_per_1k_patched"][0] == 19.5
+    # (a float sum: exact only to rounding, which differs before Python 3.12)
+    assert gate_mod.gate(inside, shipped)["cpu_per_1k_patched"][0] == pytest.approx(19.5)
 
 
 def test_g4b_needs_three_runs_on_each_side(tmp_path):
