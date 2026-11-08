@@ -452,3 +452,54 @@ func TestRun(t *testing.T) {
 		})
 	}
 }
+
+// The probe dates events on the kernel's monotonic clock, the agents on the
+// wall clock: a clock record reads monotonic, wall, monotonic, back to back,
+// and keeps the midpoint and the spread so a reader can convert either way.
+func TestClockRecord(t *testing.T) {
+	monos := []uint64{1_000, 1_400}
+	mono := func() uint64 { v := monos[0]; monos = monos[1:]; return v }
+	rec := clockRecord(mono, func() uint64 { return 1_792_000_000_000_000_000 })
+	if rec.Kind != "clock" || rec.TimestampNS != 1_200 || rec.RealtimeNS == nil ||
+		*rec.RealtimeNS != 1_792_000_000_000_000_000 || rec.SpreadNS == nil || *rec.SpreadNS != 400 {
+		t.Errorf("clockRecord() = %+v, want clock at 1200, realtime 1.792e18, spread 400", rec)
+	}
+}
+
+func TestClockLoop(t *testing.T) {
+	var buf bytes.Buffer
+	out := &syncEncoder{enc: json.NewEncoder(&buf)}
+	ticks := make(chan time.Time, 2)
+	ticks <- time.Time{}
+	ticks <- time.Time{}
+	close(ticks)
+	mono := uint64(0)
+	clockLoop(ticks, out, func() uint64 { mono += 10; return mono }, func() uint64 { return 7 })
+	got := lines(t, &buf)
+	if len(got) != 2 || got[0].Kind != "clock" || got[1].TimestampNS != 35 {
+		t.Errorf("records = %+v, want two clock records, the second at 35", got)
+	}
+}
+
+func TestRealClocksAreReadable(t *testing.T) {
+	rec := clockRecord(monotonicNS, realtimeNS)
+	if *rec.RealtimeNS < 1_700_000_000_000_000_000 || rec.TimestampNS == 0 || *rec.SpreadNS > 1_000_000_000 {
+		t.Errorf("real clock record %+v looks wrong", rec)
+	}
+}
+
+func TestRunWritesAClockRecordFirstAndLast(t *testing.T) {
+	withRunSeams(t)
+	outPath := strings.TrimPrefix(os.Args[2], "-out=")
+	if err := run(); err != nil {
+		t.Fatalf("run() = %v", err)
+	}
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := lines(t, bytes.NewBuffer(raw))
+	if len(got) < 2 || got[0].Kind != "clock" || got[len(got)-1].Kind != "clock" {
+		t.Errorf("records = %+v, want a clock record first and last", got)
+	}
+}

@@ -3,7 +3,8 @@
 // and the TCP sequence number of the message's first byte, the same at both
 // ends of the connection whatever their clocks. Connection opening (with the
 // number of the first data byte), closing, and the ring buffer's lost events,
-// once a second, are written too. Never any payload.
+// once a second, are written too, with the wall and monotonic clocks read
+// back to back. Never any payload.
 //
 // The kernel side keeps no per-request state: each hook reads the socket and
 // emits one event, or counts a drop when the ring buffer is full.
@@ -82,6 +83,11 @@ type Record struct {
 	Socket      uint64  `json:"socket,omitempty"`
 	TimestampNS uint64  `json:"timestamp_ns"`
 	Drops       *uint64 `json:"drops,omitempty"` // kind "drops" only: events lost since the start
+	// Kind "clock" only: the wall clock (CLOCK_REALTIME) read between two
+	// reads of the monotonic clock; TimestampNS is their midpoint, SpreadNS
+	// the gap between them, the conversion's uncertainty.
+	RealtimeNS *uint64 `json:"realtime_ns,omitempty"`
+	SpreadNS   *uint64 `json:"spread_ns,omitempty"`
 }
 
 // decodeRecord turns one ring buffer sample into a Record. The end whose local
@@ -154,6 +160,30 @@ func dropsLoop(ticks <-chan time.Time, m dropCounter, out *syncEncoder, now func
 		}
 		out.Encode(rec)
 	}
+}
+
+// clockRecord reads monotonic, wall, monotonic, back to back: events are
+// dated on the kernel's monotonic clock, agents' spans on the wall clock.
+func clockRecord(mono, real func() uint64) Record {
+	before := mono()
+	wall := real()
+	after := mono()
+	spread := after - before
+	return Record{Kind: "clock", TimestampNS: before + spread/2, RealtimeNS: &wall, SpreadNS: &spread}
+}
+
+// clockLoop writes a clock record at each tick.
+func clockLoop(ticks <-chan time.Time, out *syncEncoder, mono, real func() uint64) {
+	for range ticks {
+		out.Encode(clockRecord(mono, real))
+	}
+}
+
+// realtimeNS reads CLOCK_REALTIME, the wall clock.
+func realtimeNS() uint64 {
+	var ts unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_REALTIME, &ts)
+	return uint64(ts.Nano())
 }
 
 // monotonicNS reads CLOCK_MONOTONIC, the clock bpf_ktime_get_ns uses.
@@ -302,6 +332,10 @@ func run() error {
 	}
 	defer f.Close()
 	out := &syncEncoder{enc: json.NewEncoder(f)}
+	out.Encode(clockRecord(monotonicNS, realtimeNS))
+	clockTicker := time.NewTicker(time.Second)
+	defer clockTicker.Stop()
+	go clockLoop(clockTicker.C, out, monotonicNS, realtimeNS)
 
 	var drops dropCounter
 	if m := coll.Maps["drops"]; m != nil {
@@ -319,5 +353,6 @@ func run() error {
 	}()
 	log.Printf("stream-probe attached on port %d, writing to %s", cfg.port, cfg.outPath)
 	runLoop(rd, drops, out, cfg.port, monotonicNS)
+	out.Encode(clockRecord(monotonicNS, realtimeNS))
 	return nil
 }
