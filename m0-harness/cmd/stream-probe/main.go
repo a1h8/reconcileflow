@@ -199,6 +199,7 @@ type ringbufReader interface {
 
 type ringbufReaderCloser interface {
 	ringbufReader
+	deadlineRing
 	Close() error
 }
 
@@ -232,9 +233,14 @@ func runLoop(rd ringbufReader, drops dropCounter, out *syncEncoder, port uint16,
 }
 
 type config struct {
-	objPath string
-	outPath string
-	port    uint16
+	objPath      string
+	outPath      string
+	port         uint16
+	journal      string // directory of segments; empty: JSONL to outPath, as before
+	segmentBytes int64
+	segmentAge   time.Duration
+	batchRecords int
+	queueBatches int
 }
 
 func parseFlags(args []string) (config, error) {
@@ -243,13 +249,25 @@ func parseFlags(args []string) (config, error) {
 	objPath := fs.String("obj", "bpf/probe.o", "compiled BPF object (clang -target bpf bpf/probe.c)")
 	outPath := fs.String("out", "stream.jsonl", "output JSONL path")
 	port := fs.Int("port", 0, "server port to watch (1..65535), required")
+	journal := fs.String("journal", "", "write raw segments to this directory instead of JSONL: "+
+		"the reader only copies, decoding is done later (couverture-asynchrone-spec.md 4 quater)")
+	segmentBytes := fs.Int64("segment-bytes", 64<<20, "with -journal: close a segment at this size")
+	segmentAge := fs.Duration("segment-age", time.Second, "with -journal: close a segment at this age")
+	batch := fs.Int("batch", 4096, "with -journal: records per batch handed to the writer")
+	queue := fs.Int("queue-batches", 256, "with -journal: batches the queue holds before the reader waits")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
 	if *port < 1 || *port > 65535 {
 		return config{}, fmt.Errorf("-port must be in 1..65535, got %d", *port)
 	}
-	return config{objPath: *objPath, outPath: *outPath, port: uint16(*port)}, nil
+	if *segmentBytes < journalRecordSize || *segmentAge <= 0 || *batch < 1 || *queue < 1 {
+		return config{}, errors.New("-segment-bytes, -segment-age, -batch and -queue-batches must be positive")
+	}
+	return config{
+		objPath: *objPath, outPath: *outPath, port: uint16(*port), journal: *journal,
+		segmentBytes: *segmentBytes, segmentAge: *segmentAge, batchRecords: *batch, queueBatches: *queue,
+	}, nil
 }
 
 type closer interface {
@@ -327,12 +345,12 @@ func run() error {
 		return fmt.Errorf("open ring buffer reader: %w", err)
 	}
 	defer rd.Close()
-	f, err := os.Create(cfg.outPath)
+	f, where, err := openOutput(cfg)
 	if err != nil {
 		return fmt.Errorf("create output: %w", err)
 	}
 	defer f.Close()
-	log.Printf("stream-probe attached on port %d, writing to %s", cfg.port, cfg.outPath)
+	log.Printf("stream-probe attached on port %d, writing to %s", cfg.port, where)
 	drops, err := mapDrops(coll.Maps["drops"])
 	if err != nil {
 		return err
@@ -342,6 +360,15 @@ func run() error {
 		return fmt.Errorf("drop privileges: %w", err)
 	}
 	log.Printf("privileges dropped: uid %d, no capability", os.Getuid())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		rd.Close() // unblocks the reader with ringbuf.ErrClosed
+	}()
+	if cfg.journal != "" {
+		return runJournal(cfg, rd, drops)
+	}
 	out := &syncEncoder{enc: json.NewEncoder(f)}
 	out.Encode(clockRecord(monotonicNS, realtimeNS))
 	clockTicker := time.NewTicker(time.Second)
@@ -351,14 +378,73 @@ func run() error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	go dropsLoop(ticker.C, drops, out, monotonicNS)
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		rd.Close() // unblocks Read with ringbuf.ErrClosed
-	}()
 	runLoop(rd, drops, out, cfg.port, monotonicNS)
 	out.Encode(clockRecord(monotonicNS, realtimeNS))
 	return nil
+}
+
+// openOutput creates the JSONL file, or the journal directory (owner only);
+// either is handed to the sudo user before privileges are dropped.
+func openOutput(cfg config) (*os.File, string, error) {
+	if cfg.journal == "" {
+		f, err := os.Create(cfg.outPath)
+		return f, cfg.outPath, err
+	}
+	if err := os.MkdirAll(cfg.journal, 0o700); err != nil {
+		return nil, "", err
+	}
+	f, err := os.Open(cfg.journal)
+	return f, cfg.journal + " (journal)", err
+}
+
+// runJournal: the reader copies into batches, a bounded queue absorbs bursts,
+// the writer appends them to segments; drops and clock readings go through
+// the same queue, so a segment holds everything needed to read it alone.
+func runJournal(cfg config, rd ringbufReaderCloser, drops dropCounter) error {
+	w, err := newSegmentWriter(cfg.journal, cfg.segmentBytes, cfg.segmentAge, time.Now)
+	if err != nil {
+		return fmt.Errorf("open journal: %w", err)
+	}
+	queue := make(chan []byte, cfg.queueBatches)
+	written := make(chan error, 1)
+	go func() { written <- writeBatches(queue, w) }()
+	queue <- appendClock(nil, clockRecord(monotonicNS, realtimeNS))
+
+	stop := make(chan struct{})
+	var ticking sync.WaitGroup
+	ticking.Add(1)
+	go func() {
+		defer ticking.Done()
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				queue <- tickRecords(drops)
+			}
+		}
+	}()
+	st := readBatches(rd, queue, cfg.batchRecords, 100*time.Millisecond)
+	close(stop)
+	ticking.Wait()
+	queue <- tickRecords(drops)
+	close(queue)
+	err = <-written
+	log.Printf("journal: %d events copied, %d bad samples, %d read errors", st.events, st.bad, st.readErrors)
+	log.Println("shutting down")
+	return err
+}
+
+// tickRecords: the drop count, then the two clocks.
+func tickRecords(drops dropCounter) []byte {
+	var b []byte
+	if r, err := dropsRecord(drops, monotonicNS()); err == nil {
+		b = appendDrops(b, r.TimestampNS, *r.Drops)
+		log.Printf("ring buffer reserve failures (events dropped, never emitted): %d", *r.Drops)
+	} else {
+		log.Printf("read drop counter: %v", err)
+	}
+	return appendClock(b, clockRecord(monotonicNS, realtimeNS))
 }

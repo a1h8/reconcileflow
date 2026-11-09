@@ -329,8 +329,21 @@ func TestRunLoop(t *testing.T) {
 
 func TestParseFlags(t *testing.T) {
 	cfg, err := parseFlags([]string{"-port=8443", "-out=x.jsonl", "-obj=p.o"})
-	if err != nil || cfg != (config{objPath: "p.o", outPath: "x.jsonl", port: 8443}) {
+	want := config{objPath: "p.o", outPath: "x.jsonl", port: 8443,
+		segmentBytes: 64 << 20, segmentAge: time.Second, batchRecords: 4096, queueBatches: 256}
+	if err != nil || cfg != want {
 		t.Errorf("parseFlags() = %+v, %v", cfg, err)
+	}
+	cfg, err = parseFlags([]string{"-port=1", "-journal=/j", "-segment-bytes=1000", "-segment-age=2s",
+		"-batch=10", "-queue-batches=3"})
+	if err != nil || cfg.journal != "/j" || cfg.segmentBytes != 1000 || cfg.segmentAge != 2*time.Second ||
+		cfg.batchRecords != 10 || cfg.queueBatches != 3 {
+		t.Errorf("journal flags = %+v, %v", cfg, err)
+	}
+	for _, bad := range []string{"-segment-bytes=10", "-segment-age=0s", "-batch=0", "-queue-batches=0"} {
+		if _, err := parseFlags([]string{"-port=1", bad}); err == nil {
+			t.Errorf("parseFlags(%s) accepted", bad)
+		}
 	}
 	cfg, err = parseFlags([]string{"-port=1"})
 	if err != nil || cfg.objPath != "bpf/probe.o" || cfg.outPath != "stream.jsonl" {
@@ -349,8 +362,10 @@ func (fakeCloser) Close() error { return nil }
 
 type readyReader struct{}
 
-func (readyReader) Read() (ringbuf.Record, error) { return ringbuf.Record{}, ringbuf.ErrClosed }
-func (readyReader) Close() error                  { return nil }
+func (readyReader) Read() (ringbuf.Record, error)  { return ringbuf.Record{}, ringbuf.ErrClosed }
+func (readyReader) Close() error                   { return nil }
+func (readyReader) SetDeadline(time.Time)          {}
+func (readyReader) ReadInto(*ringbuf.Record) error { return ringbuf.ErrClosed }
 
 // attached records every symbol run() attaches to, in order, and fails on one.
 type attached struct {
