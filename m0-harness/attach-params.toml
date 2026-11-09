@@ -1,0 +1,68 @@
+rule = "one pass per level p25-p75, p5-p95, p1-p99, p0.1-p99.9; each bound widened by 20 % of its distance to the median"
+levels = ["p25-p75", "p5-p95", "p1-p99", "p0.1-p99.9"]
+wide_us = 50000
+cells = ["/data/workspace/reconcileflow/runs/calib4c-20261109-beyla-c100-load0-221804/n1", "/data/workspace/reconcileflow/runs/calib4c-20261109-beyla-c20-load0-221431/n1", "/data/workspace/reconcileflow/runs/calib4c-20261109-beyla-c200-load4-221939/n1", "/data/workspace/reconcileflow/runs/calib4c-20261109-obi-c100-load0-220722/n1", "/data/workspace/reconcileflow/runs/calib4c-20261109-obi-c20-load0-220248/n1", "/data/workspace/reconcileflow/runs/calib4c-20261109-obi-c200-load4-221028/n1"]
+
+[beyla.calm.client]
+p0_1 = -708
+median = -138
+p99_9 = -41
+samples = 59947
+left_out = 53
+passes = [[-160, -115], [-198, -43], [-290, -30], [-822, -21]]
+
+[beyla.calm.server]
+p0_1 = 17
+median = 79
+p99_9 = 572
+samples = 59947
+left_out = 53
+passes = [[59, 95], [26, 123], [14, 168], [4, 671]]
+
+[beyla.load.client]
+p0_1 = -5441
+median = -62
+p99_9 = -39
+samples = 29961
+left_out = 39
+passes = [[-76, -52], [-187, -44], [-1014, -39], [-6517, -34]]
+
+[beyla.load.server]
+p0_1 = 9
+median = 29
+p99_9 = 1548
+samples = 29961
+left_out = 39
+passes = [[23, 38], [15, 67], [11, 298], [5, 1852]]
+
+[obi.calm.client]
+p0_1 = -665
+median = -121
+p99_9 = -44
+samples = 59992
+left_out = 8
+passes = [[-155, -88], [-199, -52], [-279, -38], [-774, -28]]
+
+[obi.calm.server]
+p0_1 = 16
+median = 67
+p99_9 = 596
+samples = 59992
+left_out = 8
+passes = [[46, 90], [26, 121], [15, 160], [5, 702]]
+
+[obi.load.client]
+p0_1 = -9632
+median = -72
+p99_9 = -46
+samples = 24068
+left_out = 9
+passes = [[-92, -62], [-372, -52], [-1733, -46], [-11544, -40]]
+
+[obi.load.server]
+p0_1 = 14
+median = 33
+p99_9 = 5033
+samples = 24068
+left_out = 9
+passes = [[23, 44], [16, 119], [13, 774], [10, 6033]]
