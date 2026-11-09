@@ -408,7 +408,7 @@ func TestRun(t *testing.T) {
 			t.Errorf("port written to the kernel = %d, want 8443", *port)
 		}
 		want := []string{
-			"kprobe tcp_connect", "kretprobe inet_csk_accept", "kprobe tcp_sendmsg",
+			"kprobe tcp_connect", "kretprobe inet_csk_accept", "kprobe tcp_sendmsg_locked",
 			"kprobe tcp_cleanup_rbuf", "kprobe tcp_close",
 		}
 		if strings.Join(at.syms, ",") != strings.Join(want, ",") {
@@ -416,7 +416,7 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	for _, sym := range []string{"tcp_connect", "inet_csk_accept", "tcp_sendmsg", "tcp_cleanup_rbuf", "tcp_close"} {
+	for _, sym := range []string{"tcp_connect", "inet_csk_accept", "tcp_sendmsg_locked", "tcp_cleanup_rbuf", "tcp_close"} {
 		t.Run("attach failure names "+sym, func(t *testing.T) {
 			at, _ := withRunSeams(t)
 			at.failOn = sym

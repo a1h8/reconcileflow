@@ -9,9 +9,14 @@
 //
 //   kprobe    tcp_connect(sk)              client opens: write_seq = initial number (SYN)
 //   kretprobe inet_csk_accept -> sk        server accepts: copied_seq = first data byte
-//   kprobe    tcp_sendmsg(sk, msg, size)   client sends: write_seq = first byte of this send
+//   kprobe    tcp_sendmsg_locked(sk, msg, size)  client sends: write_seq = first byte of this send
 //   kprobe    tcp_cleanup_rbuf(sk, copied) server has read: copied_seq - copied = first byte read
 //   kprobe    tcp_close(sk, timeout)       either end closes
+//
+// The send is hooked on tcp_sendmsg_locked, not tcp_sendmsg: a socket an
+// agent puts in a sockmap (sk_msg) sends through tcp_bpf_sendmsg, which skips
+// tcp_sendmsg; both end in tcp_sendmsg_locked. On that path one write may
+// leave in several calls: the later ones start inside the message.
 //
 // Only the client -> server direction is kept: sends whose remote port is the
 // watched port, reads whose local port is. Known limit: a read with MSG_PEEK
@@ -139,8 +144,8 @@ int BPF_KRETPROBE(on_inet_csk_accept, struct sock *sk)
 	return 0;
 }
 
-SEC("kprobe/tcp_sendmsg")
-int BPF_KPROBE(on_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
+SEC("kprobe/tcp_sendmsg_locked")
+int BPF_KPROBE(on_tcp_sendmsg_locked, struct sock *sk, struct msghdr *msg, size_t size)
 {
 	if (size == 0 || remote_port(sk) != watched_port())
 		return 0;

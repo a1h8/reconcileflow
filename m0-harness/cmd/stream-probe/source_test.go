@@ -11,7 +11,7 @@ import (
 // The probe never reads a message's content: every kernel read in bpf/probe.c
 // is of a field on this list (ports, addresses, family, TCP sequence
 // numbers), every helper call is on the next one, and the message buffer
-// passed to tcp_sendmsg is never touched. A change that reads anything else
+// passed to tcp_sendmsg_locked is never touched. A change that reads anything else
 // fails here first, and has to be argued in review.
 var allowedReads = map[string]bool{
 	"sk, __sk_common.skc_num":          true,
@@ -78,10 +78,24 @@ func TestTheProbeNeverReadsMessageContent(t *testing.T) {
 	for _, m := range otherReads.FindAllString(src, -1) {
 		t.Errorf("memory read %s: only the allowed BPF_CORE_READ fields may be read", m)
 	}
-	// The message buffer appears once: in tcp_sendmsg's signature.
+	// The message buffer appears once: in tcp_sendmsg_locked's signature.
 	if n := len(msgUse.FindAllString(src, -1)); n != 1 {
 		t.Errorf("msg appears %d times, want once (the signature): its content must never be read", n)
 	}
 	sort.Strings(helpers)
 	t.Logf("reads: %v; helpers: %v", reads, helpers)
+}
+
+// A socket an agent puts in a sockmap (sk_msg, e.g. to propagate context)
+// sends through tcp_bpf_sendmsg, which skips tcp_sendmsg; both paths end in
+// tcp_sendmsg_locked, so that is where the send is hooked (seen 2026-11-09:
+// on tcp_sendmsg, 82 sends against 5,436 reads with such an agent).
+func TestTheSendIsHookedWhereEveryPathGoes(t *testing.T) {
+	src := probeSource(t)
+	if !strings.Contains(src, `SEC("kprobe/tcp_sendmsg_locked")`) {
+		t.Error("the send must be hooked on tcp_sendmsg_locked")
+	}
+	if strings.Contains(src, `SEC("kprobe/tcp_sendmsg")`) {
+		t.Error("tcp_sendmsg misses sockets in an agent's sockmap")
+	}
 }

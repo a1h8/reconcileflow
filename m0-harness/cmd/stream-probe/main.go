@@ -37,7 +37,7 @@ import (
 
 // Event kinds, as in enum kind in bpf/probe.c.
 const (
-	kindSend    = 1 // tcp_sendmsg: Seq = write_seq on entry, the first byte sent
+	kindSend    = 1 // tcp_sendmsg_locked: Seq = write_seq on entry, the first byte sent
 	kindRecv    = 2 // tcp_cleanup_rbuf: Seq = copied_seq - copied, the first byte read
 	kindConnect = 3 // tcp_connect: Seq = write_seq on entry, the initial number (SYN)
 	kindAccept  = 4 // inet_csk_accept return: Seq = copied_seq, the first data byte
@@ -280,7 +280,7 @@ var hooks = []struct {
 }{
 	{false, "tcp_connect", "on_tcp_connect"},
 	{true, "inet_csk_accept", "on_inet_csk_accept"},
-	{false, "tcp_sendmsg", "on_tcp_sendmsg"},
+	{false, "tcp_sendmsg_locked", "on_tcp_sendmsg_locked"},
 	{false, "tcp_cleanup_rbuf", "on_tcp_cleanup_rbuf"},
 	{false, "tcp_close", "on_tcp_close"},
 }
@@ -332,6 +332,7 @@ func run() error {
 		return fmt.Errorf("create output: %w", err)
 	}
 	defer f.Close()
+	log.Printf("stream-probe attached on port %d, writing to %s", cfg.port, cfg.outPath)
 	drops, err := mapDrops(coll.Maps["drops"])
 	if err != nil {
 		return err
@@ -357,7 +358,6 @@ func run() error {
 		<-sigCh
 		rd.Close() // unblocks Read with ringbuf.ErrClosed
 	}()
-	log.Printf("stream-probe attached on port %d, writing to %s", cfg.port, cfg.outPath)
 	runLoop(rd, drops, out, cfg.port, monotonicNS)
 	out.Encode(clockRecord(monotonicNS, realtimeNS))
 	return nil
