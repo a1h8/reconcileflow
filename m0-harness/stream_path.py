@@ -58,7 +58,16 @@ Usage: stream_path.py <run-dir> [--window-us US] [--json]
        [--drop PERMILLE --seed SEED | --shift]
        [--attach [--attach-window-us US] [--client-offset-us US]
         [--server-offset-us US] [--server-start start|handlerStart]
-        [--compare <connection-params.toml>]]
+        [--compare <connection-params.toml> [--stress]]
+        [--attach-params <attach-params.toml>]]
+       stream_path.py <run-dir>... --calibrate-attach <attach-params.toml> [--wide-us US]
+
+--calibrate-attach measures the span - probe gaps on whole chains (client
+span, send, linked read, server span with the same truth id: calibration may
+read the truth, linking never does), pools them per agent, regime (calm or
+under load) and side over every cell of the run directories given, and
+writes the accepted windows: p0.1 to p99.9, widened by 20 % of the width each
+way. --attach-params applies them, per cell.
 
 --compare runs 4a' (connection_path's rule) on the same spans and reports
 what each path links that the other does not, and their combination: a link
@@ -69,8 +78,10 @@ different partners has all its links refused.
 from __future__ import annotations
 
 import json
+import math
 import random
 import sys
+import tomllib
 from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -322,10 +333,25 @@ def _attach(spans, events, offset_us, window_us):
     return attached, gaps, none, several
 
 
+def regime(meta: dict) -> str:
+    return "calm" if meta["load"] == 0 else "load"
+
+
+def _windows(attach_params: Path, meta: dict) -> dict[str, tuple[int, int]]:
+    """(offset, window) per side for this cell's agent and regime, from the calibration."""
+    data = tomllib.loads(attach_params.read_text())
+    table = data.get(meta["agent"], {}).get(regime(meta))
+    if not table or not {"client", "server"} <= set(table):
+        raise ValueError(f"{attach_params}: no windows for {meta['agent']}.{regime(meta)}")
+    return {
+        side: (table[side]["offset_us"], table[side]["window_us"]) for side in ("client", "server")
+    }
+
+
 def attach_cell(
     cell_dir: Path,
     window_us: int,
-    attach_window_us: int,
+    attach_window_us: int | None = None,
     client_offset_us: int = 0,
     server_offset_us: int = 0,
     server_start: str = "start",
@@ -333,9 +359,14 @@ def attach_cell(
     seed: int = 0,
     shift: bool = False,
     compare: Path | None = None,
+    attach_params: Path | None = None,
+    stress: bool = False,
 ) -> dict:
     """Client span -> probe send -> (same TCP number) -> probe read -> server span,
-    judged by the spans' own truth ids, which owe nothing to the probe."""
+    judged by the spans' own truth ids, which owe nothing to the probe.
+
+    The attach windows come from the calibration (attach_params, per agent,
+    regime and side) or, for readings, from attach_window_us and the offsets."""
     if server_start not in SERVER_STARTS:
         raise ValueError(f"server_start must be one of {SERVER_STARTS}, got {server_start!r}")
     probe = cell_dir / "probe.jsonl"
@@ -343,6 +374,15 @@ def attach_cell(
     if not clocks:
         return {"error": "no clock record in probe.jsonl: cannot convert to the agents' clock"}
     meta = cell_meta(cell_dir)
+    if attach_params is not None:
+        windows = _windows(attach_params, meta)
+    elif attach_window_us is not None:
+        windows = {
+            "client": (client_offset_us, attach_window_us),
+            "server": (server_offset_us, attach_window_us),
+        }
+    else:
+        raise ValueError("attach windows: give attach_params or attach_window_us")
     rows, _ = connection_records(cell_dir, meta)
     rows = [r for r in rows if (r["point"], r["side"]) in SPAN_SIDES and r["conn"] is not None]
     events, _ = _distinct(probe_events(probe))
@@ -358,12 +398,10 @@ def attach_cell(
         kept = rows
     links = {x.upstream[1]: x.downstream[1] for x in _link_events(events, window_us).links}
 
-    out: dict = {"clock_records": len(clocks), "control": control}
+    out: dict = {"clock_records": len(clocks), "control": control, "windows": windows}
     attached = {}
-    for kind, side, offset in (
-        ("send", "client", client_offset_us),
-        ("recv", "server", server_offset_us),
-    ):
+    for kind, side in (("send", "client"), ("recv", "server")):
+        offset, side_window = windows[side]
         spans = [
             (
                 (r["source"], r["seq"]),
@@ -374,7 +412,7 @@ def attach_cell(
             if SPAN_SIDES[r["point"], r["side"]] == kind
         ]
         evs = [(e.line, e.four, _wall_us(e.ts_ns, clocks)) for e in events if e.kind == kind]
-        attached[kind], gaps, none, several = _attach(spans, evs, offset, attach_window_us)
+        attached[kind], gaps, none, several = _attach(spans, evs, offset, side_window)
         out[f"{side}_spans"] = len(spans)
         out[f"attached_{side}"] = len(attached[kind])
         out[f"no_candidate_{side}"] = none
@@ -398,12 +436,11 @@ def attach_cell(
             "wrong": wrong,
             "both_seen": both,
             "coverage": round(correct / both, 6) if both else 0.0,
-            "attach_window_us": attach_window_us,
             "server_start": server_start,
         }
     )
     if compare is not None:
-        out["compare"] = _compare(probe_links, kept, compare, meta, truth, both)
+        out["compare"] = _compare(probe_links, kept, compare, meta, truth, both, stress)
     return out
 
 
@@ -412,9 +449,10 @@ def _judge(pairs, truth) -> tuple[int, int]:
     return correct, len(pairs) - correct
 
 
-def _links_4a(rows, params_file: Path, meta: dict) -> set:
-    """4a': the same spans linked inside their connection by time alone."""
-    params, receiver_start = params_for(params_file, meta)[WHERE]
+def _links_4a(rows, params_file: Path, meta: dict, stress: bool = False) -> set:
+    """4a': the same spans linked inside their connection by time alone (with
+    stress: the parameters of the highest calibrated concurrency, whatever the load)."""
+    params, receiver_start = params_for(params_file, meta, stress=stress)[WHERE]
     obs = []
     for r in rows:
         handler = receiver_start == "handlerStart" and r["point"] == "fake-upstream"
@@ -435,16 +473,19 @@ def _combine(a: set, b: set) -> set:
     return {(c, s) for c, s in union if partners["client", c] == partners["server", s] == 1}
 
 
-def _compare(probe_links: set, rows, params_file: Path, meta: dict, truth, both: int) -> dict:
+def _compare(
+    probe_links: set, rows, params_file: Path, meta: dict, truth, both: int, stress: bool = False
+) -> dict:
     """Both paths run apart. A link found by one is kept; found by both,
     confirmed; a span the two link to different partners has all its links
     refused: never a choice between the paths."""
-    links_4a = _links_4a(rows, params_file, meta)
+    links_4a = _links_4a(rows, params_file, meta, stress)
     union = links_4a | probe_links
     combined = _combine(links_4a, probe_links)
     a_correct, a_wrong = _judge(links_4a, truth)
     c_correct, c_wrong = _judge(combined, truth)
     return {
+        "stress": stress,
         "4a": {"links": len(links_4a), "correct": a_correct, "wrong": a_wrong},
         "both": len(links_4a & probe_links),
         "only_4a": len(links_4a - probe_links),
@@ -457,6 +498,112 @@ def _compare(probe_links: set, rows, params_file: Path, meta: dict, truth, both:
             "coverage": round(c_correct / both, 6) if both else 0.0,
         },
     }
+
+
+# -- calibration of the attach windows (correlation-phase4-spec.md 8.6.2) ---------
+
+WIDEN = 0.2  # each bound, as a share of its distance to the median (decided 2026-11-09)
+CALIBRATION_RULE = "p0.1 to p99.9, each bound widened by 20 % of its distance to the median"
+
+
+def attach_interval(gaps: list[int]) -> dict:
+    """The accepted interval: p0.1 to p99.9 of the gaps, each bound widened by a
+    fifth of its own distance to the median, rounded outwards; as an offset
+    and a half-width. A tight side stays tight: on the client side the span
+    always starts before the send, and a send before the span is refused."""
+    v = sorted(gaps)
+    lo, hi = v[len(v) // 1000], v[min(len(v) - 1, len(v) * 999 // 1000)]
+    med = v[len(v) // 2]
+    low = math.floor(lo - (med - lo) * WIDEN)
+    high = math.ceil(hi + (hi - med) * WIDEN)
+    return {
+        "p0_1": lo,
+        "median": med,
+        "p99_9": hi,
+        "low_us": low,
+        "high_us": high,
+        "offset_us": (low + high) // 2,
+        "window_us": math.ceil((high - low) / 2),
+        "samples": len(v),
+    }
+
+
+def calibration_gaps(cell_dir: Path, window_us: int, wide_us: int) -> dict:
+    """Span - probe gaps on both sides, measured with the truth (calibration may
+    read it; linking never does): for each truth id, the send nearest in time
+    to its client span and the read nearest to its server span, on their
+    connection and within wide_us, kept only when the probe links that send to
+    that read. A gap so large that a neighbour is nearer is left out, not
+    misread: the cases the one-candidate rule would refuse anyway. Returns the
+    gaps and how many truth ids were left out."""
+    probe = cell_dir / "probe.jsonl"
+    clocks = _clocks(probe)
+    meta = cell_meta(cell_dir)
+    rows, _ = connection_records(cell_dir, meta)
+    rows = [r for r in rows if (r["point"], r["side"]) in SPAN_SIDES and r["conn"] is not None]
+    events, _ = _distinct(probe_events(probe))
+    links = {x.upstream[1]: x.downstream[1] for x in _link_events(events, window_us).links}
+    times: dict[tuple, list[tuple[int, int]]] = {}
+    for e in events:
+        times.setdefault((e.kind, e.four), []).append((_wall_us(e.ts_ns, clocks), e.line))
+    for v in times.values():
+        v.sort()
+
+    def nearest(kind, four, t):
+        v = times.get((kind, four), [])
+        i = bisect_left(v, (t,))
+        near = [v[j] for j in (i - 1, i) if 0 <= j < len(v) and abs(v[j][0] - t) <= wide_us]
+        return min(near, key=lambda x: abs(x[0] - t)) if near else None
+
+    spans: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        spans.setdefault(r["truth"], {})[SPAN_SIDES[r["point"], r["side"]]] = r
+    client_gaps, server_gaps, left_out = [], [], 0
+    for pair in spans.values():
+        if set(pair) != {"send", "recv"}:
+            continue
+        c, s = pair["send"], pair["recv"]
+        send = nearest("send", tuple(c["conn"]), c["start"])
+        read = nearest("recv", tuple(s["conn"]), s["start"])
+        if send is None or read is None or links.get(send[1]) != read[1]:
+            left_out += 1
+            continue
+        client_gaps.append(c["start"] - send[0])
+        server_gaps.append(s["start"] - read[0])
+    return {"client": client_gaps, "server": server_gaps, "left_out": left_out}
+
+
+def calibrate_attach(
+    cells: list[Path], out: Path, wide_us: int, window_us: int = 1_000_000
+) -> dict:
+    """Windows per agent, regime and side, pooled over the cells, written to out."""
+    pooled: dict[tuple[str, str], tuple[list[int], list[int]]] = {}
+    for cell in cells:
+        meta = cell_meta(cell)
+        gaps = calibration_gaps(cell, window_us, wide_us)
+        acc = pooled.setdefault((meta["agent"], regime(meta)), ([], [], [0]))
+        acc[0].extend(gaps["client"])
+        acc[1].extend(gaps["server"])
+        acc[2][0] += gaps["left_out"]
+    result = {}
+    for key, (c, s, left) in sorted(pooled.items()):
+        if c and s:
+            result[key] = {"client": attach_interval(c), "server": attach_interval(s)}
+            for side in ("client", "server"):
+                result[key][side]["left_out"] = left[0]
+    lines = [
+        f'rule = "{CALIBRATION_RULE}"',
+        f"wide_us = {wide_us}",
+        f"cells = [{', '.join(json.dumps(str(c)) for c in cells)}]",
+        "",
+    ]
+    for (agent, reg), sides in result.items():
+        for side, values in sides.items():
+            lines.append(f"[{agent}.{reg}.{side}]")
+            lines += [f"{k} = {v}" for k, v in values.items()]
+            lines.append("")
+    out.write_text("\n".join(lines))
+    return result
 
 
 def _arg(argv: list[str], name: str) -> int | None:
@@ -472,6 +619,20 @@ def main(argv: list[str]) -> None:
         "shift": "--shift" in argv,
     }
     cells = sorted(p.parent for p in run_dir.glob("*/probe.jsonl"))
+    if "--calibrate-attach" in argv:
+        # every run directory given before the options is pooled
+        dirs = [Path(a) for a in argv[1:] if not a.startswith("--") and Path(a).is_dir()]
+        cells = sorted(p.parent for d in dirs for p in d.glob("*/probe.jsonl"))
+        out = Path(argv[argv.index("--calibrate-attach") + 1])
+        result = calibrate_attach(cells, out, wide_us=_arg(argv, "--wide-us") or 50_000)
+        for (agent, reg), sides in result.items():
+            for side, v in sides.items():
+                print(
+                    f"{agent} {reg} {side}: p0.1 {v['p0_1']} p99.9 {v['p99_9']} -> accepted"
+                    f" [{v['low_us']}, {v['high_us']}] µs ({v['samples']} chains)"
+                )
+        print(f"written to {out}")
+        return
     if "--attach" in argv:
         _main_attach(argv, cells, options["window_us"])
         return
@@ -503,7 +664,7 @@ def _main_attach(argv: list[str], cells: list[Path], window_us: int) -> None:
         cell.name: attach_cell(
             cell,
             window_us=window_us,
-            attach_window_us=_arg(argv, "--attach-window-us") or 1_000,
+            attach_window_us=_arg(argv, "--attach-window-us"),
             client_offset_us=_arg(argv, "--client-offset-us") or 0,
             server_offset_us=_arg(argv, "--server-offset-us") or 0,
             server_start=server_start,
@@ -511,6 +672,10 @@ def _main_attach(argv: list[str], cells: list[Path], window_us: int) -> None:
             seed=_arg(argv, "--seed") or 0,
             shift="--shift" in argv,
             compare=Path(argv[argv.index("--compare") + 1]) if "--compare" in argv else None,
+            attach_params=(
+                Path(argv[argv.index("--attach-params") + 1]) if "--attach-params" in argv else None
+            ),
+            stress="--stress" in argv,
         )
         for cell in cells
     }

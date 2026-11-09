@@ -7,6 +7,7 @@ truth. Request k leaves at T0 + k * spacing on connection k % conns.
 
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,8 @@ def write_cell(
     clocks="one",
     handler_gap=0,
     duplicate_span=(),
+    load=0,
+    agent="obi",
 ):
     """``server_delay``: {k: µs} the server side of request k is late by (a
     freeze: span and read alike). ``extra_send``: requests with a second send
@@ -68,7 +71,9 @@ def write_cell(
             {"hops": 1, "fake_upstream_port": FU_PORT, "hop_ports": [HOP_PORT], "agent": "obi"}
         )
     )
-    (tmp_path / "cells.txt").write_text(f"n1: hops=1 agent=obi requests={n} c={conns} load=0\n")
+    (tmp_path / "cells.txt").write_text(
+        f"n1: hops=1 agent={agent} requests={n} c={conns} load={load}\n"
+    )
     half = T0 + (n // 2) * spacing  # µs: where a clock step happens
 
     def mono(t_us):  # the kernel's monotonic clock never jumps
@@ -344,3 +349,77 @@ def test_gaps_are_reported_on_both_tails():
     g = sp._gaps(list(range(-100, 0)))
     assert g == {"min": -100, "p1": -99, "p5": -95, "median": -50, "p95": -5, "p99": -1, "max": -1}
     assert sp._gaps([]) == dict.fromkeys(("min", "p1", "p5", "median", "p95", "p99", "max"))
+
+
+# -- calibration of the attach windows ---------------------------------------------
+
+
+def test_each_bound_is_widened_by_a_fifth_of_its_own_distance_to_the_median():
+    gaps = list(range(-2_000, 0))  # 2,000 values, -2000 .. -1
+    got = sp.attach_interval(gaps)
+    # p0.1 = gaps[2] = -1998, median = gaps[1000] = -1000, p99.9 = gaps[1998] = -2
+    assert (got["p0_1"], got["median"], got["p99_9"]) == (-1998, -1000, -2)
+    assert (got["low_us"], got["high_us"]) == (-2198, 198)  # 998 / 5 each way, rounded outwards
+    assert (got["offset_us"], got["window_us"]) == (-1000, 1198)
+    assert got["samples"] == 2000
+
+
+def test_a_tight_side_stays_tight():
+    # client side: the span always starts before the send, a long tail to the left only
+    gaps = [-60] * 900 + [-100] * 90 + [-30_000] * 10
+    got = sp.attach_interval(gaps)
+    assert got["high_us"] == -60  # p99.9 = median = -60: nothing added on the tight side
+    assert got["low_us"] == -35_988  # -30000 - (30000 - 60) / 5
+
+
+def test_calibration_writes_windows_by_agent_regime_and_side(tmp_path):
+    calm = write_cell(tmp_path / "calm", 50, conns=5)
+    loaded = write_cell(tmp_path / "loaded", 50, conns=5, load=4, server_delay={3: 900})
+    out = tmp_path / "attach-params.toml"
+    sp.calibrate_attach([calm, loaded], out, wide_us=50_000)
+    params = tomllib.loads(out.read_text())
+    assert set(params["obi"]) == {"calm", "load"}
+    calm_client = params["obi"]["calm"]["client"]
+    assert (
+        calm_client["samples"] == 50 and calm_client["p0_1"] == calm_client["p99_9"] == CLIENT_GAP
+    )
+    assert (
+        params["obi"]["load"]["server"]["p99_9"] == SERVER_GAP
+    )  # the delayed span is late with its read
+    assert (
+        params["rule"] == "p0.1 to p99.9, each bound widened by 20 % of its distance to the median"
+    )
+
+
+def test_attach_reads_its_windows_per_cell_from_the_calibration(tmp_path):
+    cell = write_cell(tmp_path, 10, conns=5)
+    params = tmp_path / "attach-params.toml"
+    params.write_text(
+        """rule = "test"
+[obi.calm.client]
+offset_us = 5
+window_us = 1
+[obi.calm.server]
+offset_us = 100
+window_us = 1
+"""
+    )
+    r = sp.attach_cell(cell, window_us=1_000_000, attach_params=params)
+    assert (r["attached_client"], r["attached_server"], r["correct"]) == (10, 0, 0)
+    assert r["windows"] == {"client": (5, 1), "server": (100, 1)}
+
+
+def test_attach_params_without_this_agent_and_regime_are_refused(tmp_path):
+    cell = write_cell(tmp_path, 4, conns=2, load=4)
+    params = tmp_path / "attach-params.toml"
+    params.write_text('rule = "test"\n[obi.calm.client]\noffset_us = 0\nwindow_us = 1\n')
+    with pytest.raises(ValueError, match=r"obi\.load"):
+        sp.attach_cell(cell, window_us=1_000_000, attach_params=params)
+
+
+def test_compare_under_load_uses_4a_prime_in_stress_mode(tmp_path):
+    cell = write_cell(tmp_path, 10, conns=5, load=4)
+    with pytest.raises(ValueError, match="load"):
+        attach(cell, compare=params_file(tmp_path, 5))
+    r = attach(cell, compare=params_file(tmp_path, 5), stress=True)["compare"]
+    assert r["4a"]["correct"] == 10 and r["stress"] is True
