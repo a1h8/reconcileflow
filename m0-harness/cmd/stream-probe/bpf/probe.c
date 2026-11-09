@@ -57,8 +57,11 @@ struct {
 } events SEC(".maps");
 
 // bpf_ringbuf_reserve failures: events that never reached user space.
+// Mappable: the loader maps it while privileged, then reads it as plain
+// memory after giving up every privilege.
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(map_flags, BPF_F_MMAPABLE);
 	__uint(max_entries, 1);
 	__type(key, __u32);
 	__type(value, __u64);

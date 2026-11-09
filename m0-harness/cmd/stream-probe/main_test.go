@@ -372,11 +372,11 @@ func withRunSeams(t *testing.T) (*attached, *uint16) {
 	t.Helper()
 	origs := []func(){}
 	save := func(restore func()) { origs = append(origs, restore) }
-	a, k, r, m, l, n, s, o := removeMemlock, loadCollectionSpec, newCollection, attachKprobe,
-		attachKretprobe, newRingbufReader, setPort, os.Args
+	a, k, r, m, l, n, s, o, d := removeMemlock, loadCollectionSpec, newCollection, attachKprobe,
+		attachKretprobe, newRingbufReader, setPort, os.Args, mapDrops
 	save(func() {
 		removeMemlock, loadCollectionSpec, newCollection, attachKprobe = a, k, r, m
-		attachKretprobe, newRingbufReader, setPort, os.Args = l, n, s, o
+		attachKretprobe, newRingbufReader, setPort, os.Args, mapDrops = l, n, s, o, d
 	})
 	t.Cleanup(func() {
 		for _, f := range origs {
@@ -393,6 +393,7 @@ func withRunSeams(t *testing.T) (*attached, *uint16) {
 	attachKretprobe = at.factory("kretprobe")
 	newRingbufReader = func(*ebpf.Map) (ringbufReaderCloser, error) { return readyReader{}, nil }
 	setPort = func(_ *ebpf.Map, p uint16) error { port = p; return nil }
+	mapDrops = func(*ebpf.Map) (dropCounter, error) { return &fakeDropCounter{vals: []uint64{0}}, nil }
 	os.Args = []string{"stream-probe", "-port=8443", "-out=" + filepath.Join(t.TempDir(), "out.jsonl")}
 	return at, &port
 }
@@ -435,6 +436,9 @@ func TestRun(t *testing.T) {
 			newCollection = func(*ebpf.CollectionSpec) (*ebpf.Collection, error) { return nil, errors.New("EPERM") }
 		},
 		"set the watched port": func() { setPort = func(*ebpf.Map, uint16) error { return errors.New("no map") } },
+		"drops counter": func() {
+			mapDrops = func(*ebpf.Map) (dropCounter, error) { return nil, errors.New("map the drops counter: EPERM") }
+		},
 		"open ring buffer reader": func() {
 			newRingbufReader = func(*ebpf.Map) (ringbufReaderCloser, error) { return nil, errors.New("bad map") }
 		},

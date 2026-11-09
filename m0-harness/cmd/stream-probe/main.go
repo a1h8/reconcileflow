@@ -268,6 +268,7 @@ var (
 		return link.Kretprobe(sym, p, o)
 	}
 	newRingbufReader = func(m *ebpf.Map) (ringbufReaderCloser, error) { return ringbuf.NewReader(m) }
+	mapDrops         = mapCounter
 	setPort          = func(m *ebpf.Map, port uint16) error { return m.Update(uint32(0), port, ebpf.UpdateAny) }
 )
 
@@ -331,19 +332,24 @@ func run() error {
 		return fmt.Errorf("create output: %w", err)
 	}
 	defer f.Close()
+	drops, err := mapDrops(coll.Maps["drops"])
+	if err != nil {
+		return err
+	}
+	// Everything that needs root is done: give it all up before the first event.
+	if err := dropPrivileges(f); err != nil {
+		return fmt.Errorf("drop privileges: %w", err)
+	}
+	log.Printf("privileges dropped: uid %d, no capability", os.Getuid())
 	out := &syncEncoder{enc: json.NewEncoder(f)}
 	out.Encode(clockRecord(monotonicNS, realtimeNS))
 	clockTicker := time.NewTicker(time.Second)
 	defer clockTicker.Stop()
 	go clockLoop(clockTicker.C, out, monotonicNS, realtimeNS)
 
-	var drops dropCounter
-	if m := coll.Maps["drops"]; m != nil {
-		drops = m // never box a nil *ebpf.Map into the interface
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		go dropsLoop(ticker.C, drops, out, monotonicNS)
-	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	go dropsLoop(ticker.C, drops, out, monotonicNS)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
