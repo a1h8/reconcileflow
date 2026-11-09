@@ -61,10 +61,14 @@
 #             written before and after them: bpf-before.json, bpf-after.json
 #             (phase 4, gate G4a). Default 0
 #   PROBE_TCP_SEQ  1: run stream-probe on fake-upstream's port while the cell runs
-#             (probe.jsonl: the TCP sequence number of each message, both ends)
-#             and have fake-upstream log each request's stream position
-#             (-stream-offsets, its truth); needs HOP_UPSTREAM_PROTO=h1, clang,
-#             and root even with NO_AGENT=1 (phase 4, 4c). Default 0
+#             (probe.jsonl: the TCP sequence number of each message, both ends);
+#             needs HOP_UPSTREAM_PROTO=h1, clang, and root even with NO_AGENT=1
+#             (phase 4, 4c). Default 0
+#   FU_STREAM_OFFSETS  1: fake-upstream logs each request's position in the raw
+#             stream (-stream-offsets), the truth the probe's offsets are judged
+#             against; needs HOP_UPSTREAM_PROTO=h1. It hides fake-upstream's
+#             connection from an agent's Go instrumentation (server spans
+#             without address): for cells without an agent. Default 0
 #   BPF_HEADERS  directory with vmlinux.h and libbpf's vendor/ headers for
 #             building the probe (default cmd/strong-tier-probe/bpf; see README)
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
@@ -99,11 +103,12 @@ HOP_UPSTREAM_PROTO=${HOP_UPSTREAM_PROTO:-h2}
 HOP_MAX_IDLE=${HOP_MAX_IDLE:-$CONCURRENCY}
 BPF_STATS=${BPF_STATS:-0}
 PROBE_TCP_SEQ=${PROBE_TCP_SEQ:-0}
+FU_STREAM_OFFSETS=${FU_STREAM_OFFSETS:-0}
 BPF_HEADERS=${BPF_HEADERS:-cmd/strong-tier-probe/bpf}
 
-# fake-upstream logs stream positions only when the probe runs (4c).
+# fake-upstream logs stream positions only when asked (4c, truth for the probe).
 FU_FLAGS=()
-if [[ $PROBE_TCP_SEQ == 1 ]]; then FU_FLAGS=(-stream-offsets); fi
+if [[ $FU_STREAM_OFFSETS == 1 ]]; then FU_FLAGS=(-stream-offsets); fi
 
 # probe_args <cell-dir> <bin-dir> <fake-upstream-port>: stream-probe's flags, in PROBE_ARGS.
 probe_args() {
@@ -131,6 +136,9 @@ build() {
 			die "PROBE_TCP_SEQ=1 needs BPF_HEADERS with vmlinux.h and vendor/ (see README), got '$BPF_HEADERS'"
 		command -v clang >/dev/null || die "PROBE_TCP_SEQ=1 needs clang to build the probe"
 	fi
+	[[ $FU_STREAM_OFFSETS == [01] ]] || die "FU_STREAM_OFFSETS must be 0 or 1"
+	[[ $FU_STREAM_OFFSETS == 0 || $HOP_UPSTREAM_PROTO == h1 ]] ||
+		die "FU_STREAM_OFFSETS=1 needs HOP_UPSTREAM_PROTO=h1 (fake-upstream counts positions in HTTP/1.1 only)"
 	[[ -f go.mod && -d cmd/load-gen ]] || die "run from m0-harness/"
 	local kind
 	for kind in $HOP_KIND $HOP_KINDS; do
@@ -178,7 +186,7 @@ build() {
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY WARM_REQUESTS=$WARM_REQUESTS STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
 			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}" \
-			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO HOP_MAX_IDLE=$HOP_MAX_IDLE BPF_STATS=$BPF_STATS PROBE_TCP_SEQ=$PROBE_TCP_SEQ"
+			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO HOP_MAX_IDLE=$HOP_MAX_IDLE BPF_STATS=$BPF_STATS PROBE_TCP_SEQ=$PROBE_TCP_SEQ FU_STREAM_OFFSETS=$FU_STREAM_OFFSETS"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
@@ -189,7 +197,8 @@ build() {
 		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK"
 		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS"
 		LG_HTTP1="$LG_HTTP1" LG_CONNS="$LG_CONNS" HOP_UPSTREAM_PROTO="$HOP_UPSTREAM_PROTO"
-		HOP_MAX_IDLE="$HOP_MAX_IDLE" BPF_STATS="$BPF_STATS" PROBE_TCP_SEQ="$PROBE_TCP_SEQ")
+		HOP_MAX_IDLE="$HOP_MAX_IDLE" BPF_STATS="$BPF_STATS" PROBE_TCP_SEQ="$PROBE_TCP_SEQ"
+		FU_STREAM_OFFSETS="$FU_STREAM_OFFSETS")
 	if ((NO_AGENT && !PROBE_TCP_SEQ)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -304,11 +313,11 @@ cell() {
 	done
 	local entry=$next
 	local uninstrumented_json; uninstrumented_json=$(printf '%s,' $UNINSTRUMENTED_HOPS)
-	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s", "lg_http1": %d, "lg_conns": %d, "hop_upstream_proto": "%s", "hop_max_idle": %d, "bpf_stats": %d, "probe_tcp_seq": %d}\n' \
+	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s", "lg_http1": %d, "lg_conns": %d, "hop_upstream_proto": "%s", "hop_max_idle": %d, "bpf_stats": %d, "probe_tcp_seq": %d, "fu_stream_offsets": %d}\n' \
 		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" \
 		"$(printf '"%s",' "${kinds[@]}" | sed 's/,$//')" "$FRESH_HOP" "${uninstrumented_json%,}" "$LG_MASK" \
 		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" \
-		"$LG_HTTP1" "$LG_CONNS" "$HOP_UPSTREAM_PROTO" "$HOP_MAX_IDLE" "$BPF_STATS" "$PROBE_TCP_SEQ" >"$dir/cell.json"
+		"$LG_HTTP1" "$LG_CONNS" "$HOP_UPSTREAM_PROTO" "$HOP_MAX_IDLE" "$BPF_STATS" "$PROBE_TCP_SEQ" "$FU_STREAM_OFFSETS" >"$dir/cell.json"
 	local first_instrumented=1
 	while ! instrumented "$first_instrumented" && ((first_instrumented <= n)); do
 		first_instrumented=$((first_instrumented + 1))
@@ -393,7 +402,7 @@ cell() {
 	echo "$name: hops=$n kind=$HOP_KIND strip_hop=$strip_hop baggage=$BAGGAGE agent=$AGENT_KIND" \
 		"propagation=${CONTEXT_PROPAGATION:-agent-default}" \
 		"requests=$REQUESTS c=$CONCURRENCY load=$LOAD_CORES http1=$LG_HTTP1 conns=$LG_CONNS upstream=$HOP_UPSTREAM_PROTO max_idle=$HOP_MAX_IDLE" \
-		"probe_tcp_seq=$PROBE_TCP_SEQ load-gen exit=$lg_exit" |
+		"probe_tcp_seq=$PROBE_TCP_SEQ fu_stream_offsets=$FU_STREAM_OFFSETS load-gen exit=$lg_exit" |
 		tee -a "$RUN_DIR/cells.txt"
 }
 

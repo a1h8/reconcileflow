@@ -94,10 +94,25 @@ def cell_commands(**env):
     )
 
 
-def test_with_the_probe_a_cell_logs_positions_and_runs_the_probe_on_fake_upstream():
+def test_with_the_probe_a_cell_runs_it_on_fake_upstream_and_leaves_the_server_as_is():
+    # fake-upstream counting its stream hides its connection from the agent's Go
+    # instrumentation (seen 2026-11-09: server spans with no address): apart.
     got = cell_commands(PROBE_TCP_SEQ="1")
-    assert got["fu"] == "-stream-offsets"
+    assert got["fu"] == ""
     assert got["probe"] == "-obj /run/bin/probe.o -port 18443 -out /run/n1/probe.jsonl"
+
+
+def test_the_servers_stream_positions_are_a_setting_of_their_own():
+    assert cell_commands(PROBE_TCP_SEQ="1", FU_STREAM_OFFSETS="1")["fu"] == "-stream-offsets"
+
+
+def test_stream_positions_setting_must_be_0_or_1(tmp_path):
+    assert "FU_STREAM_OFFSETS must be 0 or 1" in phase1(tmp_path, FU_STREAM_OFFSETS="2")
+
+
+def test_stream_positions_need_http1_towards_fake_upstream(tmp_path):
+    err = phase1(tmp_path, FU_STREAM_OFFSETS="1", HOP_UPSTREAM_PROTO="h2")
+    assert "FU_STREAM_OFFSETS=1 needs HOP_UPSTREAM_PROTO=h1" in err
 
 
 def test_without_the_probe_a_cell_is_unchanged():
