@@ -57,7 +57,13 @@ apart.
 Usage: stream_path.py <run-dir> [--window-us US] [--json]
        [--drop PERMILLE --seed SEED | --shift]
        [--attach [--attach-window-us US] [--client-offset-us US]
-        [--server-offset-us US] [--server-start start|handlerStart]]
+        [--server-offset-us US] [--server-start start|handlerStart]
+        [--compare <connection-params.toml>]]
+
+--compare runs 4a' (connection_path's rule) on the same spans and reports
+what each path links that the other does not, and their combination: a link
+found by either is kept, by both confirmed, and a span the two link to
+different partners has all its links refused.
 """
 
 from __future__ import annotations
@@ -73,7 +79,7 @@ from pathlib import Path
 
 from connection_path import _conn_key
 from connection_path import records as connection_records
-from timing_path import _jsonl, cell_meta, topology_for
+from timing_path import _jsonl, cell_meta, params_for, topology_for
 
 from reconcileflow.correlation.assignment import Status
 from reconcileflow.correlation.connection import Conn, Connected, connection_links
@@ -319,6 +325,7 @@ def attach_cell(
     drop: int | None = None,
     seed: int = 0,
     shift: bool = False,
+    compare: Path | None = None,
 ) -> dict:
     """Client span -> probe send -> (same TCP number) -> probe read -> server span,
     judged by the spans' own truth ids, which owe nothing to the probe."""
@@ -369,15 +376,12 @@ def attach_cell(
 
     truth = {(r["source"], r["seq"]): r["truth"] for r in rows}
     server_of_read = {line: span for span, line in attached["recv"].items()}
-    correct = wrong = 0
+    probe_links = set()
     for client, send in attached["send"].items():
         server = server_of_read.get(links.get(send))
-        if server is None:
-            continue
-        if truth[client] == truth[server]:
-            correct += 1
-        else:
-            wrong += 1
+        if server is not None:
+            probe_links.add((client, server))
+    correct, wrong = _judge(probe_links, truth)
     ups = {r["truth"] for r in rows if SPAN_SIDES[r["point"], r["side"]] == "send"}
     both = len(ups & {r["truth"] for r in rows if SPAN_SIDES[r["point"], r["side"]] == "recv"})
     out.update(
@@ -391,7 +395,61 @@ def attach_cell(
             "server_start": server_start,
         }
     )
+    if compare is not None:
+        out["compare"] = _compare(probe_links, kept, compare, meta, truth, both)
     return out
+
+
+def _judge(pairs, truth) -> tuple[int, int]:
+    correct = sum(1 for c, s in pairs if truth[c] == truth[s])
+    return correct, len(pairs) - correct
+
+
+def _links_4a(rows, params_file: Path, meta: dict) -> set:
+    """4a': the same spans linked inside their connection by time alone."""
+    params, receiver_start = params_for(params_file, meta)[WHERE]
+    obs = []
+    for r in rows:
+        handler = receiver_start == "handlerStart" and r["point"] == "fake-upstream"
+        start = r["handler"] if handler else r["start"]
+        timed = Timed(r["source"], r["seq"], r["point"], r["side"], start, r["end"])
+        obs.append(Connected(timed, Conn(*r["conn"])))
+    result = connection_links(topology_for(meta["hops"]), obs, {WHERE: params}, key="connection")
+    return {(x.upstream, x.downstream) for x in result.links}
+
+
+def _combine(a: set, b: set) -> set:
+    """Links of either path, less every link of a span given two partners."""
+    union = a | b
+    partners = Counter()
+    for c, s in union:
+        partners["client", c] += 1
+        partners["server", s] += 1
+    return {(c, s) for c, s in union if partners["client", c] == partners["server", s] == 1}
+
+
+def _compare(probe_links: set, rows, params_file: Path, meta: dict, truth, both: int) -> dict:
+    """Both paths run apart. A link found by one is kept; found by both,
+    confirmed; a span the two link to different partners has all its links
+    refused: never a choice between the paths."""
+    links_4a = _links_4a(rows, params_file, meta)
+    union = links_4a | probe_links
+    combined = _combine(links_4a, probe_links)
+    a_correct, a_wrong = _judge(links_4a, truth)
+    c_correct, c_wrong = _judge(combined, truth)
+    return {
+        "4a": {"links": len(links_4a), "correct": a_correct, "wrong": a_wrong},
+        "both": len(links_4a & probe_links),
+        "only_4a": len(links_4a - probe_links),
+        "only_4c": len(probe_links - links_4a),
+        "conflicts": len(union - combined),
+        "combined": {
+            "links": len(combined),
+            "correct": c_correct,
+            "wrong": c_wrong,
+            "coverage": round(c_correct / both, 6) if both else 0.0,
+        },
+    }
 
 
 def _arg(argv: list[str], name: str) -> int | None:
@@ -445,6 +503,7 @@ def _main_attach(argv: list[str], cells: list[Path], window_us: int) -> None:
             drop=_arg(argv, "--drop"),
             seed=_arg(argv, "--seed") or 0,
             shift="--shift" in argv,
+            compare=Path(argv[argv.index("--compare") + 1]) if "--compare" in argv else None,
         )
         for cell in cells
     }
@@ -467,6 +526,18 @@ def _main_attach(argv: list[str], cells: list[Path], window_us: int) -> None:
             f" ambiguous {c['ambiguous_client']}/{c['ambiguous_server']});"
             f" gap µs client {c['gap_client_us']} server {c['gap_server_us']}"
         )
+        if "compare" in c:
+            k = c["compare"]
+            print(
+                f"   with 4a': both {k['both']} only 4a' {k['only_4a']} only probe {k['only_4c']}"
+                f" conflicts {k['conflicts']}; 4a' alone: correct {k['4a']['correct']}"
+                f" wrong {k['4a']['wrong']}"
+            )
+            m = k["combined"]
+            print(
+                f"   combined: links {m['links']} correct {m['correct']} wrong {m['wrong']}"
+                f" coverage {100 * m['coverage']:.2f}%"
+            )
         wrong += c["wrong"]
     print(f"wrong span links in the run: {wrong}")
 

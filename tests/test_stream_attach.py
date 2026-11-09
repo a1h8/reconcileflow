@@ -258,3 +258,82 @@ def test_main_with_attach_prints_the_span_links(tmp_path, capsys):
     assert "n1 spans: links 6 correct 6 wrong 0 both_seen 6 coverage 100.00%" in out
     assert "attached client 6 server 6" in out
     assert "wrong span links in the run: 0" in out
+
+
+# -- with 4a' ---------------------------------------------------------------------
+
+
+def params_file(tmp_path, concurrency, receiver_start="start", offset_us=100):
+    """4a' parameters: server start offset_us after the client's, 50 µs either way."""
+    path = tmp_path / f"params-{receiver_start}-{offset_us}.toml"
+    path.write_text(
+        f"""[obi.c{concurrency}."hop-1 -> fake-upstream"]
+receiver_start = "{receiver_start}"
+margin_us = 0
+local_span_us = 20000
+signals = [{{ name = "start", offset_us = {offset_us}, window_us = 50 }}]
+"""
+    )
+    return path
+
+
+def test_compared_with_4a_prime_the_probe_links_what_a_freeze_pushed_out(tmp_path):
+    cell = write_cell(tmp_path, 10, conns=5, server_delay={3: 41_000, 7: 32_000})
+    r = attach(cell, compare=params_file(tmp_path, 5))["compare"]
+    assert r["4a"] == {"links": 8, "correct": 8, "wrong": 0}
+    assert (r["both"], r["only_4a"], r["only_4c"], r["conflicts"]) == (8, 0, 2, 0)
+    assert r["combined"] == {"links": 10, "correct": 10, "wrong": 0, "coverage": 1.0}
+
+
+def test_links_the_two_paths_disagree_on_are_all_refused(tmp_path):
+    cell = write_cell(tmp_path, 40, conns=4)
+    r = attach(cell, compare=params_file(tmp_path, 4), shift=True)
+    assert r["wrong"] > 0  # K5 on the probe path alone
+    c = r["compare"]
+    assert c["conflicts"] > 0
+    assert c["combined"]["wrong"] == 0  # every wrong probe link contradicts a 4a' link
+    assert (
+        c["combined"]["correct"] < 40
+    )  # and takes the right one down with it: refused, not chosen
+
+
+def test_main_prints_the_comparison(tmp_path, capsys):
+    write_cell(tmp_path, 6, conns=3)
+    params = params_file(tmp_path, 3)
+    sp.main(
+        [
+            "stream_path.py",
+            str(tmp_path),
+            "--attach",
+            "--attach-window-us",
+            "20",
+            "--compare",
+            str(params),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "with 4a': both 6 only 4a' 0 only probe 0 conflicts 0" in out
+    assert "combined: links 6 correct 6 wrong 0 coverage 100.00%" in out
+
+
+def test_4a_prime_uses_the_receiver_start_it_was_calibrated_on(tmp_path):
+    cell = write_cell(tmp_path, 6, conns=3, handler_gap=200)
+    on_start = attach(cell, compare=params_file(tmp_path, 3, "start", 300))["compare"]["4a"]
+    on_handler = attach(cell, compare=params_file(tmp_path, 3, "handlerStart", 300))["compare"][
+        "4a"
+    ]
+    assert (on_start["correct"], on_handler["correct"]) == (0, 6)
+
+
+@pytest.mark.parametrize(
+    "a, b, kept",
+    [
+        ({("c1", "s1")}, {("c1", "s1")}, {("c1", "s1")}),  # confirmed
+        ({("c1", "s1")}, set(), {("c1", "s1")}),  # one path only: kept
+        ({("c1", "s1")}, {("c1", "s2")}, set()),  # one client, two servers
+        ({("c1", "s1")}, {("c2", "s1")}, set()),  # two clients, one server
+        ({("c1", "s1"), ("c3", "s3")}, {("c2", "s1")}, {("c3", "s3")}),  # others untouched
+    ],
+)
+def test_the_combination_refuses_every_link_of_a_span_given_two_partners(a, b, kept):
+    assert sp._combine(a, b) == kept
