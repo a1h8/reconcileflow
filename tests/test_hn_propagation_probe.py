@@ -77,7 +77,8 @@ def cell_commands(**env):
     script = (
         f"source {SCRIPT}; "
         'echo "fu: ${FU_FLAGS[*]}"; '
-        'probe_args /run/n1 /run/bin 18443; echo "probe: ${PROBE_ARGS[*]}"'
+        'probe_args /run/n1 /run/bin 18443; echo "probe: ${PROBE_ARGS[*]}"; '
+        'decode_args /run/n1 18443; echo "decode: ${DECODE_ARGS[*]}"'
     )
     result = subprocess.run(
         ["bash", "-c", script],
@@ -99,7 +100,9 @@ def test_with_the_probe_a_cell_runs_it_on_fake_upstream_and_leaves_the_server_as
     # instrumentation (seen 2026-11-09: server spans with no address): apart.
     got = cell_commands(PROBE_TCP_SEQ="1")
     assert got["fu"] == ""
-    assert got["probe"] == "-obj /run/bin/probe.o -port 18443 -out /run/n1/probe.jsonl"
+    # the probe only copies into its journal under load; the cell decodes it afterwards
+    assert got["probe"] == "-obj /run/bin/probe.o -port 18443 -journal /run/n1/journal"
+    assert got["decode"] == "-decode -journal /run/n1/journal -port 18443 -out /run/n1/probe.jsonl"
 
 
 def test_the_servers_stream_positions_are_a_setting_of_their_own():

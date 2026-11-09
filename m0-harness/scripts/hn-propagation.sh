@@ -61,7 +61,8 @@
 #             written before and after them: bpf-before.json, bpf-after.json
 #             (phase 4, gate G4a). Default 0
 #   PROBE_TCP_SEQ  1: run stream-probe on fake-upstream's port while the cell runs
-#             (probe.jsonl: the TCP sequence number of each message, both ends);
+#             (journal/, decoded into probe.jsonl once it stops: the TCP sequence
+#             number of each message, both ends);
 #             needs HOP_UPSTREAM_PROTO=h1, clang, and root even with NO_AGENT=1
 #             (phase 4, 4c). Default 0
 #   FU_STREAM_OFFSETS  1: fake-upstream logs each request's position in the raw
@@ -111,8 +112,15 @@ FU_FLAGS=()
 if [[ $FU_STREAM_OFFSETS == 1 ]]; then FU_FLAGS=(-stream-offsets); fi
 
 # probe_args <cell-dir> <bin-dir> <fake-upstream-port>: stream-probe's flags, in PROBE_ARGS.
+# Under load the probe only copies into its journal (raw segments); decoding
+# is done once it has stopped (decode_args), so writing never slows reading.
 probe_args() {
-	PROBE_ARGS=(-obj "$2/probe.o" -port "$3" -out "$1/probe.jsonl")
+	PROBE_ARGS=(-obj "$2/probe.o" -port "$3" -journal "$1/journal")
+}
+
+# decode_args <cell-dir> <fake-upstream-port>: the journal into probe.jsonl, in DECODE_ARGS.
+decode_args() {
+	DECODE_ARGS=(-decode -journal "$1/journal" -port "$2" -out "$1/probe.jsonl")
 }
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -398,7 +406,12 @@ cell() {
 	if [[ -n $agent ]]; then kill -TERM "$agent"; wait "$agent" || true; fi
 	kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null || true
 	# The probe stops last: it sees the connections close, then writes its last drop count.
-	if [[ -n $probe ]]; then kill -INT "$probe"; wait "$probe" || true; fi
+	if [[ -n $probe ]]; then
+		kill -INT "$probe"
+		wait "$probe" || true
+		decode_args "$dir" "$fu_port"
+		"$bin/stream-probe" "${DECODE_ARGS[@]}" 2>>"$dir/probe.log" || die "$name: could not decode the probe's journal"
+	fi
 	echo "$name: hops=$n kind=$HOP_KIND strip_hop=$strip_hop baggage=$BAGGAGE agent=$AGENT_KIND" \
 		"propagation=${CONTEXT_PROPAGATION:-agent-default}" \
 		"requests=$REQUESTS c=$CONCURRENCY load=$LOAD_CORES http1=$LG_HTTP1 conns=$LG_CONNS upstream=$HOP_UPSTREAM_PROTO max_idle=$HOP_MAX_IDLE" \
