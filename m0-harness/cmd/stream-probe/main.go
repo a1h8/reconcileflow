@@ -241,6 +241,8 @@ type config struct {
 	segmentAge   time.Duration
 	batchRecords int
 	queueBatches int
+	decode       bool // decode the closed segments of journal into outPath, no kernel
+	workers      int
 }
 
 func parseFlags(args []string) (config, error) {
@@ -255,18 +257,21 @@ func parseFlags(args []string) (config, error) {
 	segmentAge := fs.Duration("segment-age", time.Second, "with -journal: close a segment at this age")
 	batch := fs.Int("batch", 4096, "with -journal: records per batch handed to the writer")
 	queue := fs.Int("queue-batches", 256, "with -journal: batches the queue holds before the reader waits")
+	decode := fs.Bool("decode", false, "decode the closed segments of -journal into -out and exit (no kernel, no root)")
+	workers := fs.Int("workers", 4, "with -decode: segments decoded at once")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
 	if *port < 1 || *port > 65535 {
 		return config{}, fmt.Errorf("-port must be in 1..65535, got %d", *port)
 	}
-	if *segmentBytes < journalRecordSize || *segmentAge <= 0 || *batch < 1 || *queue < 1 {
-		return config{}, errors.New("-segment-bytes, -segment-age, -batch and -queue-batches must be positive")
+	if *segmentBytes < journalRecordSize || *segmentAge <= 0 || *batch < 1 || *queue < 1 || *workers < 1 {
+		return config{}, errors.New("-segment-bytes, -segment-age, -batch, -queue-batches and -workers must be positive")
 	}
 	return config{
 		objPath: *objPath, outPath: *outPath, port: uint16(*port), journal: *journal,
 		segmentBytes: *segmentBytes, segmentAge: *segmentAge, batchRecords: *batch, queueBatches: *queue,
+		decode: *decode, workers: *workers,
 	}, nil
 }
 
@@ -313,6 +318,9 @@ func run() error {
 	cfg, err := parseFlags(os.Args[1:])
 	if err != nil {
 		return fmt.Errorf("flags: %w", err)
+	}
+	if cfg.decode {
+		return runDecode(cfg)
 	}
 	if err := removeMemlock(); err != nil {
 		return fmt.Errorf("remove memlock rlimit: %w", err)

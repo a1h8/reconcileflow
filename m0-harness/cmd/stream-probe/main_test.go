@@ -330,7 +330,7 @@ func TestRunLoop(t *testing.T) {
 func TestParseFlags(t *testing.T) {
 	cfg, err := parseFlags([]string{"-port=8443", "-out=x.jsonl", "-obj=p.o"})
 	want := config{objPath: "p.o", outPath: "x.jsonl", port: 8443,
-		segmentBytes: 64 << 20, segmentAge: time.Second, batchRecords: 4096, queueBatches: 256}
+		segmentBytes: 64 << 20, segmentAge: time.Second, batchRecords: 4096, queueBatches: 256, workers: 4}
 	if err != nil || cfg != want {
 		t.Errorf("parseFlags() = %+v, %v", cfg, err)
 	}
