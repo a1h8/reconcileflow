@@ -337,3 +337,10 @@ def test_4a_prime_uses_the_receiver_start_it_was_calibrated_on(tmp_path):
 )
 def test_the_combination_refuses_every_link_of_a_span_given_two_partners(a, b, kept):
     assert sp._combine(a, b) == kept
+
+
+def test_gaps_are_reported_on_both_tails():
+    # the client side reads leftwards (span before the send): its low tail matters
+    g = sp._gaps(list(range(-100, 0)))
+    assert g == {"min": -100, "p1": -99, "p5": -95, "median": -50, "p95": -5, "p99": -1, "max": -1}
+    assert sp._gaps([]) == dict.fromkeys(("min", "p1", "p5", "median", "p95", "p99", "max"))

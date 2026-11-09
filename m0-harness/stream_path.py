@@ -279,11 +279,18 @@ def _wall_us(ts_ns: int, clocks: list[tuple[int, int]]) -> int:
     return (near[1] + ts_ns - near[0]) // 1000
 
 
+GAP_POINTS = (("min", 0), ("p1", 1), ("p5", 5), ("median", 50), ("p95", 95), ("p99", 99))
+
+
 def _gaps(values: list[int]) -> dict:
+    """Both tails: on the client side the span starts before the send, so the
+    low tail is the one that leaves spans out."""
     if not values:
-        return {"median": None, "p99": None, "max": None}
+        return dict.fromkeys([name for name, _ in GAP_POINTS] + ["max"])
     v = sorted(values)
-    return {"median": v[len(v) // 2], "p99": v[min(len(v) - 1, len(v) * 99 // 100)], "max": v[-1]}
+    out = {name: v[min(len(v) - 1, len(v) * q // 100)] for name, q in GAP_POINTS}
+    out["max"] = v[-1]
+    return out
 
 
 def _attach(spans, events, offset_us, window_us):
