@@ -59,7 +59,7 @@ Usage: stream_path.py <run-dir> [--window-us US] [--json]
        [--attach [--attach-window-us US] [--client-offset-us US]
         [--server-offset-us US] [--server-start start|handlerStart]
         [--compare <connection-params.toml> [--stress]]
-        [--attach-params <attach-params.toml>]]
+        [--attach-params <attach-params.toml>] [--order]]
        stream_path.py <run-dir>... --calibrate-attach <attach-params.toml> [--wide-us US]
 
 --calibrate-attach measures the span - probe gaps on whole chains (client
@@ -67,7 +67,14 @@ span, send, linked read, server span with the same truth id: calibration may
 read the truth, linking never does), pools them per agent, regime (calm or
 under load) and side over every cell of the run directories given, and
 writes the accepted windows: p0.1 to p99.9, widened by 20 % of the width each
-way. --attach-params applies them, per cell.
+way, one pass per level (p25-p75, p5-p95, p1-p99, p0.1-p99.9), narrow first.
+--attach-params applies them, per cell, each pass among the spans still
+unattached and the events still unclaimed; only messages seen at both ends
+are candidates. --order then pairs, between two attached requests of a
+connection, the leftovers in order, when there are as many spans as events
+and their starts and ends are in the same order. Where the probe declared a
+loss, only the narrow pass applies (K2b declares its probe losses the same
+way).
 
 --compare runs 4a' (connection_path's rule) on the same spans and reports
 what each path links that the other does not, and their combination: a link
@@ -304,9 +311,10 @@ def _gaps(values: list[int]) -> dict:
     return out
 
 
-def _attach(spans, events, offset_us, window_us):
-    """Each span to the one probe event of its connection inside the window,
-    when that event has no other span inside it either; else no attachment.
+def _attach(spans, events, low_us, high_us):
+    """Each span to the one probe event of its connection whose gap (span time
+    - event time) lies in [low_us, high_us], when that event has no other span
+    in range either; else no attachment.
 
     spans: (identity, four, time µs); events: (line, four, time µs).
     Returns {span identity: event line}, the gaps of the attached pairs, and
@@ -314,11 +322,9 @@ def _attach(spans, events, offset_us, window_us):
     by_four: dict[tuple, list] = {}
     for e in events:
         by_four.setdefault(e[1], []).append(e)
-
-    def fits(span_t, event_t):
-        return abs(span_t - event_t - offset_us) <= window_us
-
-    candidates = {s[0]: [e for e in by_four.get(s[1], []) if fits(s[2], e[2])] for s in spans}
+    candidates = {
+        s[0]: [e for e in by_four.get(s[1], []) if low_us <= s[2] - e[2] <= high_us] for s in spans
+    }
     claims = Counter(e[0] for found in candidates.values() for e in found)
     attached, gaps, none, several = {}, [], 0, 0
     for s in spans:
@@ -333,19 +339,99 @@ def _attach(spans, events, offset_us, window_us):
     return attached, gaps, none, several
 
 
+def _lossy(probe: Path, clocks, dropped_ns=()) -> list[tuple[float, float]]:
+    """Wall-clock intervals (µs) over which the probe declared a loss: between
+    two drop records whose count grew (before the first one if it is not 0).
+    dropped_ns: events a K2b control removed, declared like the probe would,
+    over their second."""
+    marks = sorted(
+        (r["timestamp_ns"], r["drops"]) for r in _jsonl(probe) if r.get("kind") == "drops"
+    )
+    out = []
+    previous_ts, previous_count = None, 0
+    for ts, count in marks:
+        if count > previous_count:
+            low = -math.inf if previous_ts is None else _wall_us(previous_ts, clocks)
+            out.append((low, _wall_us(ts, clocks)))
+        previous_ts, previous_count = ts, count
+    for ts in sorted(set(t // 10**9 for t in dropped_ns)):
+        out.append((_wall_us(ts * 10**9, clocks), _wall_us((ts + 1) * 10**9, clocks)))
+    return out
+
+
+def _touches(lossy, low: float, high: float) -> bool:
+    return any(a <= high and low <= b for a, b in lossy)
+
+
+def _attach_passes(spans, events, side_passes, lossy, end_of, order):
+    """Successive passes, narrow to wide, each among the spans still unattached
+    and the events still unclaimed; then, if order, the leftovers between two
+    anchors of a connection paired in order. Only the first pass applies where
+    the probe declared a loss: elsewhere a probe event cannot be missing, so a
+    wider window cannot pair a span with a neighbour's event.
+
+    Returns attached, gaps, no candidate, ambiguous, ordered."""
+    lo_all = min(lo for lo, _ in side_passes)
+    hi_all = max(hi for _, hi in side_passes)
+
+    def clear(s):
+        return not _touches(lossy, s[2] - hi_all, s[2] - lo_all)
+
+    done: dict = {}
+    gaps: list[int] = []
+    for i, (low, high) in enumerate(side_passes):
+        taken = set(done.values())
+        left = [s for s in spans if s[0] not in done and (i == 0 or clear(s))]
+        found, g, _, _ = _attach(left, [e for e in events if e[0] not in taken], low, high)
+        done.update(found)
+        gaps += g
+    ordered = 0
+    if order:
+        when = {e[0]: e[2] for e in events}
+        by_four: dict[tuple, tuple[list, list]] = {}
+        for s in spans:
+            by_four.setdefault(s[1], ([], []))[0].append(s)
+        for e in events:
+            by_four.setdefault(e[1], ([], []))[1].append(e)
+        for four_spans, four_events in by_four.values():
+            taken = set(done.values())
+            anchors = sorted((when[done[s[0]]], s[2]) for s in four_spans if s[0] in done)
+            for (e0, s0), (e1, s1) in pairwise(anchors):
+                if s1 <= s0 or _touches(lossy, e0, e1):
+                    continue
+                left = sorted(
+                    (s for s in four_spans if s[0] not in done and s0 < s[2] < s1 and clear(s)),
+                    key=lambda s: s[2],
+                )
+                free = sorted(
+                    (e for e in four_events if e[0] not in taken and e0 < e[2] < e1),
+                    key=lambda e: e[2],
+                )
+                if not left or len(left) != len(free):
+                    continue  # a span or an event is missing: no order
+                if sorted(left, key=lambda s: end_of[s[0]]) != left:
+                    continue  # ends in another order: handed out of order, no order
+                for s, e in zip(left, free, strict=True):
+                    done[s[0]] = e[0]
+                    gaps.append(s[2] - e[2])
+                    ordered += 1
+    taken = set(done.values())
+    rest = [s for s in spans if s[0] not in done]
+    _, _, none, several = _attach(rest, [e for e in events if e[0] not in taken], lo_all, hi_all)
+    return done, gaps, none, several, ordered
+
+
 def regime(meta: dict) -> str:
     return "calm" if meta["load"] == 0 else "load"
 
 
-def _windows(attach_params: Path, meta: dict) -> dict[str, tuple[int, int]]:
-    """(offset, window) per side for this cell's agent and regime, from the calibration."""
+def _windows(attach_params: Path, meta: dict) -> dict[str, list[tuple[int, int]]]:
+    """The passes (low, high) per side for this cell's agent and regime, from the calibration."""
     data = tomllib.loads(attach_params.read_text())
     table = data.get(meta["agent"], {}).get(regime(meta))
     if not table or not {"client", "server"} <= set(table):
         raise ValueError(f"{attach_params}: no windows for {meta['agent']}.{regime(meta)}")
-    return {
-        side: (table[side]["offset_us"], table[side]["window_us"]) for side in ("client", "server")
-    }
+    return {side: [tuple(p) for p in table[side]["passes"]] for side in ("client", "server")}
 
 
 def attach_cell(
@@ -361,12 +447,16 @@ def attach_cell(
     compare: Path | None = None,
     attach_params: Path | None = None,
     stress: bool = False,
+    passes: dict | None = None,
+    order: bool = False,
 ) -> dict:
     """Client span -> probe send -> (same TCP number) -> probe read -> server span,
     judged by the spans' own truth ids, which owe nothing to the probe.
 
-    The attach windows come from the calibration (attach_params, per agent,
-    regime and side) or, for readings, from attach_window_us and the offsets."""
+    The attach passes come from the calibration (attach_params, per agent,
+    regime and side), are given (passes), or, for readings, are one window
+    (attach_window_us around the offsets). Only messages seen at both ends are
+    candidates: a piece of a write cannot lead to a link."""
     if server_start not in SERVER_STARTS:
         raise ValueError(f"server_start must be one of {SERVER_STARTS}, got {server_start!r}")
     probe = cell_dir / "probe.jsonl"
@@ -376,17 +466,22 @@ def attach_cell(
     meta = cell_meta(cell_dir)
     if attach_params is not None:
         windows = _windows(attach_params, meta)
+    elif passes is not None:
+        windows = {side: [tuple(p) for p in passes[side]] for side in ("client", "server")}
     elif attach_window_us is not None:
         windows = {
-            "client": (client_offset_us, attach_window_us),
-            "server": (server_offset_us, attach_window_us),
+            side: [(offset - attach_window_us, offset + attach_window_us)]
+            for side, offset in (("client", client_offset_us), ("server", server_offset_us))
         }
     else:
-        raise ValueError("attach windows: give attach_params or attach_window_us")
+        raise ValueError("attach windows: give attach_params, passes or attach_window_us")
     rows, _ = connection_records(cell_dir, meta)
     rows = [r for r in rows if (r["point"], r["side"]) in SPAN_SIDES and r["conn"] is not None]
     events, _ = _distinct(probe_events(probe))
+    before = events
     events, control = _control(events, drop, seed, shift)
+    kept_lines = {e.line for e in events}
+    lossy = _lossy(probe, clocks, [e.ts_ns for e in before if e.line not in kept_lines])
     if drop is not None:  # K2b: the spans lose their share too, each side drawn apart
         rng = random.Random(seed + 1)
         gone = set()
@@ -397,11 +492,17 @@ def attach_cell(
     else:
         kept = rows
     links = {x.upstream[1]: x.downstream[1] for x in _link_events(events, window_us).links}
+    linked = set(links) | set(links.values())  # messages seen at both ends
+    end_of = {(r["source"], r["seq"]): r["end"] for r in kept}
 
-    out: dict = {"clock_records": len(clocks), "control": control, "windows": windows}
+    out: dict = {
+        "clock_records": len(clocks),
+        "control": control,
+        "windows": windows,
+        "lossy_intervals": len(lossy),
+    }
     attached = {}
     for kind, side in (("send", "client"), ("recv", "server")):
-        offset, side_window = windows[side]
         spans = [
             (
                 (r["source"], r["seq"]),
@@ -411,8 +512,15 @@ def attach_cell(
             for r in kept
             if SPAN_SIDES[r["point"], r["side"]] == kind
         ]
-        evs = [(e.line, e.four, _wall_us(e.ts_ns, clocks)) for e in events if e.kind == kind]
-        attached[kind], gaps, none, several = _attach(spans, evs, offset, side_window)
+        evs = [
+            (e.line, e.four, _wall_us(e.ts_ns, clocks))
+            for e in events
+            if e.kind == kind and e.line in linked
+        ]
+        attached[kind], gaps, none, several, ordered = _attach_passes(
+            spans, evs, windows[side], lossy, end_of, order
+        )
+        out[f"ordered_{side}"] = ordered
         out[f"{side}_spans"] = len(spans)
         out[f"attached_{side}"] = len(attached[kind])
         out[f"no_candidate_{side}"] = none
@@ -503,16 +611,21 @@ def _compare(
 # -- calibration of the attach windows (correlation-phase4-spec.md 8.6.2) ---------
 
 WIDEN = 0.2  # each bound, as a share of its distance to the median (decided 2026-11-09)
-CALIBRATION_RULE = "p0.1 to p99.9, each bound widened by 20 % of its distance to the median"
+LEVELS = ((250, 750), (50, 950), (10, 990), (1, 999))  # permille: one pass each, narrow first
+CALIBRATION_RULE = (
+    "one pass per level p25-p75, p5-p95, p1-p99, p0.1-p99.9;"
+    " each bound widened by 20 % of its distance to the median"
+)
 
 
-def attach_interval(gaps: list[int]) -> dict:
-    """The accepted interval: p0.1 to p99.9 of the gaps, each bound widened by a
-    fifth of its own distance to the median, rounded outwards; as an offset
-    and a half-width. A tight side stays tight: on the client side the span
-    always starts before the send, and a send before the span is refused."""
+def attach_interval(gaps: list[int], lo_q: int = 1, hi_q: int = 999) -> dict:
+    """The accepted interval between two quantiles (permille) of the gaps, each
+    bound widened by a fifth of its own distance to the median, rounded
+    outwards; also as an offset and a half-width. A tight side stays tight:
+    on the client side the span always starts before the send, and a send
+    before the span is refused."""
     v = sorted(gaps)
-    lo, hi = v[len(v) // 1000], v[min(len(v) - 1, len(v) * 999 // 1000)]
+    lo, hi = v[len(v) * lo_q // 1000], v[min(len(v) - 1, len(v) * hi_q // 1000)]
     med = v[len(v) // 2]
     low = math.floor(lo - (med - lo) * WIDEN)
     high = math.ceil(hi + (hi - med) * WIDEN)
@@ -526,6 +639,10 @@ def attach_interval(gaps: list[int]) -> dict:
         "window_us": math.ceil((high - low) / 2),
         "samples": len(v),
     }
+
+
+def _level_name(q: int) -> str:
+    return f"p{q / 10:g}"
 
 
 def calibration_gaps(cell_dir: Path, window_us: int, wide_us: int) -> dict:
@@ -588,11 +705,25 @@ def calibrate_attach(
     result = {}
     for key, (c, s, left) in sorted(pooled.items()):
         if c and s:
-            result[key] = {"client": attach_interval(c), "server": attach_interval(s)}
-            for side in ("client", "server"):
-                result[key][side]["left_out"] = left[0]
+            result[key] = {}
+            for side, gaps in (("client", c), ("server", s)):
+                widest = attach_interval(gaps)
+                result[key][side] = {
+                    "p0_1": widest["p0_1"],
+                    "median": widest["median"],
+                    "p99_9": widest["p99_9"],
+                    "samples": widest["samples"],
+                    "left_out": left[0],
+                    "passes": [
+                        [i["low_us"], i["high_us"]]
+                        for i in (attach_interval(gaps, lo, hi) for lo, hi in LEVELS)
+                    ],
+                }
     lines = [
         f'rule = "{CALIBRATION_RULE}"',
+        "levels = ["
+        + ", ".join(f'"{_level_name(lo)}-{_level_name(hi)}"' for lo, hi in LEVELS)
+        + "]",
         f"wide_us = {wide_us}",
         f"cells = [{', '.join(json.dumps(str(c)) for c in cells)}]",
         "",
@@ -628,8 +759,9 @@ def main(argv: list[str]) -> None:
         for (agent, reg), sides in result.items():
             for side, v in sides.items():
                 print(
-                    f"{agent} {reg} {side}: p0.1 {v['p0_1']} p99.9 {v['p99_9']} -> accepted"
-                    f" [{v['low_us']}, {v['high_us']}] µs ({v['samples']} chains)"
+                    f"{agent} {reg} {side}: p0.1 {v['p0_1']} median {v['median']}"
+                    f" p99.9 {v['p99_9']}"
+                    f" -> passes {v['passes']} µs ({v['samples']} chains, {v['left_out']} left out)"
                 )
         print(f"written to {out}")
         return
@@ -676,6 +808,7 @@ def _main_attach(argv: list[str], cells: list[Path], window_us: int) -> None:
                 Path(argv[argv.index("--attach-params") + 1]) if "--attach-params" in argv else None
             ),
             stress="--stress" in argv,
+            order="--order" in argv,
         )
         for cell in cells
     }

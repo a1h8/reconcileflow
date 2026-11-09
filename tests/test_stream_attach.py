@@ -56,14 +56,26 @@ def write_cell(
     duplicate_span=(),
     load=0,
     agent="obi",
+    client_shift=None,
+    client_end=None,
+    extra_message=(),
+    drops=(),
 ):
     """``server_delay``: {k: µs} the server side of request k is late by (a
     freeze: span and read alike). ``extra_send``: requests with a second send
     2 µs before theirs. ``no_send``: requests whose send the probe missed.
     ``clocks``: "one", "none", or "step" (the wall clock jumps 1 s forward
     halfway, the agent's later spans with it, and a clock record says so).
-    ``duplicate_span``: requests whose client span the agent reports twice."""
+    ``duplicate_span``: requests whose client span the agent reports twice.
+    ``client_shift``: {k: µs} the client span of request k starts that much
+    earlier or later (waiting for its connection). ``client_end``: {k: µs
+    after T0} where the client span of request k ends. ``extra_message``:
+    requests preceded, 2 µs before, by a whole message seen at both ends that
+    no span reports. ``drops``: (µs after T0, count) records of the probe's
+    declared losses."""
     server_delay = server_delay or {}
+    client_shift = client_shift or {}
+    client_end = client_end or {}
     cell = tmp_path / "n1"
     cell.mkdir(parents=True)
     (cell / "cell.json").write_text(
@@ -123,9 +135,17 @@ def write_cell(
             )
             client_start = w + 200
             server_start = w + 300 + delay
-            spans.append(
-                span("SPAN_KIND_CLIENT", k, wall(client_start), port, FU_PORT, clientAddr="hop-1")
+            client_span = span(
+                "SPAN_KIND_CLIENT",
+                k,
+                wall(client_start + client_shift.get(k, 0)),
+                port,
+                FU_PORT,
+                clientAddr="hop-1",
             )
+            if k in client_end:
+                client_span["end"] = str(wall(T0 + client_end[k]))
+            spans.append(client_span)
             if k in duplicate_span:
                 spans.append(
                     span(
@@ -149,8 +169,11 @@ def write_cell(
             )
             if k not in no_send:
                 ev("send", port, base + off, REQUEST, client_start - CLIENT_GAP)
-            if k in extra_send:
+            if k in extra_send:  # a piece of a write: no read starts there
                 ev("send", port, base + off + 1, 1, client_start - CLIENT_GAP - 2)
+            if k in extra_message:  # a whole message, seen at both ends
+                ev("send", port, base + 3_000_000 + off, 10, client_start - CLIENT_GAP - 2)
+                ev("recv", port, base + 3_000_000 + off, 10, server_start - SERVER_GAP - 2)
             ev("recv", port, base + off, REQUEST, server_start - SERVER_GAP)
             fu.append(
                 {
@@ -172,6 +195,8 @@ def write_cell(
                     "spread_ns": 200,
                 }
             )
+    for at_us, count in drops:
+        probe.append({"kind": "drops", "timestamp_ns": mono(T0 + at_us), "drops": count})
     probe.sort(key=lambda r: r["timestamp_ns"])
     (cell / "probe.jsonl").write_text("".join(json.dumps(r) + "\n" for r in probe))
     (cell / "lg.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lg))
@@ -206,10 +231,16 @@ def test_a_freeze_on_the_server_side_delays_span_and_read_alike(tmp_path):
     assert r["gap_server_us"]["max"] == SERVER_GAP
 
 
-def test_two_probe_events_in_the_window_leave_the_span_unattached(tmp_path):
-    r = attach(write_cell(tmp_path, 10, conns=5, extra_send={4}))
+def test_two_messages_in_the_window_leave_the_span_unattached(tmp_path):
+    r = attach(write_cell(tmp_path, 10, conns=5, extra_message={4}))
     assert (r["correct"], r["wrong"]) == (9, 0)
     assert r["ambiguous_client"] == 1
+
+
+def test_a_piece_of_a_write_is_never_a_candidate(tmp_path):
+    # no read starts at its number: it cannot lead to a link, so it does not compete
+    r = attach(write_cell(tmp_path, 10, conns=5, extra_send={4}))
+    assert (r["correct"], r["wrong"], r["ambiguous_client"]) == (10, 0, 0)
 
 
 def test_a_send_the_probe_missed_leaves_the_span_without_candidate(tmp_path):
@@ -386,9 +417,7 @@ def test_calibration_writes_windows_by_agent_regime_and_side(tmp_path):
     assert (
         params["obi"]["load"]["server"]["p99_9"] == SERVER_GAP
     )  # the delayed span is late with its read
-    assert (
-        params["rule"] == "p0.1 to p99.9, each bound widened by 20 % of its distance to the median"
-    )
+    assert "each bound widened by 20 % of its distance to the median" in params["rule"]
 
 
 def test_attach_reads_its_windows_per_cell_from_the_calibration(tmp_path):
@@ -397,22 +426,20 @@ def test_attach_reads_its_windows_per_cell_from_the_calibration(tmp_path):
     params.write_text(
         """rule = "test"
 [obi.calm.client]
-offset_us = 5
-window_us = 1
+passes = [[4, 6]]
 [obi.calm.server]
-offset_us = 100
-window_us = 1
+passes = [[99, 101]]
 """
     )
     r = sp.attach_cell(cell, window_us=1_000_000, attach_params=params)
     assert (r["attached_client"], r["attached_server"], r["correct"]) == (10, 0, 0)
-    assert r["windows"] == {"client": (5, 1), "server": (100, 1)}
+    assert r["windows"] == {"client": [(4, 6)], "server": [(99, 101)]}
 
 
 def test_attach_params_without_this_agent_and_regime_are_refused(tmp_path):
     cell = write_cell(tmp_path, 4, conns=2, load=4)
     params = tmp_path / "attach-params.toml"
-    params.write_text('rule = "test"\n[obi.calm.client]\noffset_us = 0\nwindow_us = 1\n')
+    params.write_text('rule = "test"\n[obi.calm.client]\npasses = [[0, 1]]\n')
     with pytest.raises(ValueError, match=r"obi\.load"):
         sp.attach_cell(cell, window_us=1_000_000, attach_params=params)
 
@@ -423,3 +450,103 @@ def test_compare_under_load_uses_4a_prime_in_stress_mode(tmp_path):
         attach(cell, compare=params_file(tmp_path, 5))
     r = attach(cell, compare=params_file(tmp_path, 5), stress=True)["compare"]
     assert r["4a"]["correct"] == 10 and r["stress"] is True
+
+
+# -- successive passes, order between anchors, declared losses ----------------------
+
+NARROW = (0, 10)  # gap span - probe, µs: the fixture's agent dates just after the probe
+
+
+def passes(*client, server=(NARROW,)):
+    return {"client": list(client), "server": list(server)}
+
+
+def test_a_later_wider_pass_attaches_what_the_narrow_one_left(tmp_path):
+    cell = write_cell(tmp_path, 10, conns=5, client_shift={9: -3_000})
+    assert sp.attach_cell(cell, 1_000_000, passes=passes(NARROW))["correct"] == 9
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, (-4_000, 10)))
+    assert (r["correct"], r["wrong"]) == (10, 0)
+
+
+def test_events_claimed_in_a_narrow_pass_no_longer_compete(tmp_path):
+    # request 7 (second on connection 2) waits 45 ms; in one wide window it sees
+    # its own send and the next one on its connection, claimed narrowly first
+    cell = write_cell(tmp_path, 20, conns=5, client_shift={7: -45_000})
+    wide = (-100_000, 10)
+    alone = sp.attach_cell(cell, 1_000_000, passes=passes(wide))
+    stepped = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, wide))
+    assert alone["correct"] < 20 and alone["wrong"] == 0
+    assert (stepped["correct"], stepped["wrong"]) == (20, 0)
+
+
+def waiting(tmp_path, **kw):
+    """One connection, requests 10 ms apart; the spans of requests 1 and 2
+    start long before their sends (both waiting for the connection)."""
+    return write_cell(tmp_path, 4, conns=1, client_shift={1: -9_000, 2: -18_000}, **kw)
+
+
+WIDE = (-20_000, 10)
+
+
+def test_between_two_anchors_the_leftovers_are_paired_in_order(tmp_path):
+    cell = waiting(tmp_path)
+    assert sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE))["ambiguous_client"] == 2
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE), order=True)
+    assert (r["correct"], r["wrong"], r["ordered_client"]) == (4, 0, 2)
+
+
+def test_no_order_when_the_spans_start_and_end_in_different_orders(tmp_path):
+    # request 2's span ends first: the connection may have been handed out of order
+    cell = waiting(tmp_path, client_end={1: 30_000, 2: 25_000})
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE), order=True)
+    assert (r["correct"], r["wrong"], r["ordered_client"]) == (2, 0, 0)
+
+
+def test_no_order_when_a_span_is_missing_from_the_segment(tmp_path):
+    # a whole message nobody reports: as many events, one span fewer
+    cell = waiting(tmp_path, extra_message={2})
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE), order=True)
+    assert (r["wrong"], r["ordered_client"]) == (0, 0)
+
+
+def test_where_the_probe_declares_a_loss_only_the_narrow_pass_applies(tmp_path):
+    # a loss declared in the second around requests 1 and 2 (drops 0 -> 3)
+    cell = waiting(tmp_path, drops=[(-1_000_000, 0), (1_000_000, 3), (2_000_000, 3)])
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE), order=True)
+    assert (r["correct"], r["wrong"], r["ordered_client"]) == (2, 0, 0)
+    assert r["lossy_intervals"] == 1
+
+
+def test_k2b_declares_the_probes_losses_like_the_probe(tmp_path):
+    cell = write_cell(tmp_path, 1000, conns=10, spacing=1_000)
+    r = sp.attach_cell(
+        cell, 1_000_000, passes=passes(NARROW, (-5_000, 10)), order=True, drop=50, seed=3
+    )
+    assert r["wrong"] == 0 and r["lossy_intervals"] > 0
+
+
+def test_calibration_writes_one_pass_per_level(tmp_path):
+    cell = write_cell(tmp_path / "calm", 50, conns=5)
+    out = tmp_path / "attach-params.toml"
+    sp.calibrate_attach([cell], out, wide_us=50_000)
+    params = tomllib.loads(out.read_text())
+    client = params["obi"]["calm"]["client"]
+    assert len(client["passes"]) == len(sp.LEVELS) == 4
+    assert params["levels"] == ["p25-p75", "p5-p95", "p1-p99", "p0.1-p99.9"]
+
+
+def test_a_declared_loss_stops_the_wider_passes_alone(tmp_path):
+    cell = write_cell(tmp_path, 10, conns=5, client_shift={9: -3_000}, drops=[(0, 0), (100_000, 1)])
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, (-4_000, 10)))
+    assert (r["correct"], r["wrong"]) == (9, 0)
+
+
+def test_a_declared_loss_inside_the_segment_stops_the_order(tmp_path):
+    # the loss is between the two sends (12 to 18 ms), far from both spans' windows
+    cell = waiting(tmp_path, drops=[(12_000, 0), (18_000, 3)])
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW), order=True)
+    assert (r["wrong"], r["ordered_client"]) == (0, 0)
+    clean = sp.attach_cell(
+        waiting(tmp_path / "clean"), 1_000_000, passes=passes(NARROW), order=True
+    )
+    assert (clean["correct"], clean["ordered_client"]) == (4, 2)
