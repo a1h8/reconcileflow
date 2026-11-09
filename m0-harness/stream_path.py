@@ -43,8 +43,21 @@ Controls (one at a time, seed recorded):
 - --shift (K5): on each connection, every read takes the number of the next
   read: a probe off by one message on one side.
 
+--attach (4c (b), correlation-phase4-spec.md section 8.6.2): the agents'
+spans linked through the probe. Each span is attached to the one probe event
+of its connection whose time, on the agents' clock (the probe's clock
+records), is within --attach-window-us of it, after the side's offset
+(--client-offset-us, --server-offset-us), and only when no other span claims
+that event: otherwise it stays unattached, never guessed. A client span and a
+server span are linked when their send and read are; the links are judged by
+the spans' own truth ids, which owe nothing to the probe. --server-start picks
+start or handlerStart for server spans. K2b also drops spans, each side drawn
+apart.
+
 Usage: stream_path.py <run-dir> [--window-us US] [--json]
        [--drop PERMILLE --seed SEED | --shift]
+       [--attach [--attach-window-us US] [--client-offset-us US]
+        [--server-offset-us US] [--server-start start|handlerStart]]
 """
 
 from __future__ import annotations
@@ -52,13 +65,15 @@ from __future__ import annotations
 import json
 import random
 import sys
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 
 from connection_path import _conn_key
-from timing_path import _jsonl, topology_for
+from connection_path import records as connection_records
+from timing_path import _jsonl, cell_meta, topology_for
 
 from reconcileflow.correlation.assignment import Status
 from reconcileflow.correlation.connection import Conn, Connected, connection_links
@@ -151,6 +166,34 @@ def _control(events, drop, seed, shift) -> tuple[list[Event], str | None]:
     return events, None
 
 
+def _distinct(events: list[Event]) -> tuple[list[Event], int]:
+    """Events with an offset, a read reported twice at one number kept once."""
+    distinct, seen, duplicates = [], set(), 0
+    for e in events:
+        if e.offset is None:
+            continue
+        k = (e.kind, e.four, e.incarnation, e.seq)
+        if e.kind == "recv" and k in seen:
+            duplicates += 1
+            continue
+        seen.add(k)
+        distinct.append(e)
+    return distinct, duplicates
+
+
+def _link_events(events: list[Event], window_us: int):
+    """Sends linked to reads by the engine, key tcp-seq (absolute number)."""
+    obs = []
+    for e in events:
+        point, side = ("hop-1", "outbound") if e.kind == "send" else ("fake-upstream", "inbound")
+        t = e.ts_ns // 1000
+        obs.append(
+            Connected(Timed("probe.jsonl", e.line, point, side, t, t), Conn(*e.four), offset=e.seq)
+        )
+    params = JoinParams(signals=(Signal("start", 0, window_us),), margin_us=0)
+    return connection_links(topology_for(1), obs, {WHERE: params}, key="tcp-seq")
+
+
 def analyze_cell(
     cell_dir: Path,
     window_us: int,
@@ -161,15 +204,7 @@ def analyze_cell(
     probe = cell_dir / "probe.jsonl"
     events = probe_events(probe)
     no_base = sum(1 for e in events if e.offset is None)
-    events = [e for e in events if e.offset is not None]
-    distinct, seen, duplicates = [], set(), 0
-    for e in events:
-        k = (e.kind, e.four, e.incarnation, e.seq)
-        if e.kind == "recv" and k in seen:
-            duplicates += 1
-            continue
-        seen.add(k)
-        distinct.append(e)
+    distinct, duplicates = _distinct(events)
     truth = _truth(cell_dir)
 
     def place(e):
@@ -183,16 +218,7 @@ def analyze_cell(
         1 for e in distinct if e.kind == "recv" and (place(e), e.length) not in whole_sends
     )
     controlled, control = _control(distinct, drop, seed, shift)
-
-    obs = []
-    for e in controlled:
-        point, side = ("hop-1", "outbound") if e.kind == "send" else ("fake-upstream", "inbound")
-        t = e.ts_ns // 1000
-        obs.append(
-            Connected(Timed("probe.jsonl", e.line, point, side, t, t), Conn(*e.four), offset=e.seq)
-        )
-    params = JoinParams(signals=(Signal("start", 0, window_us),), margin_us=0)
-    result = connection_links(topology_for(1), obs, {WHERE: params}, key="tcp-seq")
+    result = _link_events(controlled, window_us)
 
     correct = wrong = handshake = 0
     for x in result.links:
@@ -225,6 +251,149 @@ def analyze_cell(
     }
 
 
+# -- 4c (b): agent spans linked through the probe ---------------------------------
+
+SERVER_STARTS = ("start", "handlerStart")
+SPAN_SIDES = {("hop-1", "outbound"): "send", ("fake-upstream", "inbound"): "recv"}
+
+
+def _clocks(path: Path) -> list[tuple[int, int]]:
+    """(monotonic ns, wall ns) pairs from the probe's clock records, in order."""
+    return sorted(
+        (r["timestamp_ns"], r["realtime_ns"])
+        for r in _jsonl(path)
+        if r.get("kind") == "clock" and r.get("realtime_ns") is not None
+    )
+
+
+def _wall_us(ts_ns: int, clocks: list[tuple[int, int]]) -> int:
+    """A monotonic time on the wall clock, with the nearest clock record."""
+    i = bisect_left(clocks, (ts_ns,))
+    near = min(clocks[max(i - 1, 0) : i + 1], key=lambda c: abs(c[0] - ts_ns))
+    return (near[1] + ts_ns - near[0]) // 1000
+
+
+def _gaps(values: list[int]) -> dict:
+    if not values:
+        return {"median": None, "p99": None, "max": None}
+    v = sorted(values)
+    return {"median": v[len(v) // 2], "p99": v[min(len(v) - 1, len(v) * 99 // 100)], "max": v[-1]}
+
+
+def _attach(spans, events, offset_us, window_us):
+    """Each span to the one probe event of its connection inside the window,
+    when that event has no other span inside it either; else no attachment.
+
+    spans: (identity, four, time µs); events: (line, four, time µs).
+    Returns {span identity: event line}, the gaps of the attached pairs, and
+    the counts of spans with no candidate and with several."""
+    by_four: dict[tuple, list] = {}
+    for e in events:
+        by_four.setdefault(e[1], []).append(e)
+
+    def fits(span_t, event_t):
+        return abs(span_t - event_t - offset_us) <= window_us
+
+    candidates = {s[0]: [e for e in by_four.get(s[1], []) if fits(s[2], e[2])] for s in spans}
+    claims = Counter(e[0] for found in candidates.values() for e in found)
+    attached, gaps, none, several = {}, [], 0, 0
+    for s in spans:
+        found = candidates[s[0]]
+        if not found:
+            none += 1
+        elif len(found) > 1 or claims[found[0][0]] > 1:
+            several += 1
+        else:
+            attached[s[0]] = found[0][0]
+            gaps.append(s[2] - found[0][2])
+    return attached, gaps, none, several
+
+
+def attach_cell(
+    cell_dir: Path,
+    window_us: int,
+    attach_window_us: int,
+    client_offset_us: int = 0,
+    server_offset_us: int = 0,
+    server_start: str = "start",
+    drop: int | None = None,
+    seed: int = 0,
+    shift: bool = False,
+) -> dict:
+    """Client span -> probe send -> (same TCP number) -> probe read -> server span,
+    judged by the spans' own truth ids, which owe nothing to the probe."""
+    if server_start not in SERVER_STARTS:
+        raise ValueError(f"server_start must be one of {SERVER_STARTS}, got {server_start!r}")
+    probe = cell_dir / "probe.jsonl"
+    clocks = _clocks(probe)
+    if not clocks:
+        return {"error": "no clock record in probe.jsonl: cannot convert to the agents' clock"}
+    meta = cell_meta(cell_dir)
+    rows, _ = connection_records(cell_dir, meta)
+    rows = [r for r in rows if (r["point"], r["side"]) in SPAN_SIDES and r["conn"] is not None]
+    events, _ = _distinct(probe_events(probe))
+    events, control = _control(events, drop, seed, shift)
+    if drop is not None:  # K2b: the spans lose their share too, each side drawn apart
+        rng = random.Random(seed + 1)
+        gone = set()
+        for kind in ("send", "recv"):
+            side = [r for r in rows if SPAN_SIDES[r["point"], r["side"]] == kind]
+            gone |= {id(r) for r in rng.sample(side, round(len(side) * drop / 1000))}
+        kept = [r for r in rows if id(r) not in gone]
+    else:
+        kept = rows
+    links = {x.upstream[1]: x.downstream[1] for x in _link_events(events, window_us).links}
+
+    out: dict = {"clock_records": len(clocks), "control": control}
+    attached = {}
+    for kind, side, offset in (
+        ("send", "client", client_offset_us),
+        ("recv", "server", server_offset_us),
+    ):
+        spans = [
+            (
+                (r["source"], r["seq"]),
+                tuple(r["conn"]),
+                r["handler" if kind == "recv" and server_start == "handlerStart" else "start"],
+            )
+            for r in kept
+            if SPAN_SIDES[r["point"], r["side"]] == kind
+        ]
+        evs = [(e.line, e.four, _wall_us(e.ts_ns, clocks)) for e in events if e.kind == kind]
+        attached[kind], gaps, none, several = _attach(spans, evs, offset, attach_window_us)
+        out[f"{side}_spans"] = len(spans)
+        out[f"attached_{side}"] = len(attached[kind])
+        out[f"no_candidate_{side}"] = none
+        out[f"ambiguous_{side}"] = several
+        out[f"gap_{side}_us"] = _gaps(gaps)
+
+    truth = {(r["source"], r["seq"]): r["truth"] for r in rows}
+    server_of_read = {line: span for span, line in attached["recv"].items()}
+    correct = wrong = 0
+    for client, send in attached["send"].items():
+        server = server_of_read.get(links.get(send))
+        if server is None:
+            continue
+        if truth[client] == truth[server]:
+            correct += 1
+        else:
+            wrong += 1
+    ups = {r["truth"] for r in rows if SPAN_SIDES[r["point"], r["side"]] == "send"}
+    both = len(ups & {r["truth"] for r in rows if SPAN_SIDES[r["point"], r["side"]] == "recv"})
+    out.update(
+        {
+            "links": correct + wrong,
+            "correct": correct,
+            "wrong": wrong,
+            "both_seen": both,
+            "coverage": round(correct / both, 6) if both else 0.0,
+            "attach_window_us": attach_window_us,
+            "server_start": server_start,
+        }
+    )
+    return out
+
+
 def _arg(argv: list[str], name: str) -> int | None:
     return int(argv[argv.index(name) + 1]) if name in argv else None
 
@@ -238,6 +407,9 @@ def main(argv: list[str]) -> None:
         "shift": "--shift" in argv,
     }
     cells = sorted(p.parent for p in run_dir.glob("*/probe.jsonl"))
+    if "--attach" in argv:
+        _main_attach(argv, cells, options["window_us"])
+        return
     report = {cell.name: analyze_cell(cell, **options) for cell in cells}
     if "--json" in argv:
         print(json.dumps(report, indent=2))
@@ -258,6 +430,45 @@ def main(argv: list[str]) -> None:
         )
         wrong += c["wrong"]
     print(f"wrong links in the run: {wrong}")
+
+
+def _main_attach(argv: list[str], cells: list[Path], window_us: int) -> None:
+    server_start = argv[argv.index("--server-start") + 1] if "--server-start" in argv else "start"
+    report = {
+        cell.name: attach_cell(
+            cell,
+            window_us=window_us,
+            attach_window_us=_arg(argv, "--attach-window-us") or 1_000,
+            client_offset_us=_arg(argv, "--client-offset-us") or 0,
+            server_offset_us=_arg(argv, "--server-offset-us") or 0,
+            server_start=server_start,
+            drop=_arg(argv, "--drop"),
+            seed=_arg(argv, "--seed") or 0,
+            shift="--shift" in argv,
+        )
+        for cell in cells
+    }
+    if "--json" in argv:
+        print(json.dumps(report, indent=2))
+        return
+    wrong = 0
+    for name, c in report.items():
+        if "error" in c:
+            print(f"{name}: {c['error']}")
+            continue
+        print(
+            f"{name} spans: links {c['links']} correct {c['correct']} wrong {c['wrong']}"
+            f" both_seen {c['both_seen']} coverage {100 * c['coverage']:.2f}%"
+            + (f" control {c['control']}" if c["control"] else "")
+        )
+        print(
+            f"   attached client {c['attached_client']} server {c['attached_server']}"
+            f" (no candidate {c['no_candidate_client']}/{c['no_candidate_server']},"
+            f" ambiguous {c['ambiguous_client']}/{c['ambiguous_server']});"
+            f" gap µs client {c['gap_client_us']} server {c['gap_server_us']}"
+        )
+        wrong += c["wrong"]
+    print(f"wrong span links in the run: {wrong}")
 
 
 if __name__ == "__main__":
