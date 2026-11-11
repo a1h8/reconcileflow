@@ -60,6 +60,7 @@ def write_cell(
     client_end=None,
     extra_message=(),
     drops=(),
+    send_delay=None,
 ):
     """``server_delay``: {k: µs} the server side of request k is late by (a
     freeze: span and read alike). ``extra_send``: requests with a second send
@@ -72,10 +73,13 @@ def write_cell(
     after T0} where the client span of request k ends. ``extra_message``:
     requests preceded, 2 µs before, by a whole message seen at both ends that
     no span reports. ``drops``: (µs after T0, count) records of the probe's
-    declared losses."""
+    declared losses. ``send_delay``: {k: µs} hop-1 frozen: request k's send,
+    and its read and server span after it, that much later; its client span
+    starts on time (it ends 4 ms after the send)."""
     server_delay = server_delay or {}
     client_shift = client_shift or {}
     client_end = client_end or {}
+    send_delay = send_delay or {}
     cell = tmp_path / "n1"
     cell.mkdir(parents=True)
     (cell / "cell.json").write_text(
@@ -123,7 +127,8 @@ def write_cell(
         for i, k in enumerate(ks):
             w = T0 + k * spacing
             off = HELLO + FINISHED + i * REQUEST
-            delay = server_delay.get(k, 0)
+            frozen = send_delay.get(k, 0)
+            delay = server_delay.get(k, 0) + frozen
             lg.append(
                 {
                     "trace_id": truth(k),
@@ -145,6 +150,8 @@ def write_cell(
             )
             if k in client_end:
                 client_span["end"] = str(wall(T0 + client_end[k]))
+            elif frozen:
+                client_span["end"] = str(wall(client_start + frozen + 4_000))
             spans.append(client_span)
             if k in duplicate_span:
                 spans.append(
@@ -168,7 +175,7 @@ def write_cell(
                 )
             )
             if k not in no_send:
-                ev("send", port, base + off, REQUEST, client_start - CLIENT_GAP)
+                ev("send", port, base + off, REQUEST, client_start + frozen - CLIENT_GAP)
             if k in extra_send:  # a piece of a write: no read starts there
                 ev("send", port, base + off + 1, 1, client_start - CLIENT_GAP - 2)
             if k in extra_message:  # a whole message, seen at both ends
@@ -463,8 +470,9 @@ def passes(*client, server=(NARROW,)):
 
 def test_a_later_wider_pass_attaches_what_the_narrow_one_left(tmp_path):
     cell = write_cell(tmp_path, 10, conns=5, client_shift={9: -3_000})
-    assert sp.attach_cell(cell, 1_000_000, passes=passes(NARROW))["correct"] == 9
-    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, (-4_000, 10)))
+    # dynamic=False: the subject is the calibrated passes (spec 8.8.4 apart)
+    assert sp.attach_cell(cell, 1_000_000, passes=passes(NARROW), dynamic=False)["correct"] == 9
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, (-4_000, 10)), dynamic=False)
     assert (r["correct"], r["wrong"]) == (10, 0)
 
 
@@ -550,3 +558,134 @@ def test_a_declared_loss_inside_the_segment_stops_the_order(tmp_path):
         waiting(tmp_path / "clean"), 1_000_000, passes=passes(NARROW), order=True
     )
     assert (clean["correct"], clean["ordered_client"]) == (4, 2)
+
+
+def test_a_span_out_of_every_window_does_not_lend_its_send_to_the_next_one(tmp_path):
+    # Spec 8.8.2-8.8.3. One connection, sends 30 ms apart (at 30 k ms + 0.195).
+    # Request 1's span, 5.2 to 31 ms, starts 25 ms before its send: out of
+    # every window, unattached. Request 2's span starts at 29 ms, waiting for
+    # the connection: its wide window holds request 1's send, not its own;
+    # alone there, it would be taken. Request 1 could have sent it: refused.
+    cell = write_cell(
+        tmp_path,
+        4,
+        conns=1,
+        spacing=30_000,
+        client_shift={1: -25_000, 2: -31_200},
+        client_end={1: 31_000, 2: 61_000},
+    )
+    for order in (False, True):
+        r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE), order=order)
+        assert r["wrong"] == 0
+        assert r["correct"] == 2  # requests 0 and 3, from the narrow pass
+
+
+def test_a_span_out_of_every_window_refuses_nothing_outside_its_life(tmp_path):
+    # Request 1's span is out of every window, open 5.2 to 35 ms. Request 2's
+    # span starts 9 ms early and takes its own send (60.2 ms) in the wide pass:
+    # request 1 could not have sent it, kept.
+    cell = write_cell(
+        tmp_path,
+        4,
+        conns=1,
+        spacing=30_000,
+        client_shift={1: -25_000, 2: -9_000},
+        client_end={1: 35_000, 2: 61_000},
+    )
+    # dynamic=False: the subject is the guard (spec 8.8.4 would attach request 1)
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE), dynamic=False)
+    assert (r["correct"], r["wrong"]) == (3, 0)
+
+
+def test_the_guard_runs_until_nothing_changes(tmp_path):
+    # A chain: request 1 out of every window; request 2 takes request 1's send,
+    # request 3 takes request 2's. Refusing request 2 makes it a possible owner
+    # of what request 3 took: refused too.
+    cell = write_cell(
+        tmp_path,
+        5,
+        conns=1,
+        spacing=30_000,
+        client_shift={1: -25_000, 2: -31_200, 3: -31_200},
+        client_end={1: 31_000, 2: 61_000, 3: 91_000},
+    )
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE))
+    assert (r["correct"], r["wrong"]) == (2, 0)
+
+
+def test_a_free_message_elsewhere_does_not_hide_a_taken_send(tmp_path):
+    # The TLS opening messages of a connection are seen at both ends and no span
+    # claims them: free events before the first request. Request 0's span,
+    # -24.8 to 1 ms, is out of every window. Request 1's span starts at -1 ms,
+    # waiting for the connection: in the wide pass it takes request 0's send
+    # (0.195 ms). "Is a free event left before request 1's?" says yes (the
+    # opening); but request 0, open over that send, could have sent it: refused.
+    cell = write_cell(
+        tmp_path,
+        4,
+        conns=1,
+        spacing=30_000,
+        client_shift={0: -25_000, 1: -31_200},
+        client_end={0: 1_000, 1: 31_000},
+    )
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, WIDE))
+    assert (r["correct"], r["wrong"]) == (2, 0)
+
+
+# -- dynamic zone under freeze (spec 8.8.4) ----------------------------------------
+
+DYN = (-4_000, 10)  # the widest calibrated pass in these tests
+
+
+def dense(tmp_path, **kw):
+    """200 requests 0.5 ms apart over 40 connections: a send every 0.5 ms, so
+    no hole of more than 1 ms in the send stream unless a freeze makes one."""
+    return write_cell(tmp_path, 200, conns=40, spacing=500, **kw)
+
+
+def test_a_span_waiting_for_its_connection_is_placed_from_its_release(tmp_path):
+    # Request 100 (connection 20) starts 15 ms early; request 60 holds the
+    # connection until 50 ms; request 100 sends at 50.195 ms. From the span
+    # start: out of every window; from the release: 195 µs.
+    cell = dense(tmp_path, client_shift={100: -15_000}, client_end={60: 50_000, 100: 55_000})
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, DYN))
+    assert (r["correct"], r["wrong"]) == (200, 0)
+
+
+def test_a_span_whose_send_a_freeze_delayed_is_placed_net_of_the_frozen_time(tmp_path):
+    # hop-1 frozen from 60 to 68 ms: requests 120-135 send after it, in order;
+    # their spans started on time, up to 8 ms before their sends.
+    delays = {k: 68_000 - k * 500 + (k - 120) * 20 for k in range(120, 136)}
+    cell = dense(tmp_path, send_delay=delays)
+    before = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, DYN), dynamic=False)
+    assert before["correct"] < 200 and before["wrong"] == 0
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, DYN))
+    assert (r["correct"], r["wrong"]) == (200, 0)
+
+
+def test_two_candidates_in_the_dynamic_zone_attach_nothing(tmp_path):
+    # As the first test, with a whole message nobody reports 2 µs before
+    # request 100's send: two candidates.
+    cell = dense(
+        tmp_path,
+        client_shift={100: -15_000},
+        client_end={60: 50_000, 100: 55_000},
+        extra_message={100},
+    )
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, DYN))
+    assert (r["correct"], r["wrong"]) == (199, 0)
+
+
+def test_the_dynamic_zone_leaves_an_event_another_unattached_span_could_have_sent(tmp_path):
+    # As on the bench: a swap. Connection 20: request 20 holds it until 27 ms;
+    # request 100's span (22 to 55 ms) is placed from 27 ms and its only
+    # candidate is request 60's send (30.195 ms); request 60's span (24 to
+    # 31 ms) is out of every window but open over that send. Taken, the order
+    # would then give request 60 the send of request 100: two wrong links.
+    cell = dense(
+        tmp_path,
+        client_shift={100: -28_200, 60: -6_200},
+        client_end={20: 27_000, 100: 55_000, 60: 31_000},
+    )
+    r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, DYN), order=True)
+    assert (r["correct"], r["wrong"]) == (198, 0)

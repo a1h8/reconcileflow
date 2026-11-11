@@ -89,7 +89,7 @@ import math
 import random
 import sys
 import tomllib
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import dataclass, replace
 from itertools import pairwise
@@ -363,12 +363,20 @@ def _touches(lossy, low: float, high: float) -> bool:
     return any(a <= high and low <= b for a, b in lossy)
 
 
-def _attach_passes(spans, events, side_passes, lossy, end_of, order):
+def _attach_passes(spans, events, side_passes, lossy, end_of, order, server=False, dynamic=False):
     """Successive passes, narrow to wide, each among the spans still unattached
     and the events still unclaimed; then, if order, the leftovers between two
     anchors of a connection paired in order. Only the first pass applies where
     the probe declared a loss: elsewhere a probe event cannot be missing, so a
-    wider window cannot pair a span with a neighbour's event.
+    wider window cannot pair a span with a neighbour's event, unless the span
+    that owns that event lies out of every window: hence the guard below.
+
+    Client side, if dynamic, one more pass before the order (spec 8.8.4): the
+    zone placed from the connection's release, net of the frozen time.
+
+    Last, the possible-owner guard (spec 8.8.3): an attachment of a wider pass
+    or of the order is refused when a span of its connection left unattached
+    could have sent or read that event (server: the spans are server spans).
 
     Returns attached, gaps, no candidate, ambiguous, ordered."""
     lo_all = min(lo for lo, _ in side_passes)
@@ -378,16 +386,19 @@ def _attach_passes(spans, events, side_passes, lossy, end_of, order):
         return not _touches(lossy, s[2] - hi_all, s[2] - lo_all)
 
     done: dict = {}
-    gaps: list[int] = []
+    narrow: set = set()
     for i, (low, high) in enumerate(side_passes):
         taken = set(done.values())
         left = [s for s in spans if s[0] not in done and (i == 0 or clear(s))]
-        found, g, _, _ = _attach(left, [e for e in events if e[0] not in taken], low, high)
+        found, _, _, _ = _attach(left, [e for e in events if e[0] not in taken], low, high)
         done.update(found)
-        gaps += g
-    ordered = 0
+        if i == 0:
+            narrow = set(found)
+    if dynamic and not server:
+        done.update(_dynamic_pass(spans, events, done, end_of, lo_all, hi_all, clear))
+    when = {e[0]: e[2] for e in events}
+    ordered: set = set()
     if order:
-        when = {e[0]: e[2] for e in events}
         by_four: dict[tuple, tuple[list, list]] = {}
         for s in spans:
             by_four.setdefault(s[1], ([], []))[0].append(s)
@@ -413,12 +424,124 @@ def _attach_passes(spans, events, side_passes, lossy, end_of, order):
                     continue  # ends in another order: handed out of order, no order
                 for s, e in zip(left, free, strict=True):
                     done[s[0]] = e[0]
-                    gaps.append(s[2] - e[2])
-                    ordered += 1
+                    ordered.add(s[0])
+    ordered -= _possible_owners(spans, events, done, narrow, end_of, server)
+    gaps = [s[2] - when[done[s[0]]] for s in spans if s[0] in done]
     taken = set(done.values())
     rest = [s for s in spans if s[0] not in done]
     _, _, none, several = _attach(rest, [e for e in events if e[0] not in taken], lo_all, hi_all)
-    return done, gaps, none, several, ordered
+    return done, gaps, none, several, len(ordered)
+
+
+HOLE_US = 1_000  # spec 8.8.4: a gap of more than this in the send stream counts as frozen
+
+
+def _frozen(holes, starts, low, high) -> int:
+    """Time within [low, high] covered by holes (sorted, disjoint)."""
+    total = 0
+    k = max(0, bisect_right(starts, low) - 1)
+    while k < len(holes) and holes[k][0] < high:
+        a, b = holes[k]
+        total += max(0, min(b, high) - max(a, low))
+        k += 1
+    return total
+
+
+def _dynamic_pass(spans, events, done, end_of, low, high, clear) -> dict:
+    """The dynamic zone (spec 8.8.4), client side: for each unattached span u
+    clear of declared losses, start from r = max(its start, the latest end of
+    the spans of its connection that started before it) (a); an event e of its
+    connection, free and within u's life, is a candidate when r - e plus the
+    frozen time between r and e (holes of more than HOLE_US in the stream of
+    this side's events) (b) is within the widest pass, and when no other
+    unattached span of the connection could have sent it (open over it: the
+    guard, spec 8.8.3, applied here already). Attached only when it is the one
+    candidate and no other span has it as a candidate."""
+    times = sorted(e[2] for e in events)
+    holes = [(a, b) for a, b in pairwise(times) if b - a > HOLE_US]
+    starts = [a for a, _ in holes]
+    taken = set(done.values())
+    free: dict[tuple, list] = {}
+    for e in events:
+        if e[0] not in taken:
+            free.setdefault(e[1], []).append(e)
+    for evs in free.values():
+        evs.sort(key=lambda e: e[2])
+    by_four: dict[tuple, list] = {}
+    for s in spans:
+        by_four.setdefault(s[1], []).append(s)
+    candidates = {}
+    for four, four_spans in by_four.items():
+        four_spans.sort(key=lambda s: s[2])
+        evs = free.get(four, [])
+        ts = [e[2] for e in evs]
+        open_spans = [
+            (u[2], end_of.get(u[0], math.inf), u[0]) for u in four_spans if u[0] not in done
+        ]
+        latest = -math.inf
+        for u in four_spans:
+            release = latest
+            latest = max(latest, end_of.get(u[0], u[2]))
+            if u[0] in done or not clear(u):
+                continue
+            r = max(u[2], release)
+            end = end_of.get(u[0], math.inf)
+            found = []
+            for e in evs[bisect_right(ts, u[2]) : bisect_left(ts, end)]:
+                g = r - e[2] + (_frozen(holes, starts, r, e[2]) if e[2] > r else 0)
+                if low <= g <= high and not any(
+                    a < e[2] < b for a, b, k in open_spans if k != u[0]
+                ):
+                    found.append(e[0])
+            candidates[u[0]] = found
+    claims = Counter(e for found in candidates.values() for e in found)
+    return {
+        k: found[0] for k, found in candidates.items() if len(found) == 1 and claims[found[0]] == 1
+    }
+
+
+def _possible_owners(spans, events, done: dict, narrow: set, end_of: dict, server: bool) -> set:
+    """The possible-owner guard (spec 8.8.3), in place on done. Returns the
+    spans whose attachment it refused.
+
+    A message of a request happens while its span lives: a client send inside
+    the client span, a server read before the server span starts and after the
+    previous server span of the connection ended (one request at a time). An
+    attachment of a wider pass or of the order is refused when a span of its
+    connection left unattached could have sent or read that event; repeated
+    until nothing changes, a refused span being unattached in turn."""
+    when = {e[0]: e[2] for e in events}
+    by_four: dict[tuple, list] = {}
+    for s in spans:
+        by_four.setdefault(s[1], []).append(s)
+    refused: set = set()
+    for four_spans in by_four.values():
+        four_spans.sort(key=lambda s: s[2])
+        previous_end, latest = {}, -math.inf
+        for s in four_spans:
+            previous_end[s[0]] = latest
+            latest = max(latest, end_of.get(s[0], s[2]))
+
+        # Wider or ordered attachments, by the time of their event.
+        wide = sorted(
+            (when[done[s[0]]], s[0], s) for s in four_spans if s[0] in done and s[0] not in narrow
+        )
+        times = [w[0] for w in wide]
+        pending = [u for u in four_spans if u[0] not in done]
+        while pending:  # each refusal makes one more span that may own an event
+            fresh = []
+            for u in pending:
+                if server:  # read after the previous one ended, before the span starts
+                    low, high = previous_end[u[0]], u[2]
+                else:  # send while the span is open
+                    low, high = u[2], end_of.get(u[0], math.inf)
+                for _, key, s in wide[bisect_right(times, low) : bisect_left(times, high)]:
+                    if key in done:
+                        del done[key]
+                        refused.add(key)
+                        fresh.append(s)
+            pending = fresh
+    return refused
 
 
 def regime(meta: dict) -> str:
@@ -449,6 +572,7 @@ def attach_cell(
     stress: bool = False,
     passes: dict | None = None,
     order: bool = False,
+    dynamic: bool = True,
 ) -> dict:
     """Client span -> probe send -> (same TCP number) -> probe read -> server span,
     judged by the spans' own truth ids, which owe nothing to the probe.
@@ -518,7 +642,7 @@ def attach_cell(
             if e.kind == kind and e.line in linked
         ]
         attached[kind], gaps, none, several, ordered = _attach_passes(
-            spans, evs, windows[side], lossy, end_of, order
+            spans, evs, windows[side], lossy, end_of, order, server=kind == "recv", dynamic=dynamic
         )
         out[f"ordered_{side}"] = ordered
         out[f"{side}_spans"] = len(spans)
