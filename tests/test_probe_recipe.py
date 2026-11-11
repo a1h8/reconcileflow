@@ -176,3 +176,98 @@ def test_a_finished_sent_long_before_the_first_call_does_not_start_it(tmp_path):
     report = pr.judge(tmp_path / "n1")
     assert report["causality_violations"] == 0
     assert report["wrong"] == 0 and report["right"] == report["judged"] > 0
+
+
+# -- evaluation options and controls (phase 4 spec 8.14) ----------------------
+
+
+def ticking(n):
+    """Drop records once every 1,000 ns, all zero: the probe lost nothing."""
+    return [(T0 + k * 1_000, 0) for k in range(n)]
+
+
+def test_a_declared_recipe_needs_no_truth(tmp_path):
+    report = pr.judge(busy(spacing=20).write(tmp_path), recipe="declared")
+    assert report["recipe_source"] == "declared"
+    assert report["wrong"] == 0 and report["right"] == report["judged"] > 0
+
+
+def test_k2b_events_dropped_and_declared_never_give_a_wrong_link(tmp_path):
+    cell = busy(n=400, spacing=20).write(tmp_path, drops=ticking(40))
+    for seed in (1, 2, 3):
+        report = pr.judge(cell, recipe="declared", drop=50, seed=seed)
+        assert report["control"] == f"K2b drop=50 seed={seed}"
+        assert report["wrong"] == 0
+        assert report["refused_by_status"].get("INCOMPLETE", 0) > 0
+
+
+def test_k5_a_shifted_truth_shows_up_as_wrong_links(tmp_path):
+    report = pr.judge(busy(spacing=20).write(tmp_path), recipe="declared", shift=True)
+    assert report["control"] == "K5 call truth shifted by one rank"
+    linked = report["right"] + report["wrong"]
+    assert linked > 0 and report["wrong"] >= 0.99 * linked
+
+
+def test_ranks_that_do_not_match_load_gen_make_the_cell_invalid(tmp_path):
+    c = busy(n=40, spacing=500)
+    assert pr.judge(c.write(tmp_path / "a"))["ranks_ok"]
+    c.lg[-1]["stream_id"] += 5  # load-gen counted requests the probe never saw
+    assert not pr.judge(c.write(tmp_path / "b"))["ranks_ok"]
+
+
+# -- the evaluation verdict (spec 8.14) -----------------------------------------
+
+
+def cell(
+    name="c20-load0",
+    wrong=0,
+    coverage=0.995,
+    lossy=0,
+    violations=0,
+    ranks=True,
+    k2b_wrong=0,
+    k5=1.0,
+):
+    main = {
+        "wrong": wrong,
+        "coverage": coverage,
+        "lossy_intervals": lossy,
+        "causality_violations": violations,
+        "ranks_ok": ranks,
+        "right": 100,
+        "judged": 100,
+    }
+    k2b = [{"wrong": k2b_wrong, "coverage": 0.0} for _ in range(3)]
+    linked = 100
+    k5r = {"wrong": round(k5 * linked), "right": linked - round(k5 * linked)}
+    return {"name": name, "main": main, "k2b": k2b, "k5": k5r}
+
+
+def test_the_verdict_holds_when_every_valid_cell_meets_every_criterion():
+    held, lines = pr.verdict([cell(), cell("c800-load4", coverage=0.9941)])
+    assert held is True and any("tenu" in x for x in lines)
+
+
+def test_one_wrong_link_anywhere_fails_the_verdict():
+    held, _ = pr.verdict([cell(), cell("c400-load0", wrong=1)])
+    assert held is False
+
+
+def test_low_coverage_fails_only_without_declared_losses():
+    assert pr.verdict([cell(coverage=0.98)])[0] is False
+    assert pr.verdict([cell(coverage=0.40, lossy=3)])[0] is True
+
+
+def test_a_causality_violation_or_a_k2b_wrong_link_fails():
+    assert pr.verdict([cell(violations=1)])[0] is False
+    assert pr.verdict([cell(k2b_wrong=1)])[0] is False
+
+
+def test_a_blind_judge_gives_no_verdict():
+    held, lines = pr.verdict([cell(k5=0.5)])
+    assert held is None and any("K5" in x for x in lines)
+
+
+def test_a_cell_with_unmatched_ranks_is_invalid_not_failed():
+    held, lines = pr.verdict([cell(), cell("c100-load4", wrong=7, ranks=False)])
+    assert held is True and any("invalid" in x for x in lines)
