@@ -689,3 +689,56 @@ def test_the_dynamic_zone_leaves_an_event_another_unattached_span_could_have_sen
     )
     r = sp.attach_cell(cell, 1_000_000, passes=passes(NARROW, DYN), order=True)
     assert (r["correct"], r["wrong"]) == (198, 0)
+
+
+def _attach_naive(spans, events, low_us, high_us):
+    """The quadratic form, kept here as the reference (spec 8.8.5)."""
+    from collections import Counter
+
+    candidates = {
+        s[0]: [e for e in events if e[1] == s[1] and low_us <= s[2] - e[2] <= high_us]
+        for s in spans
+    }
+    claims = Counter(e[0] for found in candidates.values() for e in found)
+    attached, gaps, none, several = {}, [], 0, 0
+    for s in spans:
+        found = candidates[s[0]]
+        if not found:
+            none += 1
+        elif len(found) > 1 or claims[found[0][0]] > 1:
+            several += 1
+        else:
+            attached[s[0]] = found[0][0]
+            gaps.append(s[2] - found[0][2])
+    return attached, gaps, none, several
+
+
+def test_attach_finds_the_same_candidates_as_the_naive_form():
+    import random
+
+    rng = random.Random(7)
+    for _ in range(200):
+        fours = [("c", i) for i in range(rng.randint(1, 3))]
+        events = [
+            (f"e{i}", rng.choice(fours), rng.randint(0, 400)) for i in range(rng.randint(0, 40))
+        ]
+        rng.shuffle(events)
+        spans = [
+            (f"s{i}", rng.choice(fours), rng.randint(0, 400)) for i in range(rng.randint(0, 40))
+        ]
+        low = rng.randint(-20, 20)
+        high = low + rng.choice([0, 5, 30, 200])
+        assert sp._attach(spans, events, low, high) == _attach_naive(spans, events, low, high)
+
+
+def test_attach_on_one_busy_connection_is_fast():
+    import time
+
+    four = ("c", 1)
+    n = 20_000
+    events = [(f"e{i}", four, 100 * i) for i in range(n)]
+    spans = [(f"s{i}", four, 100 * i + 10) for i in range(n)]
+    t0 = time.perf_counter()
+    attached, _, _, _ = sp._attach(spans, events, 5, 20)
+    assert time.perf_counter() - t0 < 2.0
+    assert len(attached) == n

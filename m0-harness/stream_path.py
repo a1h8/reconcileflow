@@ -322,9 +322,14 @@ def _attach(spans, events, low_us, high_us):
     by_four: dict[tuple, list] = {}
     for e in events:
         by_four.setdefault(e[1], []).append(e)
-    candidates = {
-        s[0]: [e for e in by_four.get(s[1], []) if low_us <= s[2] - e[2] <= high_us] for s in spans
-    }
+    times: dict[tuple, list] = {}
+    for four, evs in by_four.items():
+        evs.sort(key=lambda e: e[2])
+        times[four] = [e[2] for e in evs]
+    candidates = {}  # e is a candidate of s when s - high <= e <= s - low (spec 8.8.5)
+    for s in spans:
+        evs, ts = by_four.get(s[1], []), times.get(s[1], [])
+        candidates[s[0]] = evs[bisect_left(ts, s[2] - high_us) : bisect_right(ts, s[2] - low_us)]
     claims = Counter(e[0] for found in candidates.values() for e in found)
     attached, gaps, none, several = {}, [], 0, 0
     for s in spans:
