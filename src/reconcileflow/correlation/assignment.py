@@ -50,6 +50,8 @@ class Status(IntEnum):
     DENSE = 6  # set by the timing path's local density guard, never by assign()
     NO_KEY = 7  # set by the connection path: no usable four-tuple (or stream), never by assign()
     KEY_TIME_CONFLICT = 8  # set by the connection path: same key, no fit in time, never by assign()
+    INCOMPLETE = 9  # set by the recipe: a group whose calls do not number its requests
+    NO_SOLUTION = 10  # set by the recipe: no assignment of the group fits
 
 
 @dataclass(frozen=True, slots=True)
