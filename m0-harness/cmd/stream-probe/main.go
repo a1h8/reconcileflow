@@ -24,6 +24,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -72,17 +74,20 @@ type streamEvent struct {
 // whichever end saw it. For connect and accept, Seq is the number of the first
 // data byte the client sends, so that offset = Seq of a message - Seq here.
 type Record struct {
-	Kind        string  `json:"kind"`
-	ClientAddr  string  `json:"client_addr,omitempty"`
-	ClientPort  uint16  `json:"client_port,omitempty"`
-	ServerAddr  string  `json:"server_addr,omitempty"`
-	ServerPort  uint16  `json:"server_port,omitempty"`
-	Seq         uint32  `json:"seq"`
-	Len         uint32  `json:"len"`
-	PID         uint32  `json:"pid,omitempty"`
-	Socket      uint64  `json:"socket,omitempty"`
-	TimestampNS uint64  `json:"timestamp_ns"`
-	Drops       *uint64 `json:"drops,omitempty"` // kind "drops" only: events lost since the start
+	Kind        string `json:"kind"`
+	ClientAddr  string `json:"client_addr,omitempty"`
+	ClientPort  uint16 `json:"client_port,omitempty"`
+	ServerAddr  string `json:"server_addr,omitempty"`
+	ServerPort  uint16 `json:"server_port,omitempty"`
+	Seq         uint32 `json:"seq"`
+	Len         uint32 `json:"len"`
+	PID         uint32 `json:"pid,omitempty"`
+	Socket      uint64 `json:"socket,omitempty"`
+	TimestampNS uint64 `json:"timestamp_ns"`
+	// Dir is "s2c" for data from the server to the client (a response), kept
+	// only with -both-directions; empty for the client -> server direction.
+	Dir   string  `json:"dir,omitempty"`
+	Drops *uint64 `json:"drops,omitempty"` // kind "drops" only: events lost since the start
 	// Kind "clock" only: the wall clock (CLOCK_REALTIME) read between two
 	// reads of the monotonic clock; TimestampNS is their midpoint, SpreadNS
 	// the gap between them, the conversion's uncertainty.
@@ -90,9 +95,35 @@ type Record struct {
 	SpreadNS   *uint64 `json:"spread_ns,omitempty"`
 }
 
+// maxPorts bounds the watched server ports (phase 4 spec 8.13).
+const maxPorts = 8
+
+// portSet is the set of watched server ports, in the order given; 0 is unused.
+type portSet [maxPorts]uint16
+
+func (s portSet) has(p uint16) bool {
+	for _, q := range s {
+		if q != 0 && q == p {
+			return true
+		}
+	}
+	return false
+}
+
+func (s portSet) list() []uint16 {
+	var out []uint16
+	for _, q := range s {
+		if q != 0 {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
 // decodeRecord turns one ring buffer sample into a Record. The end whose local
-// port is the watched port is the server.
-func decodeRecord(raw []byte, port uint16) (Record, error) {
+// port is a watched port is the server. A send by the server or a read by the
+// client carries data from the server to the client: Dir "s2c".
+func decodeRecord(raw []byte, watched portSet) (Record, error) {
 	var ev streamEvent
 	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev); err != nil {
 		return Record{}, err
@@ -107,8 +138,12 @@ func decodeRecord(raw []byte, port uint16) (Record, error) {
 		Kind: name, Seq: ev.Seq, Len: ev.Len, PID: ev.PID, Socket: ev.Socket, TimestampNS: ev.TimestampNS,
 		ClientAddr: local, ClientPort: ev.SPort, ServerAddr: remote, ServerPort: ev.DPort,
 	}
-	if ev.SPort == port {
+	server := watched.has(ev.SPort)
+	if server {
 		rec.ClientAddr, rec.ClientPort, rec.ServerAddr, rec.ServerPort = remote, ev.DPort, local, ev.SPort
+	}
+	if (ev.Kind == kindSend && server) || (ev.Kind == kindRecv && !server) {
+		rec.Dir = "s2c"
 	}
 	if ev.Kind == kindConnect {
 		rec.Seq = ev.Seq + 1 // the SYN takes the initial number; data starts after it (wraps like TCP)
@@ -204,7 +239,7 @@ type ringbufReaderCloser interface {
 }
 
 // runLoop writes every event until the reader is closed, then a last drops record.
-func runLoop(rd ringbufReader, drops dropCounter, out *syncEncoder, port uint16, now func() uint64) {
+func runLoop(rd ringbufReader, drops dropCounter, out *syncEncoder, watched portSet, now func() uint64) {
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -223,7 +258,7 @@ func runLoop(rd ringbufReader, drops dropCounter, out *syncEncoder, port uint16,
 			log.Printf("ring buffer read error: %v", err)
 			continue
 		}
-		record, err := decodeRecord(rec.RawSample, port)
+		record, err := decodeRecord(rec.RawSample, watched)
 		if err != nil {
 			log.Printf("decode ring buffer record: %v", err)
 			continue
@@ -233,16 +268,17 @@ func runLoop(rd ringbufReader, drops dropCounter, out *syncEncoder, port uint16,
 }
 
 type config struct {
-	objPath      string
-	outPath      string
-	port         uint16
-	journal      string // directory of segments; empty: JSONL to outPath, as before
-	segmentBytes int64
-	segmentAge   time.Duration
-	batchRecords int
-	queueBatches int
-	decode       bool // decode the closed segments of journal into outPath, no kernel
-	workers      int
+	objPath        string
+	outPath        string
+	ports          portSet
+	bothDirections bool   // keep the server -> client direction too
+	journal        string // directory of segments; empty: JSONL to outPath, as before
+	segmentBytes   int64
+	segmentAge     time.Duration
+	batchRecords   int
+	queueBatches   int
+	decode         bool // decode the closed segments of journal into outPath, no kernel
+	workers        int
 }
 
 func parseFlags(args []string) (config, error) {
@@ -250,7 +286,9 @@ func parseFlags(args []string) (config, error) {
 	fs.SetOutput(io.Discard)
 	objPath := fs.String("obj", "bpf/probe.o", "compiled BPF object (clang -target bpf bpf/probe.c)")
 	outPath := fs.String("out", "stream.jsonl", "output JSONL path")
-	port := fs.Int("port", 0, "server port to watch (1..65535), required")
+	port := fs.Int("port", 0, "server port to watch (1..65535); or -ports")
+	portList := fs.String("ports", "", "server ports to watch, comma separated (at most 8); or -port")
+	both := fs.Bool("both-directions", false, "keep the server -> client direction too (responses)")
 	journal := fs.String("journal", "", "write raw segments to this directory instead of JSONL: "+
 		"the reader only copies, decoding is done later (couverture-asynchrone-spec.md 4 quater)")
 	segmentBytes := fs.Int64("segment-bytes", 64<<20, "with -journal: close a segment at this size")
@@ -262,17 +300,44 @@ func parseFlags(args []string) (config, error) {
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
-	if *port < 1 || *port > 65535 {
-		return config{}, fmt.Errorf("-port must be in 1..65535, got %d", *port)
+	ports, err := parsePorts(*port, *portList)
+	if err != nil {
+		return config{}, err
 	}
 	if *segmentBytes < journalRecordSize || *segmentAge <= 0 || *batch < 1 || *queue < 1 || *workers < 1 {
 		return config{}, errors.New("-segment-bytes, -segment-age, -batch, -queue-batches and -workers must be positive")
 	}
 	return config{
-		objPath: *objPath, outPath: *outPath, port: uint16(*port), journal: *journal,
+		objPath: *objPath, outPath: *outPath, ports: ports, bothDirections: *both, journal: *journal,
 		segmentBytes: *segmentBytes, segmentAge: *segmentAge, batchRecords: *batch, queueBatches: *queue,
 		decode: *decode, workers: *workers,
 	}, nil
+}
+
+// parsePorts takes -port or -ports (not both): 1 to 8 distinct ports in 1..65535.
+func parsePorts(port int, list string) (portSet, error) {
+	var set portSet
+	if port != 0 && list != "" {
+		return set, errors.New("give -port or -ports, not both")
+	}
+	items := []string{strconv.Itoa(port)}
+	if list != "" || port == 0 {
+		items = strings.Split(list, ",")
+	}
+	if len(items) > maxPorts {
+		return set, fmt.Errorf("at most %d ports, got %d", maxPorts, len(items))
+	}
+	for i, item := range items {
+		p, err := strconv.Atoi(strings.TrimSpace(item))
+		if err != nil || p < 1 || p > 65535 {
+			return set, fmt.Errorf("each port must be in 1..65535, got %q", item)
+		}
+		if set.has(uint16(p)) {
+			return set, fmt.Errorf("port %d given twice", p)
+		}
+		set[i] = uint16(p)
+	}
+	return set, nil
 }
 
 type closer interface {
@@ -292,7 +357,21 @@ var (
 	}
 	newRingbufReader = func(m *ebpf.Map) (ringbufReaderCloser, error) { return ringbuf.NewReader(m) }
 	mapDrops         = mapCounter
-	setPort          = func(m *ebpf.Map, port uint16) error { return m.Update(uint32(0), port, ebpf.UpdateAny) }
+	setPorts         = func(m *ebpf.Map, ports []uint16) error {
+		for _, p := range ports {
+			if err := m.Update(p, uint8(1), ebpf.UpdateAny); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	setBothDirections = func(m *ebpf.Map, both bool) error {
+		var v uint8
+		if both {
+			v = 1
+		}
+		return m.Update(uint32(0), v, ebpf.UpdateAny)
+	}
 )
 
 // hooks, in attach order: the connection opens before any message is sent.
@@ -334,8 +413,11 @@ func run() error {
 		return fmt.Errorf("load collection into kernel (needs CAP_BPF/root): %w", err)
 	}
 	defer coll.Close()
-	if err := setPort(coll.Maps["watched"], cfg.port); err != nil {
+	if err := setPorts(coll.Maps["watched"], cfg.ports.list()); err != nil {
 		return fmt.Errorf("set the watched port: %w", err)
+	}
+	if err := setBothDirections(coll.Maps["options"], cfg.bothDirections); err != nil {
+		return fmt.Errorf("set the direction option: %w", err)
 	}
 	for _, h := range hooks {
 		attach, what := attachKprobe, "kprobe"
@@ -358,7 +440,7 @@ func run() error {
 		return fmt.Errorf("create output: %w", err)
 	}
 	defer f.Close()
-	log.Printf("stream-probe attached on port %d, writing to %s", cfg.port, where)
+	log.Printf("stream-probe attached on ports %v (both directions: %v), writing to %s", cfg.ports.list(), cfg.bothDirections, where)
 	drops, err := mapDrops(coll.Maps["drops"])
 	if err != nil {
 		return err
@@ -386,7 +468,7 @@ func run() error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	go dropsLoop(ticker.C, drops, out, monotonicNS)
-	runLoop(rd, drops, out, cfg.port, monotonicNS)
+	runLoop(rd, drops, out, cfg.ports, monotonicNS)
 	out.Encode(clockRecord(monotonicNS, realtimeNS))
 	return nil
 }

@@ -87,7 +87,7 @@ func v4(kind uint8, local, remote uint16, seq, length uint32) streamEvent {
 
 func TestDecodeRecord(t *testing.T) {
 	t.Run("a send from the client: the local end is the client", func(t *testing.T) {
-		rec, err := decodeRecord(encode(t, v4(kindSend, 40001, serverPort, 1_000_101, 120)), serverPort)
+		rec, err := decodeRecord(encode(t, v4(kindSend, 40001, serverPort, 1_000_101, 120)), portSet{serverPort})
 		if err != nil {
 			t.Fatalf("decodeRecord: %v", err)
 		}
@@ -102,7 +102,7 @@ func TestDecodeRecord(t *testing.T) {
 	})
 
 	t.Run("a read on the server: the local end is the server", func(t *testing.T) {
-		rec, err := decodeRecord(encode(t, v4(kindRecv, serverPort, 40001, 1_000_101, 120)), serverPort)
+		rec, err := decodeRecord(encode(t, v4(kindRecv, serverPort, 40001, 1_000_101, 120)), portSet{serverPort})
 		if err != nil {
 			t.Fatalf("decodeRecord: %v", err)
 		}
@@ -113,7 +113,7 @@ func TestDecodeRecord(t *testing.T) {
 	})
 
 	t.Run("connect gives the first data byte: the initial number plus one (the SYN)", func(t *testing.T) {
-		rec, err := decodeRecord(encode(t, v4(kindConnect, 40001, serverPort, 1_000_100, 0)), serverPort)
+		rec, err := decodeRecord(encode(t, v4(kindConnect, 40001, serverPort, 1_000_100, 0)), portSet{serverPort})
 		if err != nil {
 			t.Fatalf("decodeRecord: %v", err)
 		}
@@ -123,7 +123,7 @@ func TestDecodeRecord(t *testing.T) {
 	})
 
 	t.Run("accept gives the first data byte as read (nothing read yet)", func(t *testing.T) {
-		rec, err := decodeRecord(encode(t, v4(kindAccept, serverPort, 40001, 1_000_101, 0)), serverPort)
+		rec, err := decodeRecord(encode(t, v4(kindAccept, serverPort, 40001, 1_000_101, 0)), portSet{serverPort})
 		if err != nil {
 			t.Fatalf("decodeRecord: %v", err)
 		}
@@ -133,7 +133,7 @@ func TestDecodeRecord(t *testing.T) {
 	})
 
 	t.Run("the initial number wraps like TCP sequence numbers", func(t *testing.T) {
-		rec, err := decodeRecord(encode(t, v4(kindConnect, 40001, serverPort, 0xffffffff, 0)), serverPort)
+		rec, err := decodeRecord(encode(t, v4(kindConnect, 40001, serverPort, 0xffffffff, 0)), portSet{serverPort})
 		if err != nil || rec.Seq != 0 {
 			t.Errorf("decodeRecord() = %+v, %v, want seq 0 after wrapping", rec, err)
 		}
@@ -144,7 +144,7 @@ func TestDecodeRecord(t *testing.T) {
 			v4(kindClose, 40001, serverPort, 0, 0),
 			v4(kindClose, serverPort, 40001, 0, 0),
 		} {
-			rec, err := decodeRecord(encode(t, ev), serverPort)
+			rec, err := decodeRecord(encode(t, ev), portSet{serverPort})
 			if err != nil {
 				t.Fatalf("decodeRecord: %v", err)
 			}
@@ -160,7 +160,7 @@ func TestDecodeRecord(t *testing.T) {
 		copy(b[:], net.ParseIP("fd00::2").To16())
 		ev := v4(kindSend, 40001, serverPort, 5, 1)
 		ev.Family, ev.SAddrV6, ev.DAddrV6 = syscall.AF_INET6, a, b
-		rec, err := decodeRecord(encode(t, ev), serverPort)
+		rec, err := decodeRecord(encode(t, ev), portSet{serverPort})
 		if err != nil {
 			t.Fatalf("decodeRecord: %v", err)
 		}
@@ -170,14 +170,14 @@ func TestDecodeRecord(t *testing.T) {
 	})
 
 	t.Run("an unknown kind is an error, not a guess", func(t *testing.T) {
-		if _, err := decodeRecord(encode(t, v4(9, 40001, serverPort, 0, 0)), serverPort); err == nil {
+		if _, err := decodeRecord(encode(t, v4(9, 40001, serverPort, 0, 0)), portSet{serverPort}); err == nil {
 			t.Error("decodeRecord(kind 9) returned nil error")
 		}
 	})
 
 	t.Run("a truncated sample is an error, not a panic", func(t *testing.T) {
 		raw := encode(t, v4(kindSend, 40001, serverPort, 0, 0))
-		if _, err := decodeRecord(raw[:10], serverPort); err == nil {
+		if _, err := decodeRecord(raw[:10], portSet{serverPort}); err == nil {
 			t.Error("decodeRecord(truncated) returned nil error")
 		}
 	})
@@ -299,7 +299,7 @@ func TestRunLoop(t *testing.T) {
 		}}
 		logOut := captureLog(t, func() {
 			runLoop(rd, &fakeDropCounter{vals: []uint64{2}}, &syncEncoder{enc: json.NewEncoder(&buf)},
-				serverPort, func() uint64 { return 9 })
+				portSet{serverPort}, func() uint64 { return 9 })
 		})
 		got := lines(t, &buf)
 		if len(got) != 2 || got[0].Kind != "send" || got[1].Kind != "drops" || *got[1].Drops != 2 {
@@ -319,7 +319,7 @@ func TestRunLoop(t *testing.T) {
 		var buf bytes.Buffer
 		rd := &scriptedReader{steps: []scriptedStep{{err: ringbuf.ErrClosed}}}
 		logOut := captureLog(t, func() {
-			runLoop(rd, nil, &syncEncoder{enc: json.NewEncoder(&buf)}, serverPort, func() uint64 { return 9 })
+			runLoop(rd, nil, &syncEncoder{enc: json.NewEncoder(&buf)}, portSet{serverPort}, func() uint64 { return 9 })
 		})
 		if buf.Len() != 0 || !strings.Contains(logOut, "shutting down") {
 			t.Errorf("output %q, log %q", buf.String(), logOut)
@@ -329,7 +329,7 @@ func TestRunLoop(t *testing.T) {
 
 func TestParseFlags(t *testing.T) {
 	cfg, err := parseFlags([]string{"-port=8443", "-out=x.jsonl", "-obj=p.o"})
-	want := config{objPath: "p.o", outPath: "x.jsonl", port: 8443,
+	want := config{objPath: "p.o", outPath: "x.jsonl", ports: portSet{8443},
 		segmentBytes: 64 << 20, segmentAge: time.Second, batchRecords: 4096, queueBatches: 256, workers: 4}
 	if err != nil || cfg != want {
 		t.Errorf("parseFlags() = %+v, %v", cfg, err)
@@ -387,11 +387,11 @@ func withRunSeams(t *testing.T) (*attached, *uint16) {
 	t.Helper()
 	origs := []func(){}
 	save := func(restore func()) { origs = append(origs, restore) }
-	a, k, r, m, l, n, s, o, d := removeMemlock, loadCollectionSpec, newCollection, attachKprobe,
-		attachKretprobe, newRingbufReader, setPort, os.Args, mapDrops
+	a, k, r, m, l, n, s, b, o, d := removeMemlock, loadCollectionSpec, newCollection, attachKprobe,
+		attachKretprobe, newRingbufReader, setPorts, setBothDirections, os.Args, mapDrops
 	save(func() {
 		removeMemlock, loadCollectionSpec, newCollection, attachKprobe = a, k, r, m
-		attachKretprobe, newRingbufReader, setPort, os.Args, mapDrops = l, n, s, o, d
+		attachKretprobe, newRingbufReader, setPorts, setBothDirections, os.Args, mapDrops = l, n, s, b, o, d
 	})
 	t.Cleanup(func() {
 		for _, f := range origs {
@@ -407,7 +407,8 @@ func withRunSeams(t *testing.T) (*attached, *uint16) {
 	attachKprobe = at.factory("kprobe")
 	attachKretprobe = at.factory("kretprobe")
 	newRingbufReader = func(*ebpf.Map) (ringbufReaderCloser, error) { return readyReader{}, nil }
-	setPort = func(_ *ebpf.Map, p uint16) error { port = p; return nil }
+	setPorts = func(_ *ebpf.Map, p []uint16) error { port = p[0]; return nil }
+	setBothDirections = func(*ebpf.Map, bool) error { return nil }
 	mapDrops = func(*ebpf.Map) (dropCounter, error) { return &fakeDropCounter{vals: []uint64{0}}, nil }
 	os.Args = []string{"stream-probe", "-port=8443", "-out=" + filepath.Join(t.TempDir(), "out.jsonl")}
 	return at, &port
@@ -450,7 +451,10 @@ func TestRun(t *testing.T) {
 		"load collection into kernel": func() {
 			newCollection = func(*ebpf.CollectionSpec) (*ebpf.Collection, error) { return nil, errors.New("EPERM") }
 		},
-		"set the watched port": func() { setPort = func(*ebpf.Map, uint16) error { return errors.New("no map") } },
+		"set the watched port": func() { setPorts = func(*ebpf.Map, []uint16) error { return errors.New("no map") } },
+		"set the direction option": func() {
+			setBothDirections = func(*ebpf.Map, bool) error { return errors.New("no map") }
+		},
 		"drops counter": func() {
 			mapDrops = func(*ebpf.Map) (dropCounter, error) { return nil, errors.New("map the drops counter: EPERM") }
 		},

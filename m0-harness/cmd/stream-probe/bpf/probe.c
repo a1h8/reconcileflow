@@ -1,5 +1,5 @@
-// stream-probe: the TCP sequence number of each message's first byte on one
-// watched server port, for both ends of the connection
+// stream-probe: the TCP sequence number of each message's first byte on the
+// watched server ports, for both ends of the connection
 // (docs/target/correlation-phase4-spec.md, 4c (a)). The client writes and the
 // server reads in the same sequence space, so the same byte has the same
 // number at both ends, whatever their clocks. Never any payload.
@@ -18,8 +18,10 @@
 // tcp_sendmsg; both end in tcp_sendmsg_locked. On that path one write may
 // leave in several calls: the later ones start inside the message.
 //
-// Only the client -> server direction is kept: sends whose remote port is the
-// watched port, reads whose local port is. Known limit: a read with MSG_PEEK
+// The client -> server direction is kept: sends whose remote port is watched,
+// reads whose local port is. With the option set (key 0 of "options", phase 4
+// spec 8.13), the server -> client direction too: sends whose local port is
+// watched (responses), reads whose remote port is. Known limit: a read with MSG_PEEK
 // does not move copied_seq, so its event is wrong; Go's net package never peeks.
 // tcp_sock has no initial-number field on kernel 7.0 (BTF checked 2026-11-08),
 // hence the connect and accept events, which give the base of the stream.
@@ -72,19 +74,32 @@ struct {
 	__type(value, __u64);
 } drops SEC(".maps");
 
-// key 0: the watched server port, host order, written by the loader.
+// The watched server ports, host order, written by the loader: a set.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8);
+	__type(key, __u16);
+	__type(value, __u8);
+} watched SEC(".maps");
+
+// key 0: 1 keeps the server -> client direction too, written by the loader.
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
-	__type(value, __u16);
-} watched SEC(".maps");
+	__type(value, __u8);
+} options SEC(".maps");
 
-static __always_inline __u16 watched_port(void)
+static __always_inline int is_watched(__u16 port)
+{
+	return bpf_map_lookup_elem(&watched, &port) != 0;
+}
+
+static __always_inline int both_directions(void)
 {
 	__u32 key = 0;
-	__u16 *port = bpf_map_lookup_elem(&watched, &key);
-	return port ? *port : 0;
+	__u8 *on = bpf_map_lookup_elem(&options, &key);
+	return on && *on;
 }
 
 static __always_inline __u16 local_port(struct sock *sk)
@@ -127,7 +142,7 @@ static __always_inline void emit(struct sock *sk, enum kind kind, __u32 seq, __u
 SEC("kprobe/tcp_connect")
 int BPF_KPROBE(on_tcp_connect, struct sock *sk)
 {
-	if (remote_port(sk) != watched_port())
+	if (!is_watched(remote_port(sk)))
 		return 0;
 	struct tcp_sock *tp = (struct tcp_sock *)sk;
 	emit(sk, KIND_CONNECT, BPF_CORE_READ(tp, write_seq), 0);
@@ -137,7 +152,7 @@ int BPF_KPROBE(on_tcp_connect, struct sock *sk)
 SEC("kretprobe/inet_csk_accept")
 int BPF_KRETPROBE(on_inet_csk_accept, struct sock *sk)
 {
-	if (!sk || local_port(sk) != watched_port())
+	if (!sk || !is_watched(local_port(sk)))
 		return 0;
 	struct tcp_sock *tp = (struct tcp_sock *)sk;
 	emit(sk, KIND_ACCEPT, BPF_CORE_READ(tp, copied_seq), 0);
@@ -147,7 +162,9 @@ int BPF_KRETPROBE(on_inet_csk_accept, struct sock *sk)
 SEC("kprobe/tcp_sendmsg_locked")
 int BPF_KPROBE(on_tcp_sendmsg_locked, struct sock *sk, struct msghdr *msg, size_t size)
 {
-	if (size == 0 || remote_port(sk) != watched_port())
+	if (size == 0)
+		return 0;
+	if (!is_watched(remote_port(sk)) && !(both_directions() && is_watched(local_port(sk))))
 		return 0;
 	struct tcp_sock *tp = (struct tcp_sock *)sk;
 	emit(sk, KIND_SEND, BPF_CORE_READ(tp, write_seq), (__u32)size);
@@ -157,7 +174,9 @@ int BPF_KPROBE(on_tcp_sendmsg_locked, struct sock *sk, struct msghdr *msg, size_
 SEC("kprobe/tcp_cleanup_rbuf")
 int BPF_KPROBE(on_tcp_cleanup_rbuf, struct sock *sk, int copied)
 {
-	if (copied <= 0 || local_port(sk) != watched_port())
+	if (copied <= 0)
+		return 0;
+	if (!is_watched(local_port(sk)) && !(both_directions() && is_watched(remote_port(sk))))
 		return 0;
 	struct tcp_sock *tp = (struct tcp_sock *)sk;
 	emit(sk, KIND_RECV, BPF_CORE_READ(tp, copied_seq) - (__u32)copied, (__u32)copied);
@@ -167,8 +186,7 @@ int BPF_KPROBE(on_tcp_cleanup_rbuf, struct sock *sk, int copied)
 SEC("kprobe/tcp_close")
 int BPF_KPROBE(on_tcp_close, struct sock *sk)
 {
-	__u16 port = watched_port();
-	if (local_port(sk) != port && remote_port(sk) != port)
+	if (!is_watched(local_port(sk)) && !is_watched(remote_port(sk)))
 		return 0;
 	emit(sk, KIND_CLOSE, 0, 0);
 	return 0;

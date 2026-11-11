@@ -73,14 +73,14 @@ func appendClock(dst []byte, c Record) []byte {
 }
 
 // decodeJournalRecord turns one record back into the JSONL Record.
-func decodeJournalRecord(b []byte, port uint16) (Record, error) {
+func decodeJournalRecord(b []byte, watched portSet) (Record, error) {
 	if len(b) != journalRecordSize {
 		return Record{}, fmt.Errorf("record of %d bytes, want %d", len(b), journalRecordSize)
 	}
 	p := b[8:]
 	switch b[0] {
 	case recEvent:
-		return decodeRecord(p, port)
+		return decodeRecord(p, watched)
 	case recDrops:
 		n := binary.LittleEndian.Uint64(p[8:])
 		return Record{Kind: "drops", TimestampNS: binary.LittleEndian.Uint64(p), Drops: &n}, nil
@@ -92,7 +92,7 @@ func decodeJournalRecord(b []byte, port uint16) (Record, error) {
 }
 
 // readSegment decodes a whole segment; a foreign file or a cut record is an error.
-func readSegment(path string, port uint16) ([]Record, error) {
+func readSegment(path string, watched portSet) ([]Record, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -106,7 +106,7 @@ func readSegment(path string, port uint16) ([]Record, error) {
 	}
 	out := make([]Record, 0, len(body)/journalRecordSize)
 	for i := 0; i < len(body); i += journalRecordSize {
-		r, err := decodeJournalRecord(body[i:i+journalRecordSize], port)
+		r, err := decodeJournalRecord(body[i:i+journalRecordSize], watched)
 		if err != nil {
 			return nil, fmt.Errorf("%s: record %d: %w", path, i/journalRecordSize, err)
 		}

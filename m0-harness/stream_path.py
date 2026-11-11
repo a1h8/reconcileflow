@@ -124,9 +124,18 @@ class Event:
         return self.four[1]
 
 
-def probe_events(path: Path) -> list[Event]:
-    """Sends and reads, in time order, with their offset from their connection's base."""
-    rows = [(i, r) for i, r in enumerate(_jsonl(path)) if r.get("kind") in END]
+def probe_events(path: Path, port: int | None = None) -> list[Event]:
+    """Sends and reads, in time order, with their offset from their connection's base.
+    Client -> server only: a probe run with -both-directions also writes the
+    responses (dir "s2c"), left out here; with port, only that server port
+    (a probe may watch several, phase 4 spec 8.13)."""
+    rows = [
+        (i, r)
+        for i, r in enumerate(_jsonl(path))
+        if r.get("kind") in END
+        and r.get("dir") != "s2c"
+        and (port is None or r.get("server_port") == port)
+    ]
     rows.sort(key=lambda x: (x[1]["timestamp_ns"], x[0]))
     bases: dict[tuple, tuple[int, int]] = {}  # (four, end) -> (base, incarnation)
     events = []
@@ -144,6 +153,12 @@ def probe_events(path: Path) -> list[Event]:
             Event(line, r["kind"], four, r["seq"], offset, incarnation, r["len"], r["timestamp_ns"])
         )
     return events
+
+
+def _upstream_port(cell_dir: Path) -> int | None:
+    """fake-upstream's port from cell.json, when the cell has one."""
+    path = cell_dir / "cell.json"
+    return json.loads(path.read_text()).get("fake_upstream_port") if path.exists() else None
 
 
 def _truth(cell_dir: Path) -> dict[tuple, str]:
@@ -226,7 +241,7 @@ def analyze_cell(
     shift: bool = False,
 ) -> dict:
     probe = cell_dir / "probe.jsonl"
-    events = probe_events(probe)
+    events = probe_events(probe, _upstream_port(cell_dir))
     no_base = sum(1 for e in events if e.offset is None)
     distinct, duplicates = _distinct(events)
     truth = _truth(cell_dir)
@@ -606,7 +621,7 @@ def attach_cell(
         raise ValueError("attach windows: give attach_params, passes or attach_window_us")
     rows, _ = connection_records(cell_dir, meta)
     rows = [r for r in rows if (r["point"], r["side"]) in SPAN_SIDES and r["conn"] is not None]
-    events, _ = _distinct(probe_events(probe))
+    events, _ = _distinct(probe_events(probe, _upstream_port(cell_dir)))
     before = events
     events, control = _control(events, drop, seed, shift)
     kept_lines = {e.line for e in events}
@@ -787,7 +802,7 @@ def calibration_gaps(cell_dir: Path, window_us: int, wide_us: int) -> dict:
     meta = cell_meta(cell_dir)
     rows, _ = connection_records(cell_dir, meta)
     rows = [r for r in rows if (r["point"], r["side"]) in SPAN_SIDES and r["conn"] is not None]
-    events, _ = _distinct(probe_events(probe))
+    events, _ = _distinct(probe_events(probe, _upstream_port(cell_dir)))
     links = {x.upstream[1]: x.downstream[1] for x in _link_events(events, window_us).links}
     times: dict[tuple, list[tuple[int, int]]] = {}
     for e in events:

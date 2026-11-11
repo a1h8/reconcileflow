@@ -219,3 +219,38 @@ def test_main_prints_the_cell_summary(tmp_path, capsys):
     assert "n1: requests 6 links 6 correct 6 wrong 0 coverage 100.00%" in out
     assert "server offset in probe send 6 recv 6" in out
     assert "wrong links in the run: 0" in out
+
+
+# -- several ports and both directions (phase 4 spec 8.13) ----------------------
+
+
+def test_responses_and_other_ports_leave_the_judgement_unchanged(tmp_path):
+    plain = analyze(write_cell(tmp_path / "a", 6, conns=2))
+    cell = write_cell(tmp_path / "b", 6, conns=2)
+    rows = [json.loads(x) for x in (cell / "probe.jsonl").read_text().splitlines()]
+    extra = []
+    for r in rows:
+        if r["kind"] in ("send", "recv"):  # the response on the same connection
+            back = "recv" if r["kind"] == "send" else "send"
+            extra.append(r | {"kind": back, "dir": "s2c", "timestamp_ns": r["timestamp_ns"] + 7})
+    other = {
+        "client_addr": "127.0.0.1",
+        "client_port": 51_000,
+        "server_addr": "127.0.0.1",
+        "server_port": 5_000,
+        "pid": 9,
+        "socket": 1,
+        "len": 0,
+    }
+    extra += [
+        other | {"kind": "connect", "seq": 10, "timestamp_ns": T0},
+        other | {"kind": "accept", "seq": 10, "timestamp_ns": T0 + 1},
+        other | {"kind": "send", "seq": 10, "len": REQUEST, "timestamp_ns": T0 + 2},
+        other | {"kind": "recv", "seq": 10, "len": REQUEST, "timestamp_ns": T0 + 3},
+    ]
+    (cell / "probe.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows + extra))
+    (cell / "cell.json").write_text(json.dumps({"fake_upstream_port": FU_PORT}))
+    assert analyze(cell) == plain
+    events = sp.probe_events(cell / "probe.jsonl", port=FU_PORT)
+    assert all(e.four[3] == FU_PORT for e in events)
+    assert events == sp.probe_events(tmp_path / "a" / "n1" / "probe.jsonl", port=FU_PORT)

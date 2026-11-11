@@ -36,7 +36,7 @@ func TestJournalRecordsRoundTrip(t *testing.T) {
 	}
 	var got []Record
 	for i := 0; i < len(b); i += journalRecordSize {
-		r, err := decodeJournalRecord(b[i:i+journalRecordSize], testPort)
+		r, err := decodeJournalRecord(b[i:i+journalRecordSize], portSet{testPort})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +54,7 @@ func TestJournalRecordsRoundTrip(t *testing.T) {
 	if _, err := appendEvent(nil, make([]byte, 79)); err == nil {
 		t.Error("an event of the wrong size was journaled")
 	}
-	if _, err := decodeJournalRecord(make([]byte, journalRecordSize), testPort); err == nil {
+	if _, err := decodeJournalRecord(make([]byte, journalRecordSize), portSet{testPort}); err == nil {
 		t.Error("a record of unknown type was decoded")
 	}
 }
@@ -110,7 +110,7 @@ func TestSegmentWriterRotatesBySizeAndAge(t *testing.T) {
 	}
 	counts := []int{3, 1, 1}
 	for i, name := range got {
-		recs, err := readSegment(filepath.Join(dir, name), testPort)
+		recs, err := readSegment(filepath.Join(dir, name), portSet{testPort})
 		if err != nil || len(recs) != counts[i] {
 			t.Fatalf("%s: %d records, %v; want %d", name, len(recs), err, counts[i])
 		}
@@ -124,7 +124,7 @@ func TestSegmentWriterRotatesBySizeAndAge(t *testing.T) {
 func TestReadSegmentRefusesAForeignFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.seg")
 	os.WriteFile(path, []byte("not a journal segment at all"), 0o600)
-	if _, err := readSegment(path, testPort); err == nil {
+	if _, err := readSegment(path, portSet{testPort}); err == nil {
 		t.Fatal("a foreign file was read as a segment")
 	}
 	dir := t.TempDir()
@@ -140,7 +140,7 @@ func TestReadSegmentRefusesAForeignFile(t *testing.T) {
 	seg := filepath.Join(dir, "seg-00000001.seg")
 	raw, _ := os.ReadFile(seg)
 	os.WriteFile(seg, raw[:len(raw)-1], 0o600) // cut inside the last record
-	if _, err := readSegment(seg, testPort); err == nil {
+	if _, err := readSegment(seg, portSet{testPort}); err == nil {
 		t.Fatal("a segment cut inside a record was read")
 	}
 }
@@ -216,7 +216,7 @@ func TestRunWithAJournal(t *testing.T) {
 		if !strings.HasSuffix(n, ".seg") {
 			t.Fatalf("%s left open", n)
 		}
-		recs, err := readSegment(filepath.Join(dir, n), 8443)
+		recs, err := readSegment(filepath.Join(dir, n), portSet{8443})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -28,7 +28,7 @@ func writeJournal(t *testing.T, dir string, n, k int) []Record {
 			seq++
 			raw := rawEvent(t, kindSend, seq)
 			batch, _ = appendEvent(batch, raw)
-			r, _ := decodeRecord(raw, testPort)
+			r, _ := decodeRecord(raw, portSet{testPort})
 			want = append(want, r)
 		}
 		batch = appendDrops(batch, uint64(s), uint64(s))
@@ -82,7 +82,7 @@ func TestDecodeJournalGivesTheDirectModesLinesInOrder(t *testing.T) {
 	dir := t.TempDir()
 	want := jsonLines(t, writeJournal(t, dir, 40, 25))
 	out := filepath.Join(t.TempDir(), "probe.jsonl")
-	n, err := decodeJournal(dir, testPort, out, 8)
+	n, err := decodeJournal(dir, portSet{testPort}, out, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,13 +108,13 @@ func TestDecodeJournalSkipsOpenSegmentsAndRefusesBadOnes(t *testing.T) {
 	writeJournal(t, dir, 3, 2)
 	os.WriteFile(filepath.Join(dir, "seg-00000004.open"), journalHeader(), 0o600)
 	out := filepath.Join(t.TempDir(), "probe.jsonl")
-	if n, err := decodeJournal(dir, testPort, out, 2); err != nil || n != 3 {
+	if n, err := decodeJournal(dir, portSet{testPort}, out, 2); err != nil || n != 3 {
 		t.Fatalf("decodeJournal = %d, %v; want the 3 closed segments", n, err)
 	}
 	bad := filepath.Join(dir, "seg-00000002.seg")
 	raw, _ := os.ReadFile(bad)
 	os.WriteFile(bad, raw[:len(raw)-3], 0o600)
-	if _, err := decodeJournal(dir, testPort, out, 2); err == nil || !strings.Contains(err.Error(), "seg-00000002") {
+	if _, err := decodeJournal(dir, portSet{testPort}, out, 2); err == nil || !strings.Contains(err.Error(), "seg-00000002") {
 		t.Fatalf("decodeJournal on a cut segment = %v, want an error naming it", err)
 	}
 }

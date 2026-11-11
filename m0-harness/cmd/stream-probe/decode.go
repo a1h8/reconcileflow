@@ -47,7 +47,7 @@ func closedSegments(dir string) ([]string, error) {
 
 // decodeJournal decodes every closed segment of dir into out, in order, and
 // returns how many segments it read. A foreign or cut segment stops it.
-func decodeJournal(dir string, port uint16, out string, workers int) (int, error) {
+func decodeJournal(dir string, watched portSet, out string, workers int) (int, error) {
 	paths, err := closedSegments(dir)
 	if err != nil {
 		return 0, err
@@ -64,7 +64,7 @@ func decodeJournal(dir string, port uint16, out string, workers int) (int, error
 	for range max(workers, 1) {
 		go func() {
 			for i := range next {
-				recs, err := readSegment(paths[i], port)
+				recs, err := readSegment(paths[i], watched)
 				results[i] <- result{recs, err}
 			}
 		}()
@@ -106,7 +106,7 @@ func runDecode(cfg config) error {
 	if cfg.journal == "" {
 		return fmt.Errorf("-decode needs -journal")
 	}
-	n, err := decodeJournal(cfg.journal, cfg.port, cfg.outPath, cfg.workers)
+	n, err := decodeJournal(cfg.journal, cfg.ports, cfg.outPath, cfg.workers)
 	if err != nil {
 		return fmt.Errorf("decode journal: %w", err)
 	}
