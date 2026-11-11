@@ -279,7 +279,7 @@ def analyze(level_dir: Path, calibration: str = "isolated") -> dict:
     return report
 
 
-def aligned(level_dir: Path, theirs: dict, calibration: str = "isolated") -> dict:
+def aligned(level_dir: Path, theirs: dict, calibration: str = "isolated", linker=None) -> dict:
     """Aligned comparison (phase 4 spec 8.10.4): their problem only (server
     span of a service -> its client span toward each called service), on the
     traces of the second half, for every method alike.
@@ -337,7 +337,10 @@ def aligned(level_dir: Path, theirs: dict, calibration: str = "isolated") -> dic
         slots.pop(tc, None)
 
     predictions = {}  # method -> {(trace, child type): [child key | None]}
-    linked, _, _, _ = _link(spans, found, first, calibration)
+    if linker is None:
+        linked, _, _, _ = _link(spans, found, first, calibration)
+    else:  # another way of linking ours (spec 8.11)
+        linked = linker(spans, found, first, calibration)
     ours = defaultdict(list)
     for (_, parent), child in linked.items():
         c = by_key[child]["type"]
