@@ -120,3 +120,69 @@ def test_stream_positions_need_http1_towards_fake_upstream(tmp_path):
 
 def test_without_the_probe_a_cell_is_unchanged():
     assert cell_commands()["fu"] == ""
+
+
+# -- both directions on the proxy's two ports (phase 4 spec 8.13) ---------------
+
+
+def both_commands(**env):
+    script = (
+        f"source {SCRIPT}; "
+        'probe_args /run/n1 /run/bin 18443 19443; echo "probe: ${PROBE_ARGS[*]}"; '
+        'decode_args /run/n1 18443 19443; echo "decode: ${DECODE_ARGS[*]}"'
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=HARNESS,
+        env={"PATH": os.environ["PATH"], **env},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return dict(line.split(": ", 1) for line in result.stdout.splitlines())
+
+
+def test_with_both_directions_the_probe_watches_the_hop_and_fake_upstream():
+    got = both_commands(PROBE_TCP_SEQ="1", PROBE_BOTH="1")
+    assert got["probe"] == (
+        "-obj /run/bin/probe.o -ports 19443,18443 -both-directions -journal /run/n1/journal"
+    )
+    assert (
+        got["decode"]
+        == "-decode -journal /run/n1/journal -ports 19443,18443 -out /run/n1/probe.jsonl"
+    )
+
+
+def test_without_both_directions_the_probe_is_unchanged():
+    got = both_commands(PROBE_TCP_SEQ="1")
+    assert got["probe"] == "-obj /run/bin/probe.o -port 18443 -journal /run/n1/journal"
+    assert got["decode"] == "-decode -journal /run/n1/journal -port 18443 -out /run/n1/probe.jsonl"
+
+
+def test_both_directions_setting_must_be_0_or_1(tmp_path):
+    assert "PROBE_BOTH must be 0 or 1" in phase1(tmp_path, PROBE_BOTH="2")
+
+
+def test_both_directions_need_the_probe(tmp_path):
+    assert "PROBE_BOTH=1 needs PROBE_TCP_SEQ=1" in phase1(tmp_path, PROBE_BOTH="1")
+
+
+def test_both_directions_need_a_single_hop(tmp_path):
+    err = phase1(
+        tmp_path,
+        PROBE_BOTH="1",
+        PROBE_TCP_SEQ="1",
+        HOP_UPSTREAM_PROTO="h1",
+        BPF_HEADERS=headers(tmp_path),
+        HOPS="1 2",
+    )
+    assert "PROBE_BOTH=1 needs HOPS=1" in err
+
+
+def test_both_directions_reach_the_measuring_phase():
+    # Phase 2 is started again (under sudo) with an explicit environment.
+    text = SCRIPT.read_text()
+    block = text[text.index("env_args=(") :]
+    block = block[: block.index(")")]
+    assert 'PROBE_BOTH="$PROBE_BOTH"' in block

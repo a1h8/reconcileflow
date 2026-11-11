@@ -65,6 +65,10 @@
 #             number of each message, both ends);
 #             needs HOP_UPSTREAM_PROTO=h1, clang, and root even with NO_AGENT=1
 #             (phase 4, 4c). Default 0
+#   PROBE_BOTH  1: with PROBE_TCP_SEQ=1, the probe also watches the hop's own
+#             port and keeps both directions (requests read and responses sent
+#             by the hop, its calls and their answers): the recipe on the
+#             probe's events (phase 4 spec 8.13). Needs HOPS=1. Default 0
 #   FU_STREAM_OFFSETS  1: fake-upstream logs each request's position in the raw
 #             stream (-stream-offsets), the truth the probe's offsets are judged
 #             against; needs HOP_UPSTREAM_PROTO=h1. It hides fake-upstream's
@@ -105,22 +109,33 @@ HOP_MAX_IDLE=${HOP_MAX_IDLE:-$CONCURRENCY}
 BPF_STATS=${BPF_STATS:-0}
 PROBE_TCP_SEQ=${PROBE_TCP_SEQ:-0}
 FU_STREAM_OFFSETS=${FU_STREAM_OFFSETS:-0}
+PROBE_BOTH=${PROBE_BOTH:-0}
 BPF_HEADERS=${BPF_HEADERS:-cmd/strong-tier-probe/bpf}
 
 # fake-upstream logs stream positions only when asked (4c, truth for the probe).
 FU_FLAGS=()
 if [[ $FU_STREAM_OFFSETS == 1 ]]; then FU_FLAGS=(-stream-offsets); fi
 
-# probe_args <cell-dir> <bin-dir> <fake-upstream-port>: stream-probe's flags, in PROBE_ARGS.
-# Under load the probe only copies into its journal (raw segments); decoding
-# is done once it has stopped (decode_args), so writing never slows reading.
+# probe_args <cell-dir> <bin-dir> <fake-upstream-port> [<hop-port>]: stream-probe's
+# flags, in PROBE_ARGS. Under load the probe only copies into its journal (raw
+# segments); decoding is done once it has stopped (decode_args), so writing
+# never slows reading. With PROBE_BOTH=1, the hop's port too, both directions.
 probe_args() {
-	PROBE_ARGS=(-obj "$2/probe.o" -port "$3" -journal "$1/journal")
+	if ((PROBE_BOTH)); then
+		PROBE_ARGS=(-obj "$2/probe.o" -ports "$4,$3" -both-directions -journal "$1/journal")
+	else
+		PROBE_ARGS=(-obj "$2/probe.o" -port "$3" -journal "$1/journal")
+	fi
 }
 
-# decode_args <cell-dir> <fake-upstream-port>: the journal into probe.jsonl, in DECODE_ARGS.
+# decode_args <cell-dir> <fake-upstream-port> [<hop-port>]: the journal into
+# probe.jsonl, in DECODE_ARGS.
 decode_args() {
-	DECODE_ARGS=(-decode -journal "$1/journal" -port "$2" -out "$1/probe.jsonl")
+	if ((PROBE_BOTH)); then
+		DECODE_ARGS=(-decode -journal "$1/journal" -ports "$3,$2" -out "$1/probe.jsonl")
+	else
+		DECODE_ARGS=(-decode -journal "$1/journal" -port "$2" -out "$1/probe.jsonl")
+	fi
 }
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -145,6 +160,9 @@ build() {
 		command -v clang >/dev/null || die "PROBE_TCP_SEQ=1 needs clang to build the probe"
 	fi
 	[[ $FU_STREAM_OFFSETS == [01] ]] || die "FU_STREAM_OFFSETS must be 0 or 1"
+	[[ $PROBE_BOTH == [01] ]] || die "PROBE_BOTH must be 0 or 1"
+	[[ $PROBE_BOTH == 0 || $PROBE_TCP_SEQ == 1 ]] || die "PROBE_BOTH=1 needs PROBE_TCP_SEQ=1"
+	[[ $PROBE_BOTH == 0 || $HOPS == 1 ]] || die "PROBE_BOTH=1 needs HOPS=1 (the hop's port is chosen before the probe starts)"
 	[[ $FU_STREAM_OFFSETS == 0 || $HOP_UPSTREAM_PROTO == h1 ]] ||
 		die "FU_STREAM_OFFSETS=1 needs HOP_UPSTREAM_PROTO=h1 (fake-upstream counts positions in HTTP/1.1 only)"
 	[[ -f go.mod && -d cmd/load-gen ]] || die "run from m0-harness/"
@@ -194,7 +212,7 @@ build() {
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY WARM_REQUESTS=$WARM_REQUESTS STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
 			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}" \
-			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO HOP_MAX_IDLE=$HOP_MAX_IDLE BPF_STATS=$BPF_STATS PROBE_TCP_SEQ=$PROBE_TCP_SEQ FU_STREAM_OFFSETS=$FU_STREAM_OFFSETS"
+			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO HOP_MAX_IDLE=$HOP_MAX_IDLE BPF_STATS=$BPF_STATS PROBE_TCP_SEQ=$PROBE_TCP_SEQ FU_STREAM_OFFSETS=$FU_STREAM_OFFSETS PROBE_BOTH=$PROBE_BOTH"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
@@ -206,7 +224,7 @@ build() {
 		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS"
 		LG_HTTP1="$LG_HTTP1" LG_CONNS="$LG_CONNS" HOP_UPSTREAM_PROTO="$HOP_UPSTREAM_PROTO"
 		HOP_MAX_IDLE="$HOP_MAX_IDLE" BPF_STATS="$BPF_STATS" PROBE_TCP_SEQ="$PROBE_TCP_SEQ"
-		FU_STREAM_OFFSETS="$FU_STREAM_OFFSETS")
+		FU_STREAM_OFFSETS="$FU_STREAM_OFFSETS" PROBE_BOTH="$PROBE_BOTH")
 	if ((NO_AGENT && !PROBE_TCP_SEQ)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
@@ -284,10 +302,11 @@ cell() {
 	"$bin/fake-upstream" -addr "127.0.0.1:$fu_port" -out "$dir/fu.jsonl" "${FU_FLAGS[@]}" 2>"$dir/fu.log" &
 	pids+=($!)
 	wait_for 10 listening "$fu_port" || die "$name: fake-upstream did not listen"
-	local probe=""
+	local probe="" hop1_port=""
+	((PROBE_BOTH)) && hop1_port=$(free_port) # watched before the hop starts
 	if ((PROBE_TCP_SEQ)); then
 		# Attached before the first connection, so every connection's base is seen.
-		probe_args "$dir" "$bin" "$fu_port"
+		probe_args "$dir" "$bin" "$fu_port" "$hop1_port"
 		"$bin/stream-probe" "${PROBE_ARGS[@]}" 2>"$dir/probe.log" &
 		probe=$!
 		wait_for 15 grep -q "stream-probe attached" "$dir/probe.log" || die "$name: stream-probe did not attach"
@@ -297,6 +316,7 @@ cell() {
 	local next="https://127.0.0.1:$fu_port" ports=("$fu_port") hop_ports=() kinds=() k
 	for ((k = n; k >= 1; k--)); do
 		local port; port=$(free_port)
+		((k == 1)) && [[ -n $hop1_port ]] && port=$hop1_port
 		local kind; kind=$(kind_of "$k")
 		kinds=("$kind" "${kinds[@]}")
 		if [[ $kind == relay ]]; then
@@ -409,7 +429,7 @@ cell() {
 	if [[ -n $probe ]]; then
 		kill -INT "$probe"
 		wait "$probe" || true
-		decode_args "$dir" "$fu_port"
+		decode_args "$dir" "$fu_port" "$hop1_port"
 		"$bin/stream-probe" "${DECODE_ARGS[@]}" 2>>"$dir/probe.log" || die "$name: could not decode the probe's journal"
 	fi
 	echo "$name: hops=$n kind=$HOP_KIND strip_hop=$strip_hop baggage=$BAGGAGE agent=$AGENT_KIND" \
