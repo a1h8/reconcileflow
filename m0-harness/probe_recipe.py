@@ -8,8 +8,15 @@ alternate: an exchange starts at the first ask after an answer and ends at the
 first answer after it. The first exchange of a TLS connection is the
 handshake, left out.
 
-- request life = [the proxy reads the request, the proxy sends its response];
-- call life    = [the proxy sends the call, the proxy reads its answer].
+- request life = [the proxy's first read of the asks, the proxy sends its response];
+- call life    = [the proxy's last send of the asks, the proxy reads its answer].
+
+The asks of an exchange may hold more than one message: a TLS client sends
+its Finished right after the handshake and the server answers nothing, so an
+idle connection's Finished joins its first call (seen at c200: seconds
+before). Hence these bounds: a request's starts at its first read (its life
+can only widen), a call's at its last send (its life can only narrow). Either
+way a call stays nested in its own request.
 
 Both bounds are system calls of one process on one clock: a call cannot start
 before its request is read, nor end after the proxy answered. Then
@@ -84,15 +91,18 @@ def lives(probe: Path, hop_port: int, fu_port: int, handshake: bool = True):
                 seen[conn].append((ts, False, None))
     requests, calls = [], []
     for conn, events in seen.items():
+        upstream = conn[1] != hop_port
         exchanges, open_ = [], None
         for ts, ask, offset in events:
             if ask:
                 if open_ is None:
-                    open_ = [ts, []]
+                    open_ = [ts, [], ts]
+                open_[2] = ts
                 if offset is not None:
                     open_[1].append(offset)
             elif open_ is not None:
-                exchanges.append((open_[0], ts, tuple(open_[1])))
+                start = open_[2] if upstream else open_[0]
+                exchanges.append((start, ts, tuple(open_[1])))
                 open_ = None
         if handshake:
             exchanges = exchanges[1:]

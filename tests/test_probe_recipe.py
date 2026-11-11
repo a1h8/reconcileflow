@@ -49,6 +49,14 @@ class Cell:
         self._ev("accept", cport, sport, 1000, 0, t + 1, server)
         self.exchange(cport, sport, t + 2, HELLO, FLIGHT, handshake=True)
 
+    def finish(self, cport, sport, t):
+        """The client's TLS Finished, sent right after the handshake: the server
+        answers nothing, so it joins the next request's asks."""
+        st = self.conns[cport, sport]
+        self._ev("send", cport, sport, st["c2s"], 64, t, 1 if sport == HOP else 2)
+        self._ev("recv", cport, sport, st["c2s"], 64, t + 1, 2 if sport == HOP else 3)
+        st["c2s"] += 64
+
     def exchange(self, cport, sport, t, ask, answer, handshake=False, answer_at=50):
         """The client writes ask bytes at t; the server answers at t + answer_at."""
         client, server = (1, 2) if sport == HOP else (2, 3)
@@ -154,3 +162,17 @@ def test_a_call_sent_before_its_request_is_read_is_a_causality_violation(tmp_pat
     up[-1]["timestamp_ns"] -= 200
     report = pr.judge(c.write(tmp_path))
     assert report["causality_violations"] == 1
+
+
+def test_a_finished_sent_long_before_the_first_call_does_not_start_it(tmp_path):
+    # Seen on the bench (c200): the upstream connection opens, its TLS Finished
+    # leaves at once, the first call only seconds later.
+    c = busy(n=40, spacing=500)
+    for i in range(4):
+        c.finish(60_000 + i, FU, T0 + 100 + i)
+    _, calls = pr.lives(c.write(tmp_path) / "probe.jsonl", HOP, FU)
+    first = [x for x in calls if x.rank == 1]
+    assert all(x.start > T0 + 10_000 for x in first)
+    report = pr.judge(tmp_path / "n1")
+    assert report["causality_violations"] == 0
+    assert report["wrong"] == 0 and report["right"] == report["judged"] > 0
