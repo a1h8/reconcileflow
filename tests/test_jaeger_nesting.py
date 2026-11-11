@@ -62,9 +62,7 @@ def request(k, start, call_at=100, call_len=300, total=1000, two_calls=False):
         span(t, f"c{k}", f"s{k}", "front", "client", "/back.Call", start + call_at, call_len),
     ]
     if two_calls:
-        spans.append(
-            span(t, f"d{k}", f"s{k}", "front", "client", "/back.Call", start + 600, 200)
-        )
+        spans.append(span(t, f"d{k}", f"s{k}", "front", "client", "/back.Call", start + 600, 200))
     return spans
 
 
@@ -151,11 +149,164 @@ def test_a_parent_calling_two_services_is_judged_per_join(tmp_path):
     traces = []
     for k in range(200):
         t = request(k, k * 10_000, call_at=100 + k % 7)
-        t.append(span(f"t{k:04d}", f"e{k}", f"s{k}", "front", "client", "/side.Call",
-                      k * 10_000 + 500 + k % 5, 200))
+        t.append(
+            span(
+                f"t{k:04d}",
+                f"e{k}",
+                f"s{k}",
+                "front",
+                "client",
+                "/side.Call",
+                k * 10_000 + 500 + k % 5,
+                200,
+            )
+        )
         traces.append(t)
     trace_file(tmp_path, "a.json", traces)
     report = jn.analyze(tmp_path, calibration="isolated")
     assert len(report["joins"]) == 2
     for j in report["joins"].values():
         assert j["wrong"] == 0
+
+
+# Aligned comparison (phase 4 spec 8.10.4).
+
+
+def their_output(traces, method="TW"):
+    """Their converted e2e JSON; traces: {trace: (true [(t, s)], pred [(t, s) | None])}."""
+    return {
+        "traces": {
+            method: {
+                t: {"true": [list(x) for x in true], "pred": [x and list(x) for x in pred]}
+                for t, (true, pred) in traces.items()
+            }
+        }
+    }
+
+
+def calm_with_back_server(n=200):
+    traces = []
+    for k in range(n):
+        t = request(k, k * 10_000, call_at=100 + k % 7)
+        t.append(
+            span(
+                f"t{k:04d}",
+                f"b{k}",
+                f"c{k}",
+                "back",
+                "server",
+                "Call",
+                k * 10_000 + 110 + k % 7,
+                200,
+            )
+        )
+        traces.append(t)
+    return traces
+
+
+def test_aligned_counts_another_traces_child_wrong_and_a_missing_one_refused(tmp_path):
+    trace_file(tmp_path, "a.json", calm_with_back_server())
+    theirs = {}
+    for k in range(200):
+        t = f"t{k:04d}"
+        pred = [(t, f"c{k}")]
+        if k == 150:
+            pred = [("t0151", "c151")]
+        if k == 160:
+            pred = [None]
+        theirs[t] = ([(t, f"c{k}")], pred)
+    report = jn.aligned(tmp_path, their_output(theirs), calibration="isolated")
+    tw = report["methods"]["TW"]["slots"]
+    assert tw["wrong"] == 1 and tw["refused"] == 1 and tw["right"] == 98
+
+
+def test_aligned_a_trace_with_a_refusal_and_no_wrong_is_without_wrong_but_not_right(tmp_path):
+    trace_file(tmp_path, "a.json", calm_with_back_server())
+    theirs = {
+        f"t{k:04d}": ([(f"t{k:04d}", f"c{k}")], [None if k == 170 else (f"t{k:04d}", f"c{k}")])
+        for k in range(200)
+    }
+    e2e = jn.aligned(tmp_path, their_output(theirs), calibration="isolated")["methods"]["TW"][
+        "traces"
+    ]
+    assert e2e["judged"] == 100
+    assert e2e["right"] == 99 and e2e["without_wrong"] == 100 and e2e["with_refusal"] == 1
+
+
+def test_aligned_counts_only_the_second_half(tmp_path):
+    trace_file(tmp_path, "a.json", calm_with_back_server())
+    # Wrong everywhere in the first half: must not count.
+    theirs = {
+        f"t{k:04d}": (
+            [(f"t{k:04d}", f"c{k}")],
+            [(f"t{(k + 1) % 100:04d}", f"c{(k + 1) % 100}") if k < 100 else (f"t{k:04d}", f"c{k}")],
+        )
+        for k in range(200)
+    }
+    tw = jn.aligned(tmp_path, their_output(theirs), calibration="isolated")["methods"]["TW"]
+    assert tw["slots"]["wrong"] == 0 and tw["slots"]["right"] == 100
+
+
+def test_aligned_leaves_a_client_to_server_join_out(tmp_path):
+    trace_file(tmp_path, "a.json", calm_with_back_server())
+    theirs = {f"t{k:04d}": ([(f"t{k:04d}", f"c{k}")], [(f"t{k:04d}", f"c{k}")]) for k in range(200)}
+    report = jn.aligned(tmp_path, their_output(theirs), calibration="isolated")
+    assert report["compared"] == ["front/server/GET / -> front/client//back.Call"]
+    ours = report["methods"]["ours"]["slots"]
+    assert ours["right"] + ours["wrong"] + ours["refused"] == 100
+    assert ours["wrong"] == 0
+
+
+def test_aligned_a_parent_calling_two_services_has_one_slot_each(tmp_path):
+    traces, theirs = [], {}
+    for k in range(200):
+        t = f"t{k:04d}"
+        spans = request(k, k * 10_000, call_at=100 + k % 7)
+        spans.append(
+            span(
+                t, f"e{k}", f"s{k}", "front", "client", "/side.Call", k * 10_000 + 500 + k % 5, 200
+            )
+        )
+        traces.append(spans)
+        theirs[t] = ([(t, f"c{k}"), (t, f"e{k}")], [(t, f"c{k}"), (t, f"e{k}")])
+    trace_file(tmp_path, "a.json", traces)
+    report = jn.aligned(tmp_path, their_output(theirs), calibration="isolated")
+    assert report["apart_multiple_calls"] == 0
+    assert report["methods"]["TW"]["slots"]["right"] == 200
+
+
+def server_chain(k, start):
+    """Node.js-like: only server spans, a root client span, no call spans."""
+    t = f"t{k:04d}"
+    return [
+        span(t, f"r{k}", None, "init", "client", "init-span", start, 1000),
+        span(t, f"a{k}", f"r{k}", "one", "server", "span-one", start + 10, 900),
+        span(t, f"b{k}", f"a{k}", "two", "server", "span-two", start + 100 + k % 7, 300),
+    ]
+
+
+def test_aligned_maps_their_made_up_client_copies_to_our_server_spans(tmp_path):
+    trace_file(tmp_path, "a.json", [server_chain(k, k * 10_000) for k in range(200)])
+    theirs = {}
+    for k in range(200):
+        t = f"t{k:04d}"
+        both = [(t, f"a{k}_client"), (t, f"b{k}_client")]
+        theirs[t] = (both, both)
+    report = jn.aligned(tmp_path, their_output(theirs), calibration="isolated")
+    assert report["compared"] == [
+        "init/client/init-span -> one/server/span-one",
+        "one/server/span-one -> two/server/span-two",
+    ]
+    assert report["truth_mismatch"] == 0
+    tw = report["methods"]["TW"]
+    assert tw["unmatched"] == 0 and tw["slots"]["right"] == 200
+
+
+def test_aligned_reports_their_truth_when_it_differs_from_ours(tmp_path):
+    trace_file(tmp_path, "a.json", calm_with_back_server())
+    theirs = {
+        f"t{k:04d}": ([(f"t{k:04d}", f"c{k}")] if k != 180 else [], [(f"t{k:04d}", f"c{k}")])
+        for k in range(200)
+    }
+    report = jn.aligned(tmp_path, their_output(theirs), calibration="isolated")
+    assert report["truth_mismatch"] == 1

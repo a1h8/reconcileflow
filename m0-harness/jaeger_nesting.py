@@ -28,6 +28,7 @@ accuracy, per service: the share of judged parent spans whose every outgoing
 join gives the true child (or none when there is none); a refusal is wrong.
 
 Usage: jaeger_nesting.py <level-dir> [--calibration isolated|truth] [--json]
+       [--theirs <converted e2e json>]   (aligned comparison, spec 8.10.4)
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from calibrate_timing import LOCAL_LIMIT_PERMILLE, LOCAL_SPAN_US, choose
+
 from reconcileflow.correlation.timing import JoinParams, Signal, Timed, timed_links
 from reconcileflow.correlation.topology import load as load_topology
 
@@ -62,12 +64,19 @@ def load(level_dir: Path) -> list[dict]:
                 spans.append(
                     {
                         "key": number[trace["traceID"], s["spanID"]],
-                        "type": (process["serviceName"], tags.get("span.kind", ""), s["operationName"]),
+                        "type": (
+                            process["serviceName"],
+                            tags.get("span.kind", ""),
+                            s["operationName"],
+                        ),
                         "pod": ptags.get("hostname", process["serviceName"]),
                         "start": s["startTime"],
                         "end": s["startTime"] + s["duration"],
-                        "parent": number.get((trace["traceID"], refs[0]["spanID"])) if refs else None,
+                        "parent": number.get((trace["traceID"], refs[0]["spanID"]))
+                        if refs
+                        else None,
                         "trace": trace["traceID"],
+                        "sid": s["spanID"],
                     }
                 )
     return spans
@@ -81,11 +90,7 @@ def observable(span: dict) -> dict:
 
 def joins(spans: list[dict]) -> list[tuple[Type, Type]]:
     by_key = {s["key"]: s for s in spans}
-    found = {
-        (by_key[s["parent"]]["type"], s["type"])
-        for s in spans
-        if s["parent"] in by_key
-    }
+    found = {(by_key[s["parent"]]["type"], s["type"]) for s in spans if s["parent"] in by_key}
     return sorted(found)
 
 
@@ -140,16 +145,27 @@ def true_pairs(spans, join, traces):
 
 
 def params_from(pairs) -> JoinParams:
-    rows = [({"start": a["start"], "end": a["end"]},
-             {"start": b["start"], "end": b["end"], "handler": b["start"]}) for a, b in pairs]
+    rows = [
+        (
+            {"start": a["start"], "end": a["end"]},
+            {"start": b["start"], "end": b["end"], "handler": b["start"]},
+        )
+        for a, b in pairs
+    ]
     chosen = choose(rows)
     signals = tuple(Signal(s["name"], s["offset_us"], s["window_us"]) for s in chosen["signals"])
     return JoinParams(signals, chosen["margin_us"], 32, LOCAL_SPAN_US, LOCAL_LIMIT_PERMILLE)
 
 
 def _topology(n: int):
-    point = {"host": "data", "visibility": "kernel", "clock": "data",
-             "timestamps": "kernel_monotonic", "inbound": [], "outbound": []}
+    point = {
+        "host": "data",
+        "visibility": "kernel",
+        "clock": "data",
+        "timestamps": "kernel_monotonic",
+        "inbound": [],
+        "outbound": [],
+    }
     points = {f"j{i}-{r}": dict(point) for i in range(n) for r in "ab"}
     hops = [{"from": f"j{i}-a", "to": f"j{i}-b", "pooling": True} for i in range(n)]
     return load_topology({"points": points, "hops": hops})
@@ -166,16 +182,17 @@ def halves(spans):
     return first, set(starts) - first
 
 
-def analyze(level_dir: Path, calibration: str = "isolated") -> dict:
-    spans = load(level_dir)
-    found = joins(spans)
-    first, second = halves(spans)
-    by_key = {s["key"]: s for s in spans}
-
+def _link(spans, found, first, calibration):
+    """Our links, per join: {(f"j{i}a", parent key): child key}, the refusal
+    status of the unlinked parents, the params and the calibration pairs."""
     params, observations, index = {}, [], {}
     calib_pairs = {}
     for i, join in enumerate(found):
-        pairs = isolated_pairs(spans, join) if calibration == "isolated" else true_pairs(spans, join, first)
+        pairs = (
+            isolated_pairs(spans, join)
+            if calibration == "isolated"
+            else true_pairs(spans, join, first)
+        )
         calib_pairs[i] = len(pairs)
         if len(pairs) < 2:
             continue  # no calibration possible: the join stays unlinked, reported
@@ -184,17 +201,30 @@ def analyze(level_dir: Path, calibration: str = "isolated") -> dict:
         for role, side, group in (("a", "outbound", parents), ("b", "inbound", children)):
             for seq, s in enumerate(sorted(group, key=lambda s: s["key"])):
                 o = observable(s)
-                observations.append(Timed(f"j{i}{role}", seq, f"j{i}-{role}", side, o["start"], o["end"]))
+                observations.append(
+                    Timed(f"j{i}{role}", seq, f"j{i}-{role}", side, o["start"], o["end"])
+                )
                 index[(f"j{i}{role}", seq)] = s["key"]
 
     result = timed_links(_topology(len(found)), observations, params)
     # Per join: a parent span is on the upstream side of each of its joins.
-    linked = {(l.upstream[0], index[l.upstream]): index[l.downstream] for l in result.links}
+    linked = {
+        (link.upstream[0], index[link.upstream]): index[link.downstream] for link in result.links
+    }
     status = {
         (u.observation[0], index[u.observation]): u.status.name
         for u in result.undecided
         if u.side == "outbound"
     }
+    return linked, status, params, calib_pairs
+
+
+def analyze(level_dir: Path, calibration: str = "isolated") -> dict:
+    spans = load(level_dir)
+    found = joins(spans)
+    first, second = halves(spans)
+    by_key = {s["key"]: s for s in spans}
+    linked, status, params, calib_pairs = _link(spans, found, first, calibration)
 
     report, outcome = {"calibration": calibration, "joins": {}}, defaultdict(dict)
     for i, join in enumerate(found):
@@ -225,9 +255,13 @@ def analyze(level_dir: Path, calibration: str = "isolated") -> dict:
                 c["correct" if ok else "wrong"] += 1
             outcome[a["key"]][i] = ok
         report["joins"][f"{'/'.join(join[0])} -> {'/'.join(join[1])}"] = {
-            "correct": c["correct"], "wrong": c["wrong"], "refused": c["refused"],
-            "refused_by_status": dict(refused), "judged_parents": c["judged_parents"],
-            "multiple_calls": c["multiple_calls"], "calibration_pairs": calib_pairs[i],
+            "correct": c["correct"],
+            "wrong": c["wrong"],
+            "refused": c["refused"],
+            "refused_by_status": dict(refused),
+            "judged_parents": c["judged_parents"],
+            "multiple_calls": c["multiple_calls"],
+            "calibration_pairs": calib_pairs[i],
             "params": _params_dict(params.get(f"j{i}-a -> j{i}-b")),
         }
 
@@ -245,25 +279,157 @@ def analyze(level_dir: Path, calibration: str = "isolated") -> dict:
     return report
 
 
+def aligned(level_dir: Path, theirs: dict, calibration: str = "isolated") -> dict:
+    """Aligned comparison (phase 4 spec 8.10.4): their problem only (server
+    span of a service -> its client span toward each called service), on the
+    traces of the second half, for every method alike.
+
+    Unit (slot): a true child of child type C in trace t whose parent, a
+    server span of the same service, has exactly one child of type C; a trace
+    where a parent has several is apart for C. A method's predicted children of
+    type C for trace t: in the slots, right; else wrong; the slots left,
+    refused. End to end, a trace with at least one slot: right (all right),
+    without wrong (none wrong), with refusal (at least one refused).
+    theirs: {"traces": {method: {trace: {"true": [[t, s]], "pred": [[t, s] | None]}}}}."""
+    spans = load(level_dir)
+    found = joins(spans)
+    first, second = halves(spans)
+    by_key = {s["key"]: s for s in spans}
+    key_of = {(s["trace"], s["sid"]): s["key"] for s in spans}
+    with_parent = {s["type"] for s in spans if s["parent"] is not None}
+
+    def their_key(ident):
+        t, sid = ident
+        k = key_of.get((t, sid))
+        if k is None and sid.endswith("_client"):  # their copy of our server span
+            k = key_of.get((t, sid[: -len("_client")]))
+        return k
+
+    compared = [
+        i
+        for i, (a, b) in enumerate(found)
+        if (a[1] == "server" and b[1] == "client" and a[0] == b[0])
+        or (b[1] == "server" and a[0] != b[0] and (a[1] == "server" or a not in with_parent))
+    ]
+    child_types = {found[i][1] for i in compared}
+    if len(child_types) != len(compared):
+        raise ValueError("one child type under two compared joins: slots would mix")
+
+    pairs = {found[i] for i in compared}
+    kids = defaultdict(list)  # (parent key, child type) -> child keys
+    for s in spans:
+        if s["parent"] in by_key and (by_key[s["parent"]]["type"], s["type"]) in pairs:
+            kids[s["parent"], s["type"]].append(s["key"])
+    slots, apart = defaultdict(set), set()  # (trace, child type) -> child keys
+    for (parent, c), ks in kids.items():
+        t = by_key[parent]["trace"]
+        if t not in second:
+            continue
+        if len(ks) > 1:
+            apart.add((t, c))
+        else:
+            slots[t, c].add(ks[0])
+    expected = defaultdict(set)
+    for (parent, c), ks in kids.items():
+        if by_key[parent]["trace"] in second:
+            expected[by_key[parent]["trace"], c].update(ks)
+    for tc in apart:
+        slots.pop(tc, None)
+
+    predictions = {}  # method -> {(trace, child type): [child key | None]}
+    linked, _, _, _ = _link(spans, found, first, calibration)
+    ours = defaultdict(list)
+    for (_, parent), child in linked.items():
+        c = by_key[child]["type"]
+        if c in child_types:
+            ours[by_key[parent]["trace"], c].append(child)
+    predictions["ours"] = ours
+    unmatched, mismatch = Counter(), Counter()
+    for method, traces in theirs["traces"].items():
+        got = defaultdict(list)
+        their_true = defaultdict(set)
+        for t, lists in traces.items():
+            if t not in second:
+                continue
+            for p in lists["true"]:
+                k = their_key(p)
+                if k is not None and by_key[k]["type"] in child_types:
+                    their_true[t, by_key[k]["type"]].add(k)
+            for p in lists["pred"]:
+                if p is None:
+                    continue
+                k = their_key(p)
+                if k is None:
+                    unmatched[method] += 1
+                elif by_key[k]["type"] in child_types:
+                    got[t, by_key[k]["type"]].append(k)
+        predictions[method] = got
+        mismatch[method] = sum(
+            their_true.get(tc, set()) != expected.get(tc, set())
+            for tc in set(their_true) | set(expected)
+        )
+
+    report = {
+        "calibration": calibration,
+        "compared": [f"{'/'.join(found[i][0])} -> {'/'.join(found[i][1])}" for i in compared],
+        "apart_multiple_calls": len(apart),
+        "truth_mismatch": max(mismatch.values(), default=0),
+        "methods": {},
+    }
+    for method, got in predictions.items():
+        n, per_trace = Counter(), defaultdict(Counter)
+        for (t, c), keys in slots.items():
+            right = sum(k in keys for k in got.get((t, c), []))
+            wrong = len(got.get((t, c), [])) - right
+            refused = len(keys) - right - wrong
+            if refused < 0:
+                raise ValueError(f"{method}: more predictions than slots in {t}")
+            for name, v in (("right", right), ("wrong", wrong), ("refused", refused)):
+                n[name] += v
+                per_trace[t][name] += v
+        traces = Counter(judged=len(per_trace))
+        for c in per_trace.values():
+            traces["right"] += c["wrong"] == 0 and c["refused"] == 0
+            traces["without_wrong"] += c["wrong"] == 0
+            traces["with_refusal"] += c["refused"] > 0
+        report["methods"][method] = {
+            "slots": {k: n[k] for k in ("right", "wrong", "refused")},
+            "traces": {k: traces[k] for k in ("judged", "right", "without_wrong", "with_refusal")},
+            "unmatched": unmatched[method],
+        }
+    return report
+
+
 def _params_dict(p: JoinParams | None):
     if p is None:
         return None
-    return {"signals": [[s.name, s.offset_us, s.window_us] for s in p.signals], "margin_us": p.margin_us}
+    return {
+        "signals": [[s.name, s.offset_us, s.window_us] for s in p.signals],
+        "margin_us": p.margin_us,
+    }
 
 
 def main(argv: list[str]) -> None:
     level = Path(argv[1])
     calibration = argv[argv.index("--calibration") + 1] if "--calibration" in argv else "isolated"
+    if "--theirs" in argv:
+        theirs = json.loads(Path(argv[argv.index("--theirs") + 1]).read_text())
+        print(json.dumps(aligned(level, theirs, calibration), indent=2))
+        return
     report = analyze(level, calibration)
     if "--json" in argv:
         print(json.dumps(report, indent=2))
         return
-    print(f"== {level.name}: calibration {calibration}, spans {report['spans']},"
-          f" traces judged {report['traces_judged']}")
+    print(
+        f"== {level.name}: calibration {calibration}, spans {report['spans']},"
+        f" traces judged {report['traces_judged']}"
+    )
     for where, j in report["joins"].items():
-        print(f"   {where}: correct {j['correct']} wrong {j['wrong']} refused {j['refused']}"
-              f" {j['refused_by_status']} judged {j['judged_parents']}"
-              f" multiple_calls {j['multiple_calls']} calibration_pairs {j['calibration_pairs']}")
+        print(
+            f"   {where}: correct {j['correct']} wrong {j['wrong']} refused {j['refused']}"
+            f" {j['refused_by_status']} judged {j['judged_parents']}"
+            f" multiple_calls {j['multiple_calls']} calibration_pairs {j['calibration_pairs']}"
+        )
     for s, acc in report["accuracy_by_service"].items():
         print(f"   accuracy (their way) {s}: {100 * acc:.2f}%")
 
