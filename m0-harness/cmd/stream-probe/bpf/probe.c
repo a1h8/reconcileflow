@@ -11,6 +11,7 @@
 //   kretprobe inet_csk_accept -> sk        server accepts: copied_seq = first data byte
 //   kprobe    tcp_sendmsg_locked(sk, msg, size)  client sends: write_seq = first byte of this send
 //   kprobe    tcp_cleanup_rbuf(sk, copied) server has read: copied_seq - copied = first byte read
+//                                          (one less when the read took the peer's close)
 //   kprobe    tcp_close(sk, timeout)       either end closes
 //
 // The send is hooked on tcp_sendmsg_locked, not tcp_sendmsg: a socket an
@@ -112,6 +113,22 @@ static __always_inline __u16 remote_port(struct sock *sk)
 	return bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
 }
 
+// A read that reaches the peer's close (FIN) moves copied_seq one past its
+// last byte before tcp_cleanup_rbuf runs: the FIN takes a sequence number
+// (tcp_v4_fill_cb: end_seq = seq + syn + fin + len) and tcp_recvmsg_locked,
+// at found_fin_ok, increments copied_seq, then calls tcp_cleanup_rbuf (Linux
+// v7.0, phase 4 spec 8.18.1). The FIN was received in order when the socket
+// is in CLOSE_WAIT, CLOSING or LAST_ACK (tcp_fin; rcv_nxt then counts it),
+// and this read took it when nothing received is left: copied_seq == rcv_nxt.
+// A read after the FIN was taken copies nothing and emits nothing.
+static __always_inline __u32 fin_taken(struct sock *sk, struct tcp_sock *tp)
+{
+	__u8 state = BPF_CORE_READ(sk, __sk_common.skc_state);
+	if (state != TCP_CLOSE_WAIT && state != TCP_CLOSING && state != TCP_LAST_ACK)
+		return 0;
+	return BPF_CORE_READ(tp, copied_seq) == BPF_CORE_READ(tp, rcv_nxt);
+}
+
 static __always_inline void emit(struct sock *sk, enum kind kind, __u32 seq, __u32 len)
 {
 	struct stream_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
@@ -179,7 +196,8 @@ int BPF_KPROBE(on_tcp_cleanup_rbuf, struct sock *sk, int copied)
 	if (!is_watched(local_port(sk)) && !(both_directions() && is_watched(remote_port(sk))))
 		return 0;
 	struct tcp_sock *tp = (struct tcp_sock *)sk;
-	emit(sk, KIND_RECV, BPF_CORE_READ(tp, copied_seq) - (__u32)copied, (__u32)copied);
+	emit(sk, KIND_RECV, BPF_CORE_READ(tp, copied_seq) - (__u32)copied - fin_taken(sk, tp),
+	     (__u32)copied);
 	return 0;
 }
 

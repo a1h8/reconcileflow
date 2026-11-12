@@ -23,6 +23,10 @@ var allowedReads = map[string]bool{
 	"sk, __sk_common.skc_family":       true,
 	"tp, write_seq":                    true,
 	"tp, copied_seq":                   true,
+	// The connection's state and the next sequence number expected: whether a
+	// read took the peer's close (fin_taken, phase 4 spec 8.18.1).
+	"sk, __sk_common.skc_state": true,
+	"tp, rcv_nxt":               true,
 }
 
 var allowedHelpers = map[string]bool{
