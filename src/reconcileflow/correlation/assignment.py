@@ -52,6 +52,7 @@ class Status(IntEnum):
     KEY_TIME_CONFLICT = 8  # set by the connection path: same key, no fit in time, never by assign()
     INCOMPLETE = 9  # set by the recipe: a group whose calls do not number its requests
     NO_SOLUTION = 10  # set by the recipe: no assignment of the group fits
+    SIZE_MISMATCH = 11  # set by the recipe: an answer size contradicts the forwarding window
 
 
 @dataclass(frozen=True, slots=True)

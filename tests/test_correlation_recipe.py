@@ -6,7 +6,7 @@ import random
 import time
 
 from reconcileflow.correlation.assignment import Status
-from reconcileflow.correlation.recipe import Recipe, learn_recipe, recipe_links
+from reconcileflow.correlation.recipe import Recipe, Sizes, learn_recipe, learn_window, recipe_links
 from reconcileflow.correlation.timing import Timed
 
 BACK, SIDE = "hop -> back", "hop -> side"
@@ -214,3 +214,138 @@ def test_a_call_missing_once_in_calibration_is_out_of_the_recipe():
 
 def test_too_few_calibration_requests_give_no_recipe():
     assert learn_recipe("hop", calibration(n=19), source="calibration") is None
+
+
+# -- answer sizes the point forwards (phase 4 spec 8.17) -------------------------
+
+ONE = Recipe("hop", (BACK,), (), 100, "test")
+
+
+def sizes(inbound, outbound, low=-10, high=50):
+    """inbound: {request seq: bytes}; outbound: {call seq: bytes} on BACK."""
+    return Sizes(
+        {("in", k): v for k, v in inbound.items()},
+        {BACK: {(BACK, k): v for k, v in outbound.items()}},
+        {BACK: (low, high)},
+    )
+
+
+def twins():
+    """Two requests and two calls the timings cannot tell apart."""
+    return [req(0, 0, 1000), req(1, 0, 1000)], {
+        BACK: [call(BACK, 0, 100, 400), call(BACK, 1, 100, 400)]
+    }
+
+
+def test_sizes_force_requests_the_timings_cannot_tell_apart():
+    requests, calls = twins()
+    assert recipe_links(requests, calls, ONE).links == ()
+    result = recipe_links(requests, calls, ONE, sizes=sizes({0: 3000, 1: 1200}, {0: 1178, 1: 2978}))
+    assert linked(result) == {(BACK, ("in", 0)): (BACK, 1), (BACK, ("in", 1)): (BACK, 0)}
+    assert result.undecided == ()
+
+
+def test_an_unknown_size_removes_nothing():
+    requests, calls = twins()
+    result = recipe_links(requests, calls, ONE, sizes=sizes({0: 3000}, {0: 1178, 1: 2978}))
+    # request 1 has no size: both calls stay its candidates; request 0 can
+    # only take call 1, which forces call 0 to request 1.
+    assert linked(result) == {(BACK, ("in", 0)): (BACK, 1), (BACK, ("in", 1)): (BACK, 0)}
+    result = recipe_links(requests, calls, ONE, sizes=sizes({}, {}))
+    assert result.links == ()
+    assert set(statuses(result).values()) == {Status.AMBIGUOUS}
+
+
+def test_a_contradicted_window_refuses_the_whole_time_group():
+    # Request 1's size fits no call of its time candidates: the rule is wrong
+    # here (the point rewrote the answer?), so nothing in the group is linked,
+    # not even request 0, which the sizes alone would force.
+    requests, calls = twins()
+    requests.append(req(2, 2000, 3000))
+    calls[BACK].append(call(BACK, 2, 2100, 2400))
+    result = recipe_links(
+        requests, calls, ONE, sizes=sizes({0: 3000, 1: 9000, 2: 500}, {0: 1178, 1: 2978, 2: 480})
+    )
+    assert linked(result) == {(BACK, ("in", 2)): (BACK, 2)}  # its own group, untouched
+    got = statuses(result)
+    assert {got[BACK, ("in", k)] for k in (0, 1)} == {Status.SIZE_MISMATCH}
+    assert {got[BACK, (BACK, k)] for k in (0, 1)} == {Status.SIZE_MISMATCH}
+
+
+def test_a_call_left_without_any_request_by_its_size_is_a_contradiction():
+    requests, calls = twins()
+    calls[BACK].append(call(BACK, 2, 150, 350))  # a third call, no request fits its size
+    requests.append(req(2, 0, 1000))
+    result = recipe_links(
+        requests,
+        calls,
+        ONE,
+        sizes=sizes({0: 3000, 1: 1200, 2: 1200}, {0: 1178, 1: 2978, 2: 7000}),
+    )
+    assert result.links == ()
+    assert set(statuses(result).values()) == {Status.SIZE_MISMATCH}
+
+
+def test_without_sizes_nothing_changes():
+    requests, calls = overlapping_pair()
+    assert recipe_links(requests, calls, RECIPE, sizes=None) == recipe_links(
+        requests, calls, RECIPE
+    )
+
+
+def test_links_with_sizes_are_held_by_every_assignment_that_fits_them():
+    rng = random.Random(17)
+    for _ in range(300):
+        n = rng.randint(1, 5)
+        requests, calls, s_in, s_out = [], {BACK: []}, {}, {}
+        for i in range(n):  # each request makes its own call, mostly forwarded as is
+            s = rng.randint(0, 60)
+            requests.append(req(i, s, s + rng.randint(40, 90)))
+            c = rng.randint(s, s + 30)
+            calls[BACK].append(call(BACK, i, c, c + rng.randint(1, 10)))
+            s_in[i] = rng.choice((100, 200, 300))
+            s_out[i] = s_in[i] if rng.random() < 0.85 else rng.choice((100, 200, 300))
+        sz = sizes(s_in, s_out, 0, 0)
+        result = recipe_links(requests, calls, ONE, sizes=sz)
+        got = linked(result)
+        fits = {
+            BACK: [c for c in calls[BACK]],
+        }
+        # brute force over assignments that respect time and size
+        options = {
+            r: [
+                c
+                for c in fits[BACK]
+                if r.start_us <= c.start_us and c.end_us <= r.end_us and s_in[r.seq] == s_out[c.seq]
+            ]
+            for r in requests
+        }
+        common = None
+        for choice in itertools.product(*(options[r] for r in requests)):
+            if len(set(choice)) != len(choice):
+                continue
+            links = {
+                (BACK, ("in", r.seq)): (BACK, c.seq) for r, c in zip(requests, choice, strict=True)
+            }
+            common = links if common is None else {k: v for k, v in common.items() if links[k] == v}
+        if common is None:  # no complete assignment at all: decided group by group
+            continue
+        # Never a link that some assignment respecting time and size does not hold.
+        assert all(common.get(k) == v for k, v in got.items())
+
+
+def test_the_window_is_learnt_from_links_and_widened_by_the_margin():
+    links = [(("in", k), (BACK, k)) for k in range(300)]
+    s_in = {("in", k): 1000 + k + (22 if k % 3 else 0) for k in range(300)}
+    s_out = {(BACK, k): 1000 + k for k in range(300)}
+    assert learn_window(links, s_in, s_out) == (0 - 32, 22 + 32)
+
+
+def test_no_window_from_too_few_links_or_too_wide_a_spread():
+    links = [(("in", k), (BACK, k)) for k in range(300)]
+    s_out = {(BACK, k): 1000 for k in range(300)}
+    assert learn_window(links[:199], {("in", k): 1000 for k in range(300)}, s_out) is None
+    wide = {("in", k): 1000 + (300 if k == 5 else 0) for k in range(300)}
+    assert learn_window(links, wide, s_out) is None
+    # links without both sizes do not count
+    assert learn_window(links, {("in", k): 1000 for k in range(150)}, s_out) is None

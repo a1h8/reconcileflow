@@ -72,13 +72,16 @@ class Cell:
             st["n"] += 1
         return st["n"], offset
 
-    def request(self, k, in_port, up_port, t, call_at=10, call_len=30, after=10):
+    def request(
+        self, k, in_port, up_port, t, call_at=10, call_len=30, after=10, size=RESP, extra=0
+    ):
         """Request k: read by the proxy at t+1, its call sent at t+1+call_at,
-        answered call_len later, the proxy answers `after` later."""
+        answered call_len later with `size` bytes, the proxy answers `after`
+        later with size + extra bytes."""
         rank, _ = self.exchange(
-            in_port, HOP, t, REQ, RESP, answer_at=1 + call_at + call_len + 1 + after
+            in_port, HOP, t, REQ, size + extra, answer_at=1 + call_at + call_len + 1 + after
         )
-        _, offset = self.exchange(up_port, FU, t + 1 + call_at, REQ, RESP, answer_at=call_len)
+        _, offset = self.exchange(up_port, FU, t + 1 + call_at, REQ, size, answer_at=call_len)
         tid = f"{k:032x}"
         self.lg.append(
             {
@@ -134,6 +137,7 @@ def test_lives_skip_the_handshake_and_bound_each_exchange(tmp_path):
     assert (r.rank, r.start, r.end) == (1, T0 + 1001, T0 + 1000 + 1 + 10 + 30 + 1 + 10)
     assert (x.rank, x.start, x.end) == (1, T0 + 1011, T0 + 1011 + 30 + 1)
     assert x.offsets == (HELLO,)  # the call's bytes start after the hello
+    assert (r.answer, x.answer) == (RESP, RESP)  # answer bytes; the handshake's left out
 
 
 def test_overlapping_requests_are_linked_right(tmp_path):
@@ -227,6 +231,7 @@ def cell(
     ranks=True,
     k2b_wrong=0,
     k5=1.0,
+    k6_wrong=0,
 ):
     main = {
         "wrong": wrong,
@@ -240,7 +245,7 @@ def cell(
     k2b = [{"wrong": k2b_wrong, "coverage": 0.0} for _ in range(3)]
     linked = 100
     k5r = {"wrong": round(k5 * linked), "right": linked - round(k5 * linked)}
-    return {"name": name, "main": main, "k2b": k2b, "k5": k5r}
+    return {"name": name, "main": main, "k2b": k2b, "k5": k5r, "k6": {"wrong": k6_wrong}}
 
 
 def test_the_verdict_holds_when_every_valid_cell_meets_every_criterion():
@@ -271,3 +276,59 @@ def test_a_blind_judge_gives_no_verdict():
 def test_a_cell_with_unmatched_ranks_is_invalid_not_failed():
     held, lines = pr.verdict([cell(), cell("c100-load4", wrong=7, ranks=False)])
     assert held is True and any("invalid" in x for x in lines)
+
+
+# -- answer sizes the proxy forwards (spec 8.17) ---------------------------------
+
+
+def with_twins(seed=5, solo=300, pairs=40):
+    """Requests the timings alone link (one at a time), then pairs that start,
+    call and answer at the same instants on two connections: only the answer
+    sizes, forwarded by the proxy with 22 bytes more, tell them apart; the
+    last pair's sizes are 30 bytes apart, inside the window."""
+    import random
+
+    rng = random.Random(seed)
+    c = Cell()
+    for i in range(2):
+        c.open(50_000 + i, HOP, T0 + i)
+        c.open(60_000 + i, FU, T0 + 10 + i)
+    t, k = T0 + 10_000, 0
+    for _ in range(solo):
+        i = k % 2
+        c.request(k, 50_000 + i, 60_000 + i, t, size=rng.randint(50, 5000), extra=22)
+        t, k = t + 200, k + 1
+    for p in range(pairs + 1):
+        a = rng.randint(50, 2000)
+        # sizes far apart, but the last pair's within the window: still open
+        for i, size in enumerate((a, a + 30 if p == pairs else a + rng.randint(500, 3000))):
+            c.request(k, 50_000 + i, 60_000 + i, t, size=size, extra=22)
+            k += 1
+        t += 200
+    return c
+
+
+def test_learned_sizes_settle_what_the_timings_leave_open(tmp_path):
+    cell = with_twins().write(tmp_path)
+    plain = pr.judge(cell, recipe="declared")
+    assert plain["wrong"] == 0 and plain["refused_by_status"].get("AMBIGUOUS", 0) > 0
+    sized = pr.judge(cell, recipe="declared", sizes="learned")
+    assert sized["size_window"] == [22 - 32, 22 + 32]
+    assert sized["wrong"] == 0
+    assert sized["right"] > plain["right"]
+    # only the last pair, 30 bytes apart, is left open: refused, not guessed
+    assert sized["refused_by_status"] == {"AMBIGUOUS": 2}
+    assert sized["right"] == sized["judged"] - 2
+
+
+def test_k6_a_wrong_window_is_refused_not_linked(tmp_path):
+    cell = with_twins().write(tmp_path)
+    report = pr.judge(cell, recipe="declared", sizes="learned", size_shift=1000)
+    assert report["control"] == "K6 window shifted by 1000 bytes"
+    assert report["wrong"] == 0
+    assert report["refused_by_status"].get("SIZE_MISMATCH", 0) > 0
+
+
+def test_one_wrong_link_under_k6_fails_the_verdict():
+    assert pr.verdict([cell()])[0] is True
+    assert pr.verdict([cell(k6_wrong=1)])[0] is False

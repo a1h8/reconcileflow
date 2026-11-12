@@ -28,6 +28,17 @@ Phase 4 spec 8.12 (the rule of 8.11, measured on published traces first):
   No weight, no score: never the best one, never a guess. Polynomial: groups
   of tens of thousands of requests are decided.
 
+Answer sizes (spec 8.17), for a hop whose answer the point forwards: the
+point's answer minus its call's answer lies in a window (``Sizes``); a call
+outside it is no candidate, an unknown size removes nothing. The window is
+declared, or learnt by ``learn_window`` from links the timings alone hold
+(no truth): a wrong one among them can only widen it or remove it. Where
+the window leaves a request, or a call, of a group formed by the timings
+with no option, it is contradicted there: the whole group is refused
+(``SIZE_MISMATCH``). Otherwise groups are formed again on the options left.
+Open risk: a point that rewrites one answer, where another call falls in
+the window by chance, trips nothing and could force a wrong link.
+
 The result does not depend on the order of the input: observations are
 sorted by time and identity before anything is decided.
 
@@ -61,6 +72,40 @@ class Recipe:
     order: tuple[tuple[str, str], ...]  # (before, after): before ends first
     calibration: int  # requests it was learnt from (0: declared)
     source: str  # where it came from
+
+
+@dataclass(frozen=True, slots=True)
+class Sizes:
+    """Answer sizes, for the hops whose answer the point forwards (spec 8.17):
+    the point's answer to a request minus its call's answer on ``hop`` lies
+    in ``windows[hop]`` = (low, high), bytes. A size not given removes nothing."""
+
+    inbound: Mapping[Identity, int]  # request -> bytes the point answered
+    outbound: Mapping[str, Mapping[Identity, int]]  # hop -> call -> bytes it got back
+    windows: Mapping[str, tuple[int, int]]
+
+
+WINDOW_MINIMUM = 200  # links needed to learn a window
+WINDOW_MARGIN = 32  # bytes added on each side of what the links show
+WINDOW_SPAN = 256  # wider than this, the point does not forward: no window
+
+
+def learn_window(
+    links: Iterable[tuple[Identity, Identity]],
+    inbound: Mapping[Identity, int],
+    outbound: Mapping[Identity, int],
+    minimum: int = WINDOW_MINIMUM,
+    margin: int = WINDOW_MARGIN,
+    span: int = WINDOW_SPAN,
+) -> tuple[int, int] | None:
+    """The window of one hop from links already held without sizes (no
+    truth): the gaps they show, widened by ``margin``. None below ``minimum``
+    links with both sizes, or when the gaps spread over more than ``span``.
+    A wrong link among them can only widen the window or remove it."""
+    gaps = [inbound[r] - outbound[c] for r, c in links if r in inbound and c in outbound]
+    if len(gaps) < minimum or max(gaps) - min(gaps) > span:
+        return None
+    return (min(gaps) - margin, max(gaps) + margin)
 
 
 def learn_recipe(
@@ -99,6 +144,7 @@ def recipe_links(
     outbound: Mapping[str, Iterable[Timed]],
     recipe: Recipe,
     lossy: Iterable[tuple[float, float]] = (),
+    sizes: Sizes | None = None,
 ) -> Result:
     """Links from the requests into ``recipe.point`` (``inbound``) to their
     calls on each hop of the recipe (``outbound[hop]``). Each link is a
@@ -126,29 +172,70 @@ def recipe_links(
                 Undecided(h, _id(r), "inbound", Status.NO_CANDIDATE) for h in recipe.calls
             ]
 
-    root: dict = {}
+    def grouped(members, dom):
+        """Requests sharing a candidate call, through ``dom``."""
+        root: dict = {}
 
-    def find(x):
-        while root.setdefault(x, x) != x:
-            root[x] = root[root[x]]
-            x = root[x]
-        return x
+        def find(x):
+            while root.setdefault(x, x) != x:
+                root[x] = root[root[x]]
+                x = root[x]
+            return x
 
-    for r in kept:
-        find(("r", _id(r)))
+        for r in members:
+            find(("r", _id(r)))
+            for h in recipe.calls:
+                for c in dom[_id(r), h]:
+                    root[find(("c", h, c))] = find(("r", _id(r)))
+        out: dict = defaultdict(lambda: {"requests": [], "calls": defaultdict(list)})
+        for r in members:
+            out[find(("r", _id(r)))]["requests"].append(r)
         for h in recipe.calls:
-            for c in domain[_id(r), h]:
-                root[find(("c", h, c))] = find(("r", _id(r)))
-    groups: dict = defaultdict(lambda: {"requests": [], "calls": defaultdict(list)})
-    for r in kept:
-        groups[find(("r", _id(r)))]["requests"].append(r)
+            for c in calls[h]:
+                node = ("c", h, _id(c))
+                if node in root:
+                    out[find(node)]["calls"][h].append(c)
+        return list(out.values())
+
+    groups = grouped(kept, domain)
+    in_some = {(h, c) for (_, h), o in domain.items() for c in o}
     for h in recipe.calls:
         for c in calls[h]:
-            node = ("c", h, _id(c))
-            if node in root:
-                groups[find(node)]["calls"][h].append(c)
-            else:
+            if (h, _id(c)) not in in_some:
                 undecided.append(Undecided(h, _id(c), "outbound", Status.NO_CANDIDATE))
+
+    if sizes is not None:
+        # The window removes options; where it leaves a request or a call of a
+        # time group with none, it is contradicted there: the group is refused.
+        sized = {}
+        for (r, h), o in domain.items():
+            low, high = sizes.windows.get(h, (None, None))
+            mine = sizes.inbound.get(r)
+            theirs = sizes.outbound.get(h, {})
+            if low is None or mine is None:
+                sized[r, h] = o
+            else:
+                sized[r, h] = [c for c in o if c not in theirs or low <= mine - theirs[c] <= high]
+        still = {(h, c) for (_, h), o in sized.items() for c in o}
+        kept_groups = []
+        for g in groups:
+            broken = any(not sized[_id(r), h] for r in g["requests"] for h in recipe.calls) or any(
+                (h, _id(c)) not in still for h in recipe.calls for c in g["calls"][h]
+            )
+            if broken:
+                for r in g["requests"]:
+                    undecided.extend(
+                        Undecided(h, _id(r), "inbound", Status.SIZE_MISMATCH) for h in recipe.calls
+                    )
+                for h in recipe.calls:
+                    undecided.extend(
+                        Undecided(h, _id(c), "outbound", Status.SIZE_MISMATCH)
+                        for c in g["calls"][h]
+                    )
+            else:
+                kept_groups += g["requests"]
+        domain = sized
+        groups = grouped(sorted(kept_groups, key=_key), domain)
 
     start = {(h, _id(c)): c.start_us for h in recipe.calls for c in calls[h]}
     end = {(h, _id(c)): c.end_us for h in recipe.calls for c in calls[h]}
@@ -165,7 +252,7 @@ def recipe_links(
                 if (h, _id(c)) not in taken:
                     undecided.append(Undecided(h, _id(c), "outbound", status))
 
-    for g in groups.values():
+    for g in groups:
         n = len(g["requests"])
         low = g["requests"][0].start_us
         high = max(r.end_us for r in g["requests"])

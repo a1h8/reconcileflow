@@ -36,7 +36,13 @@ upstream connection: the judge must see the wrong links); ranks_ok checks
 that each inbound connection holds load-gen's requests (one closing exchange
 allowed).
 
+Answer sizes (spec 8.17): sizes="learned" adds the window the proxy's
+answers keep from their calls' answers, learnt from the links the timings
+alone hold (no truth); control K6 shifts it by size_shift bytes: a wrong
+window must refuse (SIZE_MISMATCH), never link wrong.
+
 Usage: probe_recipe.py <cell-dir> [--json] [--declared] [--drop N --seed S] [--shift]
+                       [--sizes [--size-shift B]]
        probe_recipe.py --series <runs-list>   (the spec 8.14 verdict)
 """
 
@@ -49,7 +55,13 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from reconcileflow.correlation.recipe import Recipe, learn_recipe, recipe_links
+from reconcileflow.correlation.recipe import (
+    Recipe,
+    Sizes,
+    learn_recipe,
+    learn_window,
+    recipe_links,
+)
 from reconcileflow.correlation.timing import Timed
 
 HOP_NAME = "proxy -> upstream"
@@ -62,6 +74,7 @@ class Exchange:
     start: int  # ns, monotonic
     end: int
     offsets: tuple[int, ...]  # byte positions of the asks (upstream sends only)
+    answer: int = 0  # bytes of the answer, at the proxy's end, until the next ask
 
 
 def _jsonl(path: Path):
@@ -80,7 +93,7 @@ def lives(probe, hop_port: int, fu_port: int, handshake: bool = True):
         key=lambda x: (x[0], x[1]),
     )
     base: dict[tuple[int, int], int] = {}
-    seen: dict[tuple[int, int], list] = defaultdict(list)  # conn -> [(ts, ask?, offset)]
+    seen: dict[tuple[int, int], list] = defaultdict(list)  # conn -> [(ts, ask?, offset, bytes)]
     for ts, _, r in rows:
         kind = r.get("kind")
         conn = (r.get("client_port"), r.get("server_port"))
@@ -92,20 +105,20 @@ def lives(probe, hop_port: int, fu_port: int, handshake: bool = True):
         s2c = r.get("dir") == "s2c"
         if conn[1] == hop_port:  # the proxy is the server: it reads asks, sends answers
             if kind == "recv" and not s2c:
-                seen[conn].append((ts, True, None))
+                seen[conn].append((ts, True, None, r["len"]))
             elif kind == "send" and s2c:
-                seen[conn].append((ts, False, None))
+                seen[conn].append((ts, False, None, r["len"]))
         else:  # the proxy is the client: it sends asks, reads answers
             if kind == "send" and not s2c:
                 offset = (r["seq"] - base[conn]) % 2**32 if conn in base else None
-                seen[conn].append((ts, True, offset))
+                seen[conn].append((ts, True, offset, r["len"]))
             elif kind == "recv" and s2c:
-                seen[conn].append((ts, False, None))
+                seen[conn].append((ts, False, None, r["len"]))
     requests, calls = [], []
     for conn, events in seen.items():
         upstream = conn[1] != hop_port
         exchanges, open_ = [], None
-        for ts, ask, offset in events:
+        for ts, ask, offset, length in events:
             if ask:
                 if open_ is None:
                     open_ = [ts, [], ts]
@@ -114,12 +127,14 @@ def lives(probe, hop_port: int, fu_port: int, handshake: bool = True):
                     open_[1].append(offset)
             elif open_ is not None:
                 start = open_[2] if upstream else open_[0]
-                exchanges.append((start, ts, tuple(open_[1])))
+                exchanges.append([start, ts, tuple(open_[1]), length])
                 open_ = None
+            elif exchanges:  # more of the last answer
+                exchanges[-1][3] += length
         if handshake:
             exchanges = exchanges[1:]
         out = requests if conn[1] == hop_port else calls
-        out += [Exchange(conn, k + 1, s, e, o) for k, (s, e, o) in enumerate(exchanges)]
+        out += [Exchange(conn, k + 1, s, e, o, a) for k, (s, e, o, a) in enumerate(exchanges)]
     return requests, calls
 
 
@@ -173,7 +188,13 @@ def _max_stream_ids(cell: Path, hop: int) -> dict[int, int]:
 
 
 def judge(
-    cell: Path, recipe: str = "learned", drop: int | None = None, seed: int = 0, shift: bool = False
+    cell: Path,
+    recipe: str = "learned",
+    drop: int | None = None,
+    seed: int = 0,
+    shift: bool = False,
+    sizes: str = "none",
+    size_shift: int = 0,
 ) -> dict:
     meta = json.loads((cell / "cell.json").read_text())
     hop, fu = meta["hop_ports"][0], meta["fake_upstream_port"]
@@ -262,8 +283,26 @@ def judge(
         "recipe": None if chosen is None else list(chosen.calls),
     }
     counts, refused = Counter(), Counter()
+    window = None
     if chosen is not None and chosen.calls == (HOP_NAME,):
         result = recipe_links(req, {HOP_NAME: call}, chosen, lossy)
+        if sizes == "learned":  # spec 8.17: from the links timings alone hold, no truth
+            answers_in = {("req", i): r.answer for i, r in enumerate(requests)}
+            answers_out = {("call", j): x.answer for j, x in enumerate(calls)}
+            window = learn_window(
+                [(x.upstream, x.downstream) for x in result.links], answers_in, answers_out
+            )
+            if window is not None:
+                if size_shift:
+                    control = f"K6 window shifted by {size_shift} bytes"
+                    window = (window[0] + size_shift, window[1] + size_shift)
+                result = recipe_links(
+                    req,
+                    {HOP_NAME: call},
+                    chosen,
+                    lossy,
+                    Sizes(answers_in, {HOP_NAME: answers_out}, {HOP_NAME: window}),
+                )
         linked = {x.upstream[1]: x.downstream[1] for x in result.links}
         status = {u.observation[1]: u.status.name for u in result.undecided if u.side == "inbound"}
         for i, tid in enumerate(req_tid):
@@ -281,6 +320,8 @@ def judge(
             else:
                 counts["right" if call_tid[got] == tid else "wrong"] += 1
     judged = counts["judged"]
+    report["control"] = control
+    report["size_window"] = None if window is None else list(window)
     report |= {
         "judged": judged,
         "right": counts["right"],
@@ -298,7 +339,7 @@ K5_MIN = 0.99  # spec 8.14: share of wrong links the judge must see under K5
 
 
 def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
-    """Spec 8.14 on judged cells {"name", "main", "k2b": [...], "k5"}: True
+    """Spec 8.14 on judged cells {"name", "main", "k2b": [...], "k5", "k6"}: True
     (held), False (not held), None (a control failed: no verdict). A cell
     whose ranks do not match load-gen's is invalid: reported, not judged."""
     lines, failed, blind = [], False, False
@@ -317,6 +358,8 @@ def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
         k2b_wrong = sum(k["wrong"] for k in c["k2b"])
         if k2b_wrong:
             faults.append(f"K2b {k2b_wrong} wrong")
+        if c.get("k6", {}).get("wrong"):  # spec 8.17: a wrong window links nothing
+            faults.append(f"K6 {c['k6']['wrong']} wrong")
         linked = c["k5"]["wrong"] + c["k5"]["right"]
         seen = c["k5"]["wrong"] / linked if linked else 0.0
         if seen < K5_MIN:
@@ -334,7 +377,8 @@ def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
 
 def judge_series(listing: Path) -> tuple[bool | None, list[str]]:
     """Every run of a series list ("<run-dir> <agent> <c> <load>" lines):
-    declared recipe, K2b seeds 1-3, K5; then the verdict."""
+    declared recipe with the window learnt from it (spec 8.17), K2b seeds
+    1-3, K5, K6; then the verdict."""
     cells = []
     for line in listing.read_text().splitlines():
         if not line.strip():
@@ -344,9 +388,12 @@ def judge_series(listing: Path) -> tuple[bool | None, list[str]]:
         cells.append(
             {
                 "name": f"{agent}-c{c}-load{load} ({Path(run).name})",
-                "main": judge(cell, "declared"),
-                "k2b": [judge(cell, "declared", drop=50, seed=s) for s in (1, 2, 3)],
-                "k5": judge(cell, "declared", shift=True),
+                "main": judge(cell, "declared", sizes="learned"),
+                "k2b": [
+                    judge(cell, "declared", drop=50, seed=s, sizes="learned") for s in (1, 2, 3)
+                ],
+                "k5": judge(cell, "declared", shift=True, sizes="learned"),
+                "k6": judge(cell, "declared", sizes="learned", size_shift=1000),
             }
         )
     return verdict(cells)
@@ -360,7 +407,9 @@ def main(argv: list[str]) -> None:
     drop = int(argv[argv.index("--drop") + 1]) if "--drop" in argv else None
     seed = int(argv[argv.index("--seed") + 1]) if "--seed" in argv else 0
     recipe = "declared" if "--declared" in argv else "learned"
-    report = judge(Path(argv[1]), recipe, drop, seed, "--shift" in argv)
+    sizes = "learned" if "--sizes" in argv else "none"
+    size_shift = int(argv[argv.index("--size-shift") + 1]) if "--size-shift" in argv else 0
+    report = judge(Path(argv[1]), recipe, drop, seed, "--shift" in argv, sizes, size_shift)
     if "--json" in argv:
         print(json.dumps(report, indent=2))
         return
