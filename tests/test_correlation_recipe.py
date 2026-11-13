@@ -349,3 +349,36 @@ def test_no_window_from_too_few_links_or_too_wide_a_spread():
     assert learn_window(links, wide, s_out) is None
     # links without both sizes do not count
     assert learn_window(links, {("in", k): 1000 for k in range(150)}, s_out) is None
+
+
+def chain(lost_call=4):
+    """Requests i = [1000 i, 1000 i + 1500], each overlapping the next: one
+    group by time. Call i nests in request i and i - 1; sizes tell them
+    apart (request 1000 + 100 i, call 20 bytes less). Call `lost_call` is
+    missing, as after a lost answer: its request has only the next call by
+    time, of the wrong size."""
+    requests = [req(i, 1000 * i, 1000 * i + 1500) for i in range(6)]
+    calls = {
+        BACK: [call(BACK, i, 1000 * i + 100, 1000 * i + 400) for i in range(6) if i != lost_call]
+    }
+    s_in = {i: 1000 + 100 * i for i in range(6)}
+    s_out = {i: 1000 + 100 * i - 20 for i in range(6) if i != lost_call}
+    return requests, calls, sizes(s_in, s_out)
+
+
+def test_a_size_contradiction_a_loss_explains_refuses_only_its_request():
+    requests, calls, sz = chain()
+    result = recipe_links(requests, calls, ONE, lossy=[(4600, 4610)], sizes=sz)
+    assert linked(result) == {(BACK, ("in", i)): (BACK, i) for i in (0, 1, 2, 3, 5)}
+    assert statuses(result) == {(BACK, ("in", 4)): Status.INCOMPLETE}
+
+
+def test_the_same_contradiction_without_a_loss_refuses_the_time_group():
+    # The missing call cuts the chain: requests 0-3 are one group by time,
+    # 4 and 5 another; with nothing to explain it, the contradiction refuses
+    # the whole of the second.
+    requests, calls, sz = chain()
+    result = recipe_links(requests, calls, ONE, sizes=sz)
+    assert linked(result) == {(BACK, ("in", i)): (BACK, i) for i in range(4)}
+    assert set(statuses(result)) == {(BACK, ("in", 4)), (BACK, ("in", 5)), (BACK, (BACK, 5))}
+    assert set(statuses(result).values()) == {Status.SIZE_MISMATCH}

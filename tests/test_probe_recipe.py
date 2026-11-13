@@ -481,10 +481,10 @@ def test_a_hole_where_the_probe_declared_no_loss_is_not_one():
     # The probe counts each lost event when it happens: a hole outside every
     # interval where its count grew is the protocol (a close), not a loss.
     c = busy(n=40, spacing=500)
-    st = c.conns[50_001, HOP]
+    st = c.conns[60_001, FU]
     t = T0 + 100_000
-    c._ev("send", 50_001, HOP, st["s2c"], 24, t, 2, s2c=True)  # left unread
-    c._ev("close", 50_001, HOP, 0, 0, t + 10, 1)
+    c._ev("send", 60_001, FU, st["s2c"], 24, t, 3, s2c=True)  # left unread by the proxy
+    c._ev("close", 60_001, FU, 0, 0, t + 10, 2)
     rows = c.probe
     requests, calls = pr.lives(rows, HOP, FU)
     assert len(pr.seq_holes(rows)) == 1
@@ -492,3 +492,100 @@ def test_a_hole_where_the_probe_declared_no_loss_is_not_one():
     assert (zones, dr, dc, unlocated) == ([], set(), set(), [])
     zones, *_ = pr.locate_losses(rows, HOP, FU, requests, calls, [(t - 5, t + 5, 1)])
     assert len(zones) == 1
+
+
+def upstream(c, port, way, kind, pid):
+    return [
+        r
+        for r in c.probe
+        if r["server_port"] == FU
+        and r["client_port"] == port
+        and (r.get("dir") or "c2s") == way
+        and r["kind"] == kind
+        and r["pid"] == pid
+    ]
+
+
+def test_a_hole_in_fake_upstreams_events_alone_changes_nothing():
+    # lives only uses the proxy's own events: fake-upstream's lost read of a
+    # call makes a hole, but no zone and no size dropped.
+    c = busy(n=40, spacing=500)
+    c.probe.remove(upstream(c, 60_001, "c2s", "recv", 3)[5])
+    requests, calls = pr.lives(c.probe, HOP, FU)
+    assert len(pr.seq_holes(c.probe)) == 1
+    found = pr.locate_losses(c.probe, HOP, FU, requests, calls, [(T0, 2**62, 1)])
+    assert found == ([], set(), set(), [])
+
+
+def test_a_lost_read_of_the_proxy_starts_its_zone_at_the_other_sides_send():
+    c = busy(n=40, spacing=1_000_000)  # an upstream connection idle 4 ms between calls
+    reads = upstream(c, 60_002, "s2c", "recv", 2)
+    lost = reads[5]
+    c.probe.remove(lost)
+    sent = next(x for x in upstream(c, 60_002, "s2c", "send", 3) if x["seq"] == lost["seq"])
+    requests, calls = pr.lives(c.probe, HOP, FU)
+    zones, *_ = pr.locate_losses(c.probe, HOP, FU, requests, calls, [(T0, 2**62, 1)])
+    assert zones == [(sent["timestamp_ns"], reads[6]["timestamp_ns"])]
+
+
+def test_a_lost_send_of_the_proxy_ends_its_zone_at_the_other_sides_read():
+    c = busy(n=40, spacing=1_000_000)
+    sends = upstream(c, 60_002, "c2s", "send", 2)
+    lost = sends[5]
+    c.probe.remove(lost)
+    read = next(x for x in upstream(c, 60_002, "c2s", "recv", 3) if x["seq"] == lost["seq"])
+    requests, calls = pr.lives(c.probe, HOP, FU)
+    zones, *_ = pr.locate_losses(c.probe, HOP, FU, requests, calls, [(T0, 2**62, 1)])
+    assert zones == [(sends[4]["timestamp_ns"], read["timestamp_ns"])]
+
+
+def test_a_call_merged_with_the_next_is_judged_by_its_last_request():
+    # The proxy's only read of one answer is lost: that call's asks join the
+    # next call's on the connection; the merged exchange is the next call (it
+    # starts at its last send), so its truth is the last request's.
+    merged = pr.Exchange((60_001, FU), 3, 0, 10, (392, 784))
+    truth = {(60_001, 392): "x", (60_001, 784): "y"}
+    assert pr._call_tid(merged, truth) == "y"
+    assert pr._call_tid(pr.Exchange((60_001, FU), 1, 0, 10, (0,)), truth) is None
+
+
+def test_the_window_is_learnt_even_where_losses_refuse_the_timings(tmp_path):
+    # 600 requests: enough links left (200) once the damaged sizes are out.
+    marks = [(T0 + k * 50_000, 0) for k in range(5)]
+    cell = with_twins(solo=600).write(tmp_path, drops=marks)
+    report = pr.judge(cell, recipe="declared", drop=50, seed=1, sizes="learned", locate=True)
+    assert report["size_window"] is not None
+    assert report["wrong"] == 0 and report["right"] > 0
+
+
+def test_a_window_given_is_used_not_learnt(tmp_path):
+    # The window is the relay's: learnt where nothing was lost, then kept.
+    cell = with_twins().write(tmp_path)
+    report = pr.judge(cell, recipe="declared", sizes="learned", window=(10, 40))
+    assert report["size_window"] == [10, 40]
+    assert report["wrong"] == 0 and report["right"] > 0
+
+
+def test_a_wrong_link_under_k2c_fails_the_verdict():
+    c = cell()
+    c["k2c"] = [{"wrong": 0, "coverage": 0.5}, {"wrong": 1, "coverage": 0.5}]
+    held, lines = pr.verdict([c])
+    assert held is False and any("K2c 1 wrong" in x for x in lines)
+
+
+def test_the_series_runs_k2c_with_the_main_window(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(cell, recipe="learned", **kw):
+        calls.append(kw)
+        return {"size_window": [1, 2], "wrong": 0, "right": 1}
+
+    monkeypatch.setattr(pr, "judge", fake)
+    monkeypatch.setattr(pr, "verdict", lambda cells: (True, [sorted(cells[0])]))
+    listing = tmp_path / "runs.txt"
+    listing.write_text(f"{tmp_path / 'run-a'} none 20 0\n")
+    _, (keys,) = pr.judge_series(listing)
+    assert keys == ["k2b", "k2c", "k5", "k6", "main", "name"]
+    k2c = [kw for kw in calls if kw.get("drop") == 1]
+    assert [kw["seed"] for kw in k2c] == [1, 2, 3]
+    assert all(kw["window"] == (1, 2) and kw["locate"] for kw in k2c)

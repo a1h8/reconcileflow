@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One day of the evaluation of the recipe on the probe's events
-# (correlation-phase4-spec.md section 8.14): 30 one-hop cells, without agent,
+# (correlation-phase4-spec.md sections 8.14 and 8.19): 30 one-hop cells, without agent,
 # with Beyla, with OBI; c20, c100, c200, c400, c800; load 0 and 4; 30,000
 # requests; the probe on the hop's and fake-upstream's ports, both directions.
 #
@@ -12,6 +12,8 @@
 # With a first day's runs list, every binary's hash must match that day's
 # (same agent), or the series stops. A cell already run under the prefix is
 # skipped, so the script can be started again after a stop.
+# The code judged is noted in <runs>/<prefix>-code.txt (commit, probe_recipe.py
+# hash); with a first day's list, the commit must be that day's (spec 8.19).
 # Appends "<run-dir> <agent> <c> <load>" to <runs>/<prefix>-runs.txt; then:
 #   python probe_recipe.py --series <runs>/<prefix>-runs.txt
 set -euo pipefail
@@ -32,6 +34,19 @@ LIST=$RUNS/$PREFIX-runs.txt
 MAX_LOAD=${MAX_LOAD:-1.5} SETTLE=${SETTLE:-120} REQUESTS=${REQUESTS:-30000}
 
 hashes() { grep '  \./' "$1/manifest.txt" | sort; }
+
+CODE=$RUNS/$PREFIX-code.txt
+{
+	echo "commit $(git -C "$TOP" rev-parse HEAD)"
+	echo "probe_recipe.py $(sha256sum probe_recipe.py | cut -d' ' -f1)"
+} >"$CODE.new"
+if [[ -n $FIRST ]]; then
+	first_code=${FIRST%-runs.txt}-code.txt
+	[[ -f $first_code ]] || die "no $first_code beside the first day's list"
+	cmp -s "$first_code" "$CODE.new" || die "the code differs from the first day's ($first_code)"
+fi
+[[ ! -f $CODE ]] || cmp -s "$CODE" "$CODE.new" || die "the code changed since this series started ($CODE)"
+mv "$CODE.new" "$CODE"
 
 sudo -v
 (while sleep 60; do sudo -n -v || exit; done) &

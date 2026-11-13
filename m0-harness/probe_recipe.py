@@ -45,27 +45,41 @@ Losses located (spec 8.18, locate=True). The probe counts what it loses,
 not where; refusing every group that meets the interval between two drop
 records (one a second) refuses nearly all under load. But each send and
 read carries its byte positions: a lost one leaves a hole on its own
-connection, between two events seen (seq_holes), and locate_losses widens
-each hole to the lives of the exchanges whose events reach into it (their
-answer sizes are not used). Those zones replace the intervals; a declared
-loss with no hole in its interval stays whole.
-Why no wrong link is added. Let X be an exchange whose observation differs
-from the truth because of a loss. (1) A lost send or read lies between two
-events a, b of its stream, or at an edge the other side sees: a hole;
-unless it and its counterpart on the other side are both lost at the same
-edge (open risk). (2) On a stream, byte order is time order: the lost
-event's instant is in [t(a), t(b)]. (3) If the loss changes X's life, the
-lost event is a bound of it or changes how exchanges are cut: X's events
-reach into [t(a), t(b)], X is damaged and its zone holds its observed life;
-if it changes only X's size (a piece of its answer), X is damaged and its
-size is dropped. (4) Let R be the true request of a call X: R's life holds
-X's true life. If X's life changed, X's true life meets [t(a), t(b)], so
-does R's, and any group holding R meets a zone: refused. If only X's size
-changed, it is dropped and R keeps X among its options. A request damaged
-likewise meets its zone. A call lost whole lies between the events around
-it on its connection: its request meets the zone, refused, never linked
-to another call. (5) Outside refused groups no observation is wrong and no
-wrong size is used: the reasoning of recipe_links holds as it is.
+connection between two events a, b seen (seq_holes), or at an edge the
+other side sees. Only holes in the proxy's own events count (lives uses no
+other), and only where the probe declared a loss. A hole's zone is
+[t(a), t(b)], narrowed by the other side, which saw the same bytes on the
+same clock: a lost read comes after the send of its first byte, a lost
+send before the read of its last. The exchanges whose events reach into
+[t(a), t(b)] are damaged: their answer sizes are not used. A declared loss
+with no hole stays whole.
+Why no wrong link is added (spec 8.18.9). Among complete assignments that
+fit the options seen, recipe_links holds only the links they all share;
+none is wrong while the true assignment fits. It stops fitting only when
+a true option is missing (request R's true call X is not among its
+options, the life seen of R or of X having changed) or an element is
+missing or extra; so the groups of R and of X must be refused, and the
+zone must meet the life seen of each. An extra option changes nothing; a
+wrong size is dropped. Case by case, t_l the instant lost:
+- the proxy's first read of R lost (R reads more): R starts at t(b), in
+  the zone; X starts in [t_l, t(b)] when R lost it, in the zone too;
+- its only read of R lost: R is gone, its answer goes to the request
+  before (size dropped); X lies in [t_l, t(b)];
+- a piece of R's answer: size dropped; its only piece: R merges with the
+  next request, whose life seen holds t_l;
+- the proxy's last send of X lost (X sends more): X starts earlier;
+  t_l is in X's true life, so in R's and in X's seen;
+- its only send of X: X is gone, its answer goes to the call before
+  (size dropped); t_l is X's true start, in R;
+- the first piece of X's answer: X ends at t(b): t_l in R, t(b) in X
+  seen; its only piece: X merges with the next call; t_l in R.
+Every zone holds t_l, and t(b) for reads. Outside refused groups no
+observation is wrong and no wrong size is used. Open risks: an event and
+its counterpart both lost at the same edge; one anomaly making up for
+another in a group's count.
+The window of sizes is the relay's: learnt where nothing was lost and
+kept (judge(window=...)); the size trip of recipe_links leaves out what a
+loss touches (8.18.10).
 
 Usage: probe_recipe.py <cell-dir> [--json] [--declared] [--drop N --seed S] [--shift]
                        [--sizes [--size-shift B]] [--locate]
@@ -77,7 +91,7 @@ from __future__ import annotations
 import json
 import random
 import sys
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
@@ -176,9 +190,13 @@ class Hole:
     """Events lost on a connection, between two instants (spec 8.18)."""
 
     conn: tuple[int, int]
-    start: int
+    start: int  # the events seen around it, on its stream
     end: int
     edge: bool = False  # at a stream's first or last byte: may be the protocol's close
+    way: str = "c2s"  # its stream: direction and kind of the lost events
+    kind: str = "send"
+    lo: int = 0  # [lo, hi]: where the lost events lie, narrowed by the other side
+    hi: int = 0
 
 
 def _signed(x: int) -> int:
@@ -220,57 +238,99 @@ def seq_holes(rows) -> list[Hole]:
         ev.sort()
         if key[2] == "recv" and len(ev) >= 2 and _signed(ev[-1][2] - ev[-2][2] - ev[-2][3]) == 1:
             ev[-1][2] -= 1  # the read that took the peer's close, before bbfa835
+
+    covering: dict = {}  # (conn, way, kind) -> (starts, [(from, to, ts)], base), byte offsets
+
+    def other_side(conn, way, kind, seq):
+        """When the other side's event holding byte seq happened, if seen."""
+        key = (conn, way, "recv" if kind == "send" else "send")
+        if key not in covering:
+            base = (streams.get((conn, way, "send")) or streams[conn, way, "recv"])[0][2]
+            ev = sorted(
+                (_signed(x[2] - base), _signed(x[2] - base) + x[3], x[0])
+                for x in streams.get(key, [])
+            )
+            covering[key] = ([e[0] for e in ev], ev, base)
+        starts, ev, base = covering[key]
+        at = _signed(seq - base)
+        k = bisect_right(starts, at) - 1
+        return ev[k][2] if k >= 0 and ev[k][0] <= at < ev[k][1] else None
+
     holes = []
-    for (conn, _, _), ev in streams.items():
+    for (conn, way, kind), ev in streams.items():
         for a, b in pairwise(ev):
-            if (a[2] + a[3] - b[2]) % 2**32:
-                holes.append(Hole(conn, a[0], b[0]))
+            if not (a[2] + a[3] - b[2]) % 2**32:
+                continue
+            lo, hi = a[0], b[0]
+            if kind == "recv":  # a lost read comes after the send of its first byte
+                t = other_side(conn, way, kind, a[2] + a[3])
+                lo = lo if t is None else min(max(lo, t), hi)
+            else:  # a lost send comes before the read of its last byte
+                t = other_side(conn, way, kind, b[2] - 1)
+                hi = hi if t is None else max(min(hi, t), lo)
+            holes.append(Hole(conn, a[0], b[0], False, way, kind, lo, hi))
+
+    def edge(conn, way, kind, lo, hi):
+        holes.append(Hole(conn, lo, hi, True, way, kind, lo, hi))
+
     for conn, way in {(c, w) for c, w, _ in streams}:
         sent, read = streams.get((conn, way, "send"), []), streams.get((conn, way, "recv"), [])
-        if not sent or not read:
-            holes.append(Hole(conn, first[conn], last[conn], True))
+        if not sent or not read:  # one side saw nothing of this direction
+            edge(conn, way, "recv" if sent else "send", first[conn], last[conn])
             continue
         lead = _signed(sent[0][2] - read[0][2])
         if lead:  # the side that starts later lost its first event
-            later = sent if lead > 0 else read
-            holes.append(Hole(conn, first[conn], later[0][0], True))
+            later, kind = (sent, "send") if lead > 0 else (read, "recv")
+            edge(conn, way, kind, first[conn], later[0][0])
         end = read[-1][2] + read[-1][3]
         tail = _signed(sent[-1][2] + sent[-1][3] - end)
         if tail < 0:  # read beyond what was sent: the sender lost its last send
-            holes.append(Hole(conn, sent[-1][0], last[conn], True))
+            edge(conn, way, "send", sent[-1][0], last[conn])
         elif tail > 0:  # sent beyond what was read
             close = closed.get((conn, read[-1][4]))
             unread = [e for e in sent if _signed(e[2] + e[3] - end) > 0]
             if close is None or any(e[0] <= close for e in unread):
-                holes.append(Hole(conn, read[-1][0], last[conn] if close is None else close, True))
+                edge(conn, way, "recv", read[-1][0], last[conn] if close is None else close)
     return sorted(holes)
 
 
+def _at_the_proxy(h: Hole, hop_port: int, fu_port: int) -> bool:
+    """Whether the hole is in the proxy's own events, the only ones lives uses:
+    its reads of requests and sends of answers, its sends of calls and reads
+    of their answers."""
+    if h.conn[1] == hop_port:
+        return (h.way, h.kind) in (("c2s", "recv"), ("s2c", "send"))
+    if h.conn[1] == fu_port:
+        return (h.way, h.kind) in (("c2s", "send"), ("s2c", "recv"))
+    return False
+
+
 def locate_losses(rows, hop_port, fu_port, requests, calls, declared, holes=None):
-    """(zones, damaged requests, damaged calls, unlocated): spec 8.18.6.
+    """(zones, damaged requests, damaged calls, unlocated): spec 8.18.9.
     The probe counts each lost event when it happens, so a loss lies in an
     interval where its count grew (lo, hi, count): a hole that meets none is
-    the protocol, not a loss, and is left out. A zone is a hole's interval
-    widened to the lives of the exchanges of its connection whose events
-    reach into it (damaged: their sizes are not to be used). A declared loss
-    with no hole in its interval stays whole: unlocated."""
+    the protocol, not a loss, and is left out; so is a hole in load-gen's or
+    fake-upstream's events, which no observation uses. A zone is a hole's
+    [lo, hi], narrowed by the other side's event; the exchanges of its
+    connection whose events reach into [start, end] are damaged: their sizes
+    are not to be used. A declared loss with no hole in its interval stays
+    whole: unlocated."""
     lossy = _Union((lo, hi) for lo, hi, n in declared if n > 0)
     holes = [
         h for h in (seq_holes(rows) if holes is None else holes) if lossy.meets(h.start, h.end)
     ]
+    spans = _Union((h.start, h.end) for h in holes)  # located, the proxy's or not
+    holes = [h for h in holes if _at_the_proxy(h, hop_port, fu_port)]
     by_conn: dict = defaultdict(list)
     for inbound, exchanges in ((True, requests), (False, calls)):
         for i, x in enumerate(exchanges):
             by_conn[x.conn].append((x, i, inbound))
     zones, damaged_requests, damaged_calls = [], set(), set()
     for h in holes:
-        lo, hi = h.start, h.end
         for x, i, inbound in by_conn.get(h.conn, ()):
             if x.span[0] <= h.end and h.start <= x.span[1]:
                 (damaged_requests if inbound else damaged_calls).add(i)
-                lo, hi = min(lo, x.start), max(hi, x.end)
-        zones.append((lo, hi))
-    spans = _Union((h.start, h.end) for h in holes)
+        zones.append((h.lo, h.hi))
     unlocated = [(lo, hi) for lo, hi, n in declared if n > 0 and not spans.meets(lo, hi)]
     return zones, damaged_requests, damaged_calls, unlocated
 
@@ -354,6 +414,16 @@ def _max_stream_ids(cell: Path, hop: int) -> dict[int, int]:
     return out
 
 
+def _call_tid(x: Exchange, fu_truth: dict) -> str | None:
+    """A call's truth: that of the last request among its asks. A call starts
+    at its last send; one merged with the next after a lost answer (spec
+    8.18.9, D3) is the next call. Without loss a call holds one request."""
+    return next(
+        (fu_truth[x.conn[0], o] for o in reversed(x.offsets) if (x.conn[0], o) in fu_truth),
+        None,
+    )
+
+
 def judge(
     cell: Path,
     recipe: str = "learned",
@@ -363,6 +433,7 @@ def judge(
     sizes: str = "none",
     size_shift: int = 0,
     locate: bool = False,
+    window: tuple[int, int] | None = None,
 ) -> dict:
     meta = json.loads((cell / "cell.json").read_text())
     hop, fu = meta["hop_ports"][0], meta["fake_upstream_port"]
@@ -382,12 +453,7 @@ def judge(
         if conn is not None and r.get("stream_offset") is not None:
             fu_truth[conn[0], r["stream_offset"]] = r["trace_id"]
     req_truth = {(r.conn, r.end): lg.get((r.conn[0], r.rank)) for r in full_requests}
-    call_truth = {
-        (x.conn, x.end): next(
-            (fu_truth[x.conn[0], o] for o in x.offsets if (x.conn[0], o) in fu_truth), None
-        )
-        for x in full_calls
-    }
+    call_truth = {(x.conn, x.end): _call_tid(x, fu_truth) for x in full_calls}
     control = None
     if shift:  # K5: each call takes the truth of the next call on its connection
         control = "K5 call truth shifted by one rank"
@@ -467,7 +533,7 @@ def judge(
         "recipe": None if chosen is None else list(chosen.calls),
     }
     counts, refused = Counter(), Counter()
-    window = None
+    given, window = window, None
     if chosen is not None and chosen.calls == (HOP_NAME,):
         result = recipe_links(req, {HOP_NAME: call}, chosen, lossy)
         if sizes == "learned":  # spec 8.17: from the links timings alone hold, no truth
@@ -477,9 +543,15 @@ def judge(
             answers_out = {
                 ("call", j): x.answer for j, x in enumerate(calls) if j not in damaged_calls
             }
-            window = learn_window(
-                [(x.upstream, x.downstream) for x in result.links], answers_in, answers_out
-            )
+            if given is not None:  # the relay's, learnt where nothing was lost (8.18.10)
+                window = given
+            else:
+                # Learnt on the timings alone without the losses (8.18.8): a wrong
+                # link among these can only widen the window or remove it.
+                free = result if not lossy else recipe_links(req, {HOP_NAME: call}, chosen)
+                window = learn_window(
+                    [(x.upstream, x.downstream) for x in free.links], answers_in, answers_out
+                )
             if window is not None:
                 if size_shift:
                     control = f"K6 window shifted by {size_shift} bytes"
@@ -528,7 +600,7 @@ K5_MIN = 0.99  # spec 8.14: share of wrong links the judge must see under K5
 
 
 def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
-    """Spec 8.14 on judged cells {"name", "main", "k2b": [...], "k5", "k6"}: True
+    """Spec 8.14 (8.19) on judged cells {"name", "main", "k2b", "k2c", "k5", "k6"}: True
     (held), False (not held), None (a control failed: no verdict). A cell
     whose ranks do not match load-gen's is invalid: reported, not judged."""
     lines, failed, blind = [], False, False
@@ -550,6 +622,9 @@ def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
         k2b_wrong = sum(k["wrong"] for k in c["k2b"])
         if k2b_wrong:
             faults.append(f"K2b {k2b_wrong} wrong")
+        k2c_wrong = sum(k["wrong"] for k in c.get("k2c", []))  # spec 8.19: rare losses
+        if k2c_wrong:
+            faults.append(f"K2c {k2c_wrong} wrong")
         if c.get("k6", {}).get("wrong"):  # spec 8.17: a wrong window links nothing
             faults.append(f"K6 {c['k6']['wrong']} wrong")
         linked = c["k5"]["wrong"] + c["k5"]["right"]
@@ -570,23 +645,27 @@ def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
 def judge_series(listing: Path) -> tuple[bool | None, list[str]]:
     """Every run of a series list ("<run-dir> <agent> <c> <load>" lines):
     declared recipe with the window learnt from it (spec 8.17), losses
-    located (8.18), K2b seeds 1-3, K5, K6; then the verdict."""
+    located (8.18), K2b (50 permille) and K2c (1 permille) seeds 1-3, K5,
+    K6 with the main judgment's window (8.18.10); then the verdict of the
+    protocol as amended (spec 8.19)."""
     cells = []
     for line in listing.read_text().splitlines():
         if not line.strip():
             continue
         run, agent, c, load = line.split()[:4]
         cell = Path(run) / "n1"
+        main = judge(cell, "declared", sizes="learned", locate=True)
+        # The controls keep the window learnt where nothing was lost (8.18.10).
+        window = None if main["size_window"] is None else tuple(main["size_window"])
+        kept = {"recipe": "declared", "sizes": "learned", "locate": True, "window": window}
         cells.append(
             {
                 "name": f"{agent}-c{c}-load{load} ({Path(run).name})",
-                "main": judge(cell, "declared", sizes="learned", locate=True),
-                "k2b": [
-                    judge(cell, "declared", drop=50, seed=s, sizes="learned", locate=True)
-                    for s in (1, 2, 3)
-                ],
-                "k5": judge(cell, "declared", shift=True, sizes="learned", locate=True),
-                "k6": judge(cell, "declared", sizes="learned", size_shift=1000, locate=True),
+                "main": main,
+                "k2b": [judge(cell, drop=50, seed=s, **kept) for s in (1, 2, 3)],
+                "k2c": [judge(cell, drop=1, seed=s, **kept) for s in (1, 2, 3)],
+                "k5": judge(cell, shift=True, **kept),
+                "k6": judge(cell, size_shift=1000, **kept),
             }
         )
     return verdict(cells)

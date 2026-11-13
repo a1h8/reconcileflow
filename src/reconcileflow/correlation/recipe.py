@@ -155,6 +155,11 @@ def recipe_links(
     starts = {h: [c.start_us for c in calls[h]] for h in recipe.calls}
     losses = _union(lossy)
     loss_ends = [b for _, b in losses]
+
+    def touches_loss(low, high) -> bool:
+        k = bisect_left(loss_ends, low)  # the first loss that ends at or after low
+        return k < len(losses) and losses[k][0] <= high
+
     undecided: list[Undecided] = []
 
     domain: dict[tuple[Identity, str], list[Identity]] = {}
@@ -218,10 +223,21 @@ def recipe_links(
             else:
                 sized[r, h] = [c for c in o if c not in theirs or low <= mine - theirs[c] <= high]
         still = {(h, c) for (_, h), o in sized.items() for c in o}
+        life = {_id(r): (r.start_us, r.end_us) for r in requests}
+        life |= {(h, _id(c)): (c.start_us, c.end_us) for h in recipe.calls for c in calls[h]}
+        # A contradiction on what a declared loss touches is the loss's doing
+        # (a call gone, a life changed): those are refused by the loss
+        # anyway (spec 8.18.10); any other is the window's, and refuses.
         kept_groups = []
         for g in groups:
-            broken = any(not sized[_id(r), h] for r in g["requests"] for h in recipe.calls) or any(
-                (h, _id(c)) not in still for h in recipe.calls for c in g["calls"][h]
+            broken = any(
+                not sized[_id(r), h] and not touches_loss(*life[_id(r)])
+                for r in g["requests"]
+                for h in recipe.calls
+            ) or any(
+                (h, _id(c)) not in still and not touches_loss(*life[h, _id(c)])
+                for h in recipe.calls
+                for c in g["calls"][h]
             )
             if broken:
                 for r in g["requests"]:
@@ -235,6 +251,12 @@ def recipe_links(
                     )
             else:
                 kept_groups += g["requests"]
+                undecided.extend(  # left with no request by its size: the loss's doing
+                    Undecided(h, _id(c), "outbound", Status.INCOMPLETE)
+                    for h in recipe.calls
+                    for c in g["calls"][h]
+                    if (h, _id(c)) not in still
+                )
         domain = sized
         groups = grouped(sorted(kept_groups, key=_key), domain)
 
@@ -257,8 +279,7 @@ def recipe_links(
         n = len(g["requests"])
         low = g["requests"][0].start_us
         high = max(r.end_us for r in g["requests"])
-        k = bisect_left(loss_ends, low)  # the first loss that ends at or after low
-        touched = k < len(losses) and losses[k][0] <= high
+        touched = touches_loss(low, high)
         if touched or any(len(g["calls"][h]) != n for h in recipe.calls):
             refuse(g, Status.INCOMPLETE, {})
             continue
