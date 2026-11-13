@@ -153,7 +153,8 @@ def recipe_links(
     requests = sorted(inbound, key=_key)
     calls = {h: sorted(outbound.get(h, ()), key=_key) for h in recipe.calls}
     starts = {h: [c.start_us for c in calls[h]] for h in recipe.calls}
-    losses = sorted(lossy)
+    losses = _union(lossy)
+    loss_ends = [b for _, b in losses]
     undecided: list[Undecided] = []
 
     domain: dict[tuple[Identity, str], list[Identity]] = {}
@@ -256,7 +257,8 @@ def recipe_links(
         n = len(g["requests"])
         low = g["requests"][0].start_us
         high = max(r.end_us for r in g["requests"])
-        touched = any(a <= high and low <= b for a, b in losses)
+        k = bisect_left(loss_ends, low)  # the first loss that ends at or after low
+        touched = k < len(losses) and losses[k][0] <= high
         if touched or any(len(g["calls"][h]) != n for h in recipe.calls):
             refuse(g, Status.INCOMPLETE, {})
             continue
@@ -276,6 +278,17 @@ def recipe_links(
         undecided=tuple(sorted(undecided, key=lambda x: (x.where, x.side, x.observation))),
         duplicates_dropped=0,
     )
+
+
+def _union(intervals) -> list[tuple[float, float]]:
+    """Closed intervals merged where they meet: disjoint, sorted."""
+    out: list[list[float]] = []
+    for a, b in sorted(intervals):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
 
 
 def _forced(requests, recipe, domain, start, end) -> dict | None:

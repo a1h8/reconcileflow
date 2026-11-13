@@ -57,23 +57,37 @@ class Cell:
         self._ev("recv", cport, sport, st["c2s"], 64, t + 1, 2 if sport == HOP else 3)
         st["c2s"] += 64
 
-    def exchange(self, cport, sport, t, ask, answer, handshake=False, answer_at=50):
-        """The client writes ask bytes at t; the server answers at t + answer_at."""
+    def exchange(self, cport, sport, t, ask, answer, handshake=False, answer_at=50, pieces=1):
+        """The client writes ask bytes at t; the server answers at t + answer_at,
+        in `pieces` writes 2 ns apart."""
         client, server = (1, 2) if sport == HOP else (2, 3)
         st = self.conns[cport, sport]
         self._ev("send", cport, sport, st["c2s"], ask, t, client)
         self._ev("recv", cport, sport, st["c2s"], ask, t + 1, server)
         offset = st["c2s"] - 1000
         st["c2s"] += ask
-        self._ev("send", cport, sport, st["s2c"], answer, t + answer_at, server, s2c=True)
-        self._ev("recv", cport, sport, st["s2c"], answer, t + answer_at + 1, client, s2c=True)
-        st["s2c"] += answer
+        cut = [answer // pieces] * (pieces - 1)
+        for k, part in enumerate([*cut, answer - sum(cut)]):
+            at = t + answer_at + 2 * k
+            self._ev("send", cport, sport, st["s2c"], part, at, server, s2c=True)
+            self._ev("recv", cport, sport, st["s2c"], part, at + 1, client, s2c=True)
+            st["s2c"] += part
         if not handshake:
             st["n"] += 1
         return st["n"], offset
 
     def request(
-        self, k, in_port, up_port, t, call_at=10, call_len=30, after=10, size=RESP, extra=0
+        self,
+        k,
+        in_port,
+        up_port,
+        t,
+        call_at=10,
+        call_len=30,
+        after=10,
+        size=RESP,
+        extra=0,
+        pieces=1,
     ):
         """Request k: read by the proxy at t+1, its call sent at t+1+call_at,
         answered call_len later with `size` bytes, the proxy answers `after`
@@ -81,7 +95,9 @@ class Cell:
         rank, _ = self.exchange(
             in_port, HOP, t, REQ, size + extra, answer_at=1 + call_at + call_len + 1 + after
         )
-        _, offset = self.exchange(up_port, FU, t + 1 + call_at, REQ, size, answer_at=call_len)
+        _, offset = self.exchange(
+            up_port, FU, t + 1 + call_at, REQ, size, answer_at=call_len, pieces=pieces
+        )
         tid = f"{k:032x}"
         self.lg.append(
             {
@@ -332,3 +348,147 @@ def test_k6_a_wrong_window_is_refused_not_linked(tmp_path):
 def test_one_wrong_link_under_k6_fails_the_verdict():
     assert pr.verdict([cell()])[0] is True
     assert pr.verdict([cell(k6_wrong=1)])[0] is False
+
+
+# -- losses located by the byte positions (spec 8.18) ----------------------------
+
+
+def proxy_reads_on(port, sport=HOP):
+    return lambda r: (
+        r["kind"] == "recv"
+        and r["server_port"] == sport
+        and r["client_port"] == port
+        and "dir" not in r
+    )
+
+
+def test_a_lost_event_leaves_a_hole_between_its_neighbours():
+    c = busy(n=40, spacing=500)
+    reads = [r for r in c.probe if proxy_reads_on(50_001)(r)]
+    lost = reads[5]
+    c.probe.remove(lost)
+    holes = pr.seq_holes(c.probe)
+    assert [(h.conn, h.start < lost["timestamp_ns"] < h.end) for h in holes] == [
+        ((50_001, HOP), True)
+    ]
+
+
+def test_the_one_byte_close_artifact_is_not_a_hole():
+    c = busy(n=40, spacing=500)
+    last = [r for r in c.probe if proxy_reads_on(50_002)(r)][-1]
+    last["seq"] += 1  # recorded before bbfa835: the read that took the FIN
+    assert pr.seq_holes(c.probe) == []
+
+
+def test_a_lost_last_event_is_seen_from_the_other_side():
+    c = busy(n=40, spacing=500)
+    answers = [
+        r
+        for r in c.probe
+        if r["server_port"] == HOP
+        and r["client_port"] == 50_003
+        and r.get("dir") == "s2c"
+        and r["kind"] == "send"
+    ]
+    c.probe.remove(answers[-1])  # the proxy's last answer on that connection
+    (hole,) = pr.seq_holes(c.probe)
+    assert hole.conn == (50_003, HOP)
+    assert hole.start <= answers[-2]["timestamp_ns"] < hole.end
+    assert hole.end >= answers[-1]["timestamp_ns"]
+
+
+def test_located_losses_leave_links_far_from_them(tmp_path):
+    # Requests one after the other: each its own group, so what a loss
+    # refuses is its neighbourhood, not a group that holds everything. Drop
+    # records far apart, as on the bench (one a second, over a thousand
+    # requests at c800): each covers a hundred requests here.
+    marks = [(T0 + k * 50_000, 0) for k in range(6)]
+    cell = busy(n=400, spacing=500).write(tmp_path, drops=marks)
+    far = pr.judge(cell, recipe="declared", drop=5, seed=1, locate=True)
+    wide = pr.judge(cell, recipe="declared", drop=5, seed=1, locate=False)
+    assert far["wrong"] == 0 and wide["wrong"] == 0
+    assert wide["right"] == 0
+    assert far["right"] > 0.5 * far["judged"]
+    assert far["unlocated_losses"] == 0
+
+
+def test_a_lost_piece_of_an_answer_removes_the_call_size(tmp_path):
+    c = Cell()
+    for i in range(2):
+        c.open(50_000 + i, HOP, T0 + i)
+        c.open(60_000 + i, FU, T0 + 10 + i)
+    for k in range(300):
+        t = T0 + 10_000 + 200 * k
+        c.request(k, 50_000 + k % 2, 60_000 + k % 2, t, size=1000 + k, extra=22, pieces=2)
+    pieces = [
+        r
+        for r in c.probe
+        if r["server_port"] == FU
+        and r["client_port"] == 60_001
+        and r.get("dir") == "s2c"
+        and r["kind"] == "recv"
+    ]
+    lost = pieces[-20]  # the second piece of a late call's answer
+    c.probe.remove(lost)
+    requests, calls = pr.lives(c.probe, HOP, FU)
+    _, _, damaged_calls, unlocated = pr.locate_losses(
+        c.probe, HOP, FU, requests, calls, [(T0, 2**62, 1)]
+    )
+    (x,) = [j for j, x in enumerate(calls) if x.span[0] <= lost["timestamp_ns"] <= x.span[1]]
+    assert x in damaged_calls and not unlocated
+    cell = c.write(tmp_path, drops=[(T0, 0), (2**62, 1)])
+    report = pr.judge(cell, recipe="declared", sizes="learned", locate=True)
+    assert report["wrong"] == 0 and report["right"] > 0
+
+
+def test_a_declared_loss_without_any_hole_keeps_its_whole_interval(tmp_path):
+    marks = [(T0, 0), (T0 + 10_000 + 150 * 20, 3)]
+    cell = busy(spacing=20).write(tmp_path, drops=marks)
+    report = pr.judge(cell, locate=True)
+    assert report["unlocated_losses"] == 1
+    assert report["wrong"] == 0 and report["refused_by_status"].get("INCOMPLETE", 0) > 0
+
+
+def test_more_holes_than_declared_losses_make_the_cell_invalid():
+    c = cell("c200-load0", wrong=3)
+    c["main"]["holes_exceed_drops"] = True
+    held, lines = pr.verdict([cell(), c])
+    assert held is True and any("more holes than declared losses" in x for x in lines)
+
+
+def test_bytes_sent_after_the_reader_closed_are_no_hole():
+    # At a close, one side sends its TLS close alert after the other closed:
+    # never read, not lost (seen on every closed connection of the bench).
+    c = busy(n=40, spacing=500)
+    st = c.conns[50_001, HOP]
+    t = T0 + 100_000
+    c._ev("close", 50_001, HOP, 0, 0, t, 1)  # load-gen closes first
+    c._ev("send", 50_001, HOP, st["s2c"], 24, t + 10, 2, s2c=True)  # the proxy's alert
+    assert pr.seq_holes(c.probe) == []
+
+
+def test_bytes_left_unread_before_the_reader_closed_are_a_hole_up_to_its_close():
+    c = busy(n=40, spacing=500)
+    st = c.conns[50_001, HOP]
+    t = T0 + 100_000
+    c._ev("send", 50_001, HOP, st["s2c"], 24, t, 2, s2c=True)  # unread, or its read lost
+    c._ev("close", 50_001, HOP, 0, 0, t + 10, 1)
+    (hole,) = pr.seq_holes(c.probe)
+    assert hole.conn == (50_001, HOP) and hole.end == t + 10
+
+
+def test_a_hole_where_the_probe_declared_no_loss_is_not_one():
+    # The probe counts each lost event when it happens: a hole outside every
+    # interval where its count grew is the protocol (a close), not a loss.
+    c = busy(n=40, spacing=500)
+    st = c.conns[50_001, HOP]
+    t = T0 + 100_000
+    c._ev("send", 50_001, HOP, st["s2c"], 24, t, 2, s2c=True)  # left unread
+    c._ev("close", 50_001, HOP, 0, 0, t + 10, 1)
+    rows = c.probe
+    requests, calls = pr.lives(rows, HOP, FU)
+    assert len(pr.seq_holes(rows)) == 1
+    zones, dr, dc, unlocated = pr.locate_losses(rows, HOP, FU, requests, calls, [])
+    assert (zones, dr, dc, unlocated) == ([], set(), set(), [])
+    zones, *_ = pr.locate_losses(rows, HOP, FU, requests, calls, [(t - 5, t + 5, 1)])
+    assert len(zones) == 1
