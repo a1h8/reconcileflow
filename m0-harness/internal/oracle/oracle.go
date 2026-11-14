@@ -56,8 +56,14 @@ type Record struct {
 	Side               string `json:"side"` // "load-gen" | "fake-upstream"
 	ConnKey            string `json:"conn_key"`
 	StreamID           int    `json:"stream_id"` // local ordinal, NOT the HTTP/2 protocol stream ID
-	TraceID            string `json:"trace_id"`  // W3C traceparent trace-id field
-	TimestampNS        int64  `json:"timestamp_ns"`
+	// WireRank is load-gen's: the order in which the requests of a connection
+	// were handed it (GotConn), from 1. In HTTP/1.1 without pipelining a
+	// connection goes back to the pool only once the answer is read, so this
+	// is the order on the wire; StreamID, numbered at completion, may not be
+	// (phase 4 spec 8.20). Zero/omitted on fake-upstream's side.
+	WireRank    int    `json:"wire_rank,omitempty"`
+	TraceID     string `json:"trace_id"` // W3C traceparent trace-id field
+	TimestampNS int64  `json:"timestamp_ns"`
 	// ArrivalNS is when fake-upstream's handler received the request, before
 	// its injected latency; TimestampNS on that side is just before it
 	// answers. A receiver-side reference that owes nothing to the agent.
@@ -84,6 +90,11 @@ type Record struct {
 	// carries the request's own id, so the two halves join without relying on
 	// a traceparent that may have been lost on the way. Empty on load-gen's side.
 	Path string `json:"path,omitempty"`
+	// StreamOffset is, with fake-upstream -stream-offsets, the position of the
+	// request's first byte in the client's raw TCP stream, counted from the
+	// connection's first byte: the truth stream-probe's offset is judged
+	// against (4c). Absent when not counted or not exact; 0 is never a request.
+	StreamOffset *int64 `json:"stream_offset,omitempty"`
 }
 
 // Writer is a concurrency-safe JSONL appender — both binaries write to their

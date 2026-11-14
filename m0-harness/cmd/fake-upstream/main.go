@@ -37,6 +37,27 @@ type connState struct {
 	startNS    int64
 	generation int
 	streamSeq  atomic.Int64
+	stream     *streamConn // set with -stream-offsets only
+}
+
+// requestOffset gives the raw stream position of the k-th request on this
+// connection, when -stream-offsets counts it (offsets.go).
+func (cs *connState) requestOffset(k int) (int64, bool) {
+	if cs.stream == nil {
+		return 0, false
+	}
+	return cs.stream.requestOffset(k)
+}
+
+// connContext tags each connection with its identity, and its stream
+// counter when there is one.
+func connContext(ctx context.Context, c net.Conn) context.Context {
+	ft := c.RemoteAddr().String() + "-" + c.LocalAddr().String()
+	gen := nextGeneration(ft)
+	cs := &connState{fiveTuple: ft, startNS: time.Now().UnixNano(), generation: gen}
+	cs.stream, _ = c.(*streamConn)
+	connCounter.Add(1)
+	return context.WithValue(ctx, connKeyCtx, cs)
 }
 
 var (
@@ -59,6 +80,8 @@ func nextGeneration(fiveTuple string) int {
 func main() {
 	addr := flag.String("addr", ":8443", "listen address")
 	outPath := flag.String("out", "fake-upstream.jsonl", "ground-truth JSONL output path")
+	streamOffsets := flag.Bool("stream-offsets", false, "log each request's position in the client's raw TCP stream "+
+		"(stream_offset; TLS 1.3 and HTTP/1.1 only), the truth for stream-probe (4c)")
 	flag.Parse()
 
 	w, err := oracle.NewWriter(*outPath)
@@ -73,19 +96,17 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:      *addr,
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
-		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			ft := c.RemoteAddr().String() + "-" + c.LocalAddr().String()
-			gen := nextGeneration(ft)
-			cs := &connState{fiveTuple: ft, startNS: time.Now().UnixNano(), generation: gen}
-			connCounter.Add(1)
-			return context.WithValue(ctx, connKeyCtx, cs)
-		},
+		Addr:        *addr,
+		TLSConfig:   &tls.Config{Certificates: []tls.Certificate{cert}},
+		ConnContext: connContext,
 		Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			arrival := time.Now().UnixNano()
 			cs, _ := r.Context().Value(connKeyCtx).(*connState)
 			streamID := int(cs.streamSeq.Add(1))
+			var streamOffset *int64
+			if off, ok := cs.requestOffset(streamID); ok && r.ContentLength == 0 && len(r.TransferEncoding) == 0 {
+				streamOffset = &off // a body would shift the next request's start: no position then
+			}
 			ci := oracle.ConnectionInstance{
 				FiveTuple:         cs.fiveTuple,
 				ConnectionStartNS: cs.startNS,
@@ -117,6 +138,7 @@ func main() {
 				ResponseSize: int64(len(body)),
 				Baggage:      r.Header.Get("baggage"),
 				Path:         r.URL.Path,
+				StreamOffset: streamOffset,
 			}); err != nil {
 				log.Fatalf("write oracle record: %v", err)
 			}
@@ -126,6 +148,14 @@ func main() {
 		}),
 	}
 
+	if *streamOffsets {
+		ln, err := net.Listen("tcp", *addr)
+		if err != nil {
+			log.Fatalf("listen: %v", err)
+		}
+		log.Printf("fake-upstream listening on %s (HTTP/1.1 over TLS 1.3, stream offsets)", *addr)
+		log.Fatal(srv.Serve(offsetListener(ln, offsetsTLSConfig(cert))))
+	}
 	log.Printf("fake-upstream listening on %s (HTTP/2 over self-signed TLS)", *addr)
 	log.Fatal(srv.ListenAndServeTLS("", ""))
 }
