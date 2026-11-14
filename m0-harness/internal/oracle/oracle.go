@@ -56,8 +56,14 @@ type Record struct {
 	Side               string `json:"side"` // "load-gen" | "fake-upstream"
 	ConnKey            string `json:"conn_key"`
 	StreamID           int    `json:"stream_id"` // local ordinal, NOT the HTTP/2 protocol stream ID
-	TraceID            string `json:"trace_id"`  // W3C traceparent trace-id field
-	TimestampNS        int64  `json:"timestamp_ns"`
+	// WireRank is load-gen's: the order in which the requests of a connection
+	// were handed it (GotConn), from 1. In HTTP/1.1 without pipelining a
+	// connection goes back to the pool only once the answer is read, so this
+	// is the order on the wire; StreamID, numbered at completion, may not be
+	// (phase 4 spec 8.20). Zero/omitted on fake-upstream's side.
+	WireRank    int    `json:"wire_rank,omitempty"`
+	TraceID     string `json:"trace_id"` // W3C traceparent trace-id field
+	TimestampNS int64  `json:"timestamp_ns"`
 	// ArrivalNS is when fake-upstream's handler received the request, before
 	// its injected latency; TimestampNS on that side is just before it
 	// answers. A receiver-side reference that owes nothing to the agent.

@@ -41,12 +41,14 @@ class Cell:
             r["dir"] = "s2c"
         self.probe.append(r)
 
-    def open(self, cport, sport, t):
+    def open(self, cport, sport, t, base=1000):
+        """A connection, or a new one on the same four-tuple (base: its first
+        byte's number, a new one for each)."""
         client, server = (1, 2) if sport == HOP else (2, 3)
-        st = {"c2s": 1000, "s2c": 5000, "n": 0}
+        st = {"c2s": base, "s2c": base + 4000, "n": 0, "base": base}
         self.conns[cport, sport] = st
-        self._ev("connect", cport, sport, 1000, 0, t, client)
-        self._ev("accept", cport, sport, 1000, 0, t + 1, server)
+        self._ev("connect", cport, sport, base, 0, t, client)
+        self._ev("accept", cport, sport, base, 0, t + 1, server)
         self.exchange(cport, sport, t + 2, HELLO, FLIGHT, handshake=True)
 
     def finish(self, cport, sport, t):
@@ -64,7 +66,7 @@ class Cell:
         st = self.conns[cport, sport]
         self._ev("send", cport, sport, st["c2s"], ask, t, client)
         self._ev("recv", cport, sport, st["c2s"], ask, t + 1, server)
-        offset = st["c2s"] - 1000
+        offset = st["c2s"] - st["base"]
         st["c2s"] += ask
         cut = [answer // pieces] * (pieces - 1)
         for k, part in enumerate([*cut, answer - sum(cut)]):
@@ -544,7 +546,7 @@ def test_a_call_merged_with_the_next_is_judged_by_its_last_request():
     # next call's on the connection; the merged exchange is the next call (it
     # starts at its last send), so its truth is the last request's.
     merged = pr.Exchange((60_001, FU), 3, 0, 10, (392, 784))
-    truth = {(60_001, 392): "x", (60_001, 784): "y"}
+    truth = {(60_001, 0, 392): "x", (60_001, 0, 784): "y"}  # (port, incarnation, offset)
     assert pr._call_tid(merged, truth) == "y"
     assert pr._call_tid(pr.Exchange((60_001, FU), 1, 0, 10, (0,)), truth) is None
 
@@ -589,3 +591,69 @@ def test_the_series_runs_k2c_with_the_main_window(tmp_path, monkeypatch):
     k2c = [kw for kw in calls if kw.get("drop") == 1]
     assert [kw["seed"] for kw in k2c] == [1, 2, 3]
     assert all(kw["window"] == (1, 2) and kw["locate"] for kw in k2c)
+
+
+# -- truth on the wire, connections on a reused four-tuple (spec 8.20) ----------
+
+
+def test_a_reused_four_tuple_is_a_new_connection():
+    # The tail phase's load-gen reopened a port the measured one had used.
+    c = busy(n=20, spacing=500)
+    c.open(50_001, HOP, T0 + 200_000, base=900_000_000)
+    c.open(60_001, FU, T0 + 200_010, base=700_000_000)
+    for k in range(3):
+        c.request(100 + k, 50_001, 60_001, T0 + 300_000 + 500 * k)
+    assert pr.seq_holes(c.probe) == []
+    requests, _ = pr.lives(c.probe, HOP, FU)
+    later = [r for r in requests if r.conn == (50_001, HOP) and r.start > T0 + 200_000]
+    assert [r.rank for r in later] == [1, 2, 3]
+    assert len({r.incarnation for r in requests if r.conn == (50_001, HOP)}) == 2
+
+
+def swap_two_ranks(c, port=50_001):
+    """load-gen numbered two requests of a connection at their end, in the
+    other order (spec 8.20): stream_id swapped, wire_rank as on the wire."""
+    mine = [r for r in c.lg if r["conn_key"].startswith(f"127.0.0.1:{port}-")]
+    for r in mine:
+        r["wire_rank"] = r["stream_id"]
+    a, b = mine[4], mine[5]
+    a["stream_id"], b["stream_id"] = b["stream_id"], a["stream_id"]
+
+
+def test_the_truth_follows_the_wire_rank_not_the_completion_ordinal(tmp_path):
+    c = busy(n=40, spacing=500)
+    swap_two_ranks(c)
+    report = pr.judge(c.write(tmp_path / "a"), recipe="declared")
+    assert report["wrong"] == 0 and report["causality_violations"] == 0
+    for r in c.lg:
+        r.pop("wire_rank", None)  # a run recorded before wire_rank: the old truth, wrong here
+    old = pr.judge(c.write(tmp_path / "b"), recipe="declared")
+    assert old["wrong"] + old["causality_violations"] > 0
+
+
+def test_the_truth_of_a_reused_port_goes_to_the_connection_open_at_its_time(tmp_path):
+    # load-gen's records carry wall-clock times; the probe's clock records
+    # give the offset to its own clock.
+    OFFSET = 10**18
+    c = busy(n=20, spacing=500)
+    for r in c.lg:
+        r["timestamp_ns"] = OFFSET + T0 + 10_000
+    c.open(50_001, HOP, T0 + 200_000, base=900_000_000)  # the tail's, no truth of its own
+    c.open(60_001, FU, T0 + 200_010, base=700_000_000)
+    for k in range(3):
+        c.request(100 + k, 50_001, 60_001, T0 + 300_000 + 500 * k)
+    tail = [r for r in c.lg if int(r["trace_id"], 16) >= 100]
+    for r in tail:  # the tail's own load-gen: its own file, its own times
+        r["timestamp_ns"] = OFFSET + T0 + 300_000
+    c.lg = [r for r in c.lg if int(r["trace_id"], 16) < 100]
+    c.fu = [r for r in c.fu if int(r["trace_id"], 16) < 100]
+    c.probe += [
+        {"kind": "clock", "seq": 0, "len": 0, "timestamp_ns": t, "realtime_ns": OFFSET + t}
+        for t in (T0, T0 + 400_000)
+    ]
+    cell = c.write(tmp_path)
+    (cell / "tail.jsonl").write_text("".join(json.dumps(r) + "\n" for r in tail))
+    report = pr.judge(cell, recipe="declared")
+    assert report["ranks_ok"]
+    assert report["wrong"] == 0 and report["causality_violations"] == 0
+    assert report["right"] == report["judged"] > 0

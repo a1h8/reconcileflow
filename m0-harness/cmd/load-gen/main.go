@@ -215,7 +215,10 @@ func performRequest(client *http.Client, tracker *connTracker, target, traceID, 
 	}
 	defer func() { record.DurationNS = time.Since(started).Nanoseconds() }()
 	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) { record.ConnKey = tracker.identify(info.Conn) },
+		GotConn: func(info httptrace.GotConnInfo) {
+			record.ConnKey = tracker.identify(info.Conn)
+			record.WireRank = tracker.handOut(record.ConnKey)
+		},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -274,8 +277,9 @@ func randHex(n int) string {
 type connTracker struct {
 	mu         sync.Mutex
 	generation map[string]int
-	keyByConn  map[net.Conn]string // actual connection identity; tuple reuse is a new generation
-	streamSeq  map[string]*atomic.Int64
+	keyByConn  map[net.Conn]string      // actual connection identity; tuple reuse is a new generation
+	streamSeq  map[string]*atomic.Int64 // completion ordinal
+	wireSeq    map[string]*atomic.Int64 // hand-out order: the wire, in HTTP/1.1
 }
 
 func newConnTracker() *connTracker {
@@ -283,6 +287,7 @@ func newConnTracker() *connTracker {
 		generation: map[string]int{},
 		keyByConn:  map[net.Conn]string{},
 		streamSeq:  map[string]*atomic.Int64{},
+		wireSeq:    map[string]*atomic.Int64{},
 	}
 }
 
@@ -300,8 +305,21 @@ func (t *connTracker) identify(c net.Conn) string {
 		key = oracle.ConnKey(fiveTuple, gen)
 		t.keyByConn[c] = key
 		t.streamSeq[key] = &atomic.Int64{}
+		t.wireSeq[key] = &atomic.Int64{}
 	}
 	return key
+}
+
+// handOut counts a request handed the connection: its rank on the wire in
+// HTTP/1.1 (phase 4 spec 8.20). -1 for a connection never identified.
+func (t *connTracker) handOut(connKey string) int {
+	t.mu.Lock()
+	seq, ok := t.wireSeq[connKey]
+	t.mu.Unlock()
+	if !ok {
+		return -1
+	}
+	return int(seq.Add(1))
 }
 
 func (t *connTracker) nextStream(connKey string) int {

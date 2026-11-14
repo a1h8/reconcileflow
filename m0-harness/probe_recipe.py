@@ -118,6 +118,41 @@ class Exchange:
     offsets: tuple[int, ...]  # byte positions of the asks (upstream sends only)
     answer: int = 0  # bytes of the answer, at the proxy's end, until the next ask
     span: tuple[int, int] = (0, 0)  # first and last event of the exchange, answer pieces included
+    incarnation: int = 0  # which connection on its four-tuple (spec 8.20), in opening order
+
+
+class _Openings:
+    """The connections of each four-tuple, by their openings (spec 8.20): a
+    new connect (or accept, where no connect was seen) on a four-tuple
+    already used starts a new connection; events go to the one open at their
+    instant. Wall-clock times (load-gen's, fake-upstream's) are put on the
+    probe's clock by its clock records."""
+
+    def __init__(self, rows):
+        opened: dict = defaultdict(lambda: {"connect": [], "accept": []})
+        offsets = []
+        for r in rows:
+            kind = r.get("kind")
+            if kind in ("connect", "accept") and "client_port" in r:
+                opened[r["client_port"], r["server_port"]][kind].append(r["timestamp_ns"])
+            elif kind == "clock" and "realtime_ns" in r:
+                offsets.append(r["realtime_ns"] - r["timestamp_ns"])
+        self.opens = {c: sorted(k["connect"] or k["accept"]) for c, k in opened.items()}
+        self.offset = sorted(offsets)[len(offsets) // 2] if offsets else None
+
+    def of(self, conn, ts: int) -> int:
+        return bisect_right(self.opens.get(conn, []), ts)
+
+    def of_record(self, conn, wall_ns: int | None, seen: set) -> int | None:
+        """The connection a load-gen or fake-upstream record belongs to: the
+        only one seen on its four-tuple, else the one open at its time; None
+        when that cannot be told (no guess)."""
+        mine = {k for c, k in seen if c == conn}
+        if len(mine) == 1:
+            return next(iter(mine))
+        if self.offset is None or not wall_ns:
+            return None
+        return self.of(conn, wall_ns - self.offset)
 
 
 def _jsonl(path: Path):
@@ -135,18 +170,20 @@ def lives(probe, hop_port: int, fu_port: int, handshake: bool = True):
         ((r["timestamp_ns"], i, r) for i, r in enumerate(records)),
         key=lambda x: (x[0], x[1]),
     )
-    base: dict[tuple[int, int], int] = {}
-    seen: dict[tuple[int, int], list] = defaultdict(list)  # conn -> [(ts, ask?, offset, bytes)]
+    openings = _Openings([r for _, _, r in rows])
+    base: dict = {}
+    seen: dict = defaultdict(list)  # (conn, incarnation) -> [(ts, ask?, offset, bytes)]
     for ts, _, r in rows:
         kind = r.get("kind")
-        conn = (r.get("client_port"), r.get("server_port"))
-        if conn[1] not in (hop_port, fu_port):
+        four = (r.get("client_port"), r.get("server_port"))
+        if four[1] not in (hop_port, fu_port):
             continue
+        conn = (four, openings.of(four, ts))
         if kind == "connect":
             base.setdefault(conn, r["seq"])
             continue
         s2c = r.get("dir") == "s2c"
-        if conn[1] == hop_port:  # the proxy is the server: it reads asks, sends answers
+        if four[1] == hop_port:  # the proxy is the server: it reads asks, sends answers
             if kind == "recv" and not s2c:
                 seen[conn].append((ts, True, None, r["len"]))
             elif kind == "send" and s2c:
@@ -158,7 +195,7 @@ def lives(probe, hop_port: int, fu_port: int, handshake: bool = True):
             elif kind == "recv" and s2c:
                 seen[conn].append((ts, False, None, r["len"]))
     requests, calls = [], []
-    for conn, events in seen.items():
+    for (conn, incarnation), events in seen.items():
         upstream = conn[1] != hop_port
         exchanges, open_ = [], None
         for ts, ask, offset, length in events:
@@ -179,7 +216,7 @@ def lives(probe, hop_port: int, fu_port: int, handshake: bool = True):
             exchanges = exchanges[1:]
         out = requests if conn[1] == hop_port else calls
         out += [
-            Exchange(conn, k + 1, s, e, o, a, (f, z))
+            Exchange(conn, k + 1, s, e, o, a, (f, z), incarnation)
             for k, (s, e, o, a, f, z) in enumerate(exchanges)
         ]
     return requests, calls
@@ -197,6 +234,7 @@ class Hole:
     kind: str = "send"
     lo: int = 0  # [lo, hi]: where the lost events lie, narrowed by the other side
     hi: int = 0
+    incarnation: int = 0  # which connection on its four-tuple (spec 8.20)
 
 
 def _signed(x: int) -> int:
@@ -217,15 +255,17 @@ def seq_holes(rows) -> list[Hole]:
     peer's close into account
     (bbfa835) date the read that took it one byte late: a one-byte gap before
     the last read of a stream is that, not a loss."""
-    streams: dict = defaultdict(list)
+    openings = _Openings(rows)
+    streams: dict = defaultdict(list)  # here a connection is (four-tuple, incarnation)
     first: dict = {}
     last: dict = {}
     closed: dict = {}  # (conn, pid) -> first close
     for i, r in enumerate(rows):
         if "client_port" not in r:
             continue
-        conn = (r["client_port"], r["server_port"])
+        four = (r["client_port"], r["server_port"])
         ts = r["timestamp_ns"]
+        conn = (four, openings.of(four, ts))
         first[conn] = min(first.get(conn, ts), ts)
         last[conn] = max(last.get(conn, ts), ts)
         if r.get("kind") in ("send", "recv"):
@@ -268,10 +308,10 @@ def seq_holes(rows) -> list[Hole]:
             else:  # a lost send comes before the read of its last byte
                 t = other_side(conn, way, kind, b[2] - 1)
                 hi = hi if t is None else max(min(hi, t), lo)
-            holes.append(Hole(conn, a[0], b[0], False, way, kind, lo, hi))
+            holes.append(Hole(conn[0], a[0], b[0], False, way, kind, lo, hi, conn[1]))
 
     def edge(conn, way, kind, lo, hi):
-        holes.append(Hole(conn, lo, hi, True, way, kind, lo, hi))
+        holes.append(Hole(conn[0], lo, hi, True, way, kind, lo, hi, conn[1]))
 
     for conn, way in {(c, w) for c, w, _ in streams}:
         sent, read = streams.get((conn, way, "send"), []), streams.get((conn, way, "recv"), [])
@@ -324,10 +364,10 @@ def locate_losses(rows, hop_port, fu_port, requests, calls, declared, holes=None
     by_conn: dict = defaultdict(list)
     for inbound, exchanges in ((True, requests), (False, calls)):
         for i, x in enumerate(exchanges):
-            by_conn[x.conn].append((x, i, inbound))
+            by_conn[x.conn, x.incarnation].append((x, i, inbound))
     zones, damaged_requests, damaged_calls = [], set(), set()
     for h in holes:
-        for x, i, inbound in by_conn.get(h.conn, ()):
+        for x, i, inbound in by_conn.get((h.conn, h.incarnation), ()):
             if x.span[0] <= h.end and h.start <= x.span[1]:
                 (damaged_requests if inbound else damaged_calls).add(i)
         zones.append((h.lo, h.hi))
@@ -400,17 +440,36 @@ def _dropped(rows, drop: int, seed: int):
     return [r for i, r in enumerate(rows) if i not in gone], declared
 
 
-def _max_stream_ids(cell: Path, hop: int) -> dict[int, int]:
-    """Per inbound client port, load-gen's highest request number (warm-up,
-    measured and tail requests alike)."""
-    out: dict[int, int] = {}
+def _record_connection(r: dict, openings: _Openings, seen: set):
+    """((client port, server port), incarnation) of a load-gen or
+    fake-upstream record (spec 8.20), or None when it cannot be told."""
+    four, _, generation = r.get("conn_key", "").partition("|")
+    client, _, server = four.partition("-")
+    try:
+        conn = (int(client.rsplit(":", 1)[1]), int(server.rsplit(":", 1)[1]))
+    except (IndexError, ValueError):
+        return None
+    if generation not in ("", "0"):  # the recorder's own reuse: only its time tells
+        seen = set()
+    incarnation = openings.of_record(conn, r.get("timestamp_ns"), seen)
+    return None if incarnation is None else (conn, incarnation)
+
+
+def _max_ranks(cell: Path, hop: int, openings: _Openings, seen: set) -> dict:
+    """Per inbound connection (client port, incarnation), load-gen's highest
+    request rank on the wire (warm-up, measured and tail requests alike)."""
+    out: dict = {}
     for name in sorted(p.name for p in cell.glob("*.jsonl")):
         if not (name.startswith(("lg", "warmup", "tail"))):
             continue
         for r in _jsonl(cell / name):
-            conn = _port_rank(r.get("conn_key", ""))
-            if conn is not None and conn[1] == hop and r.get("stream_id") is not None:
-                out[conn[0]] = max(out.get(conn[0], 0), r["stream_id"])
+            at, rank = (
+                _record_connection(r, openings, seen),
+                r.get("wire_rank") or r.get("stream_id"),
+            )
+            if at is not None and at[0][1] == hop and rank is not None:
+                key = (at[0][0], at[1])
+                out[key] = max(out.get(key, 0), rank)
     return out
 
 
@@ -418,10 +477,8 @@ def _call_tid(x: Exchange, fu_truth: dict) -> str | None:
     """A call's truth: that of the last request among its asks. A call starts
     at its last send; one merged with the next after a lost answer (spec
     8.18.9, D3) is the next call. Without loss a call holds one request."""
-    return next(
-        (fu_truth[x.conn[0], o] for o in reversed(x.offsets) if (x.conn[0], o) in fu_truth),
-        None,
-    )
+    keys = ((x.conn[0], x.incarnation, o) for o in reversed(x.offsets))
+    return next((fu_truth[k] for k in keys if k in fu_truth), None)
 
 
 def judge(
@@ -442,31 +499,40 @@ def judge(
     # Truth, from every event the probe wrote: an exchange is known by its
     # connection and its end, which survive the K2b control.
     full_requests, full_calls = lives(rows, hop, fu)
+    # Spec 8.20: a load-gen request is known by its rank on the wire
+    # (wire_rank; stream_id, numbered at completion, in runs recorded
+    # before), on the connection open at its time.
+    openings = _Openings(rows)
+    seen = {(x.conn, x.incarnation) for x in [*full_requests, *full_calls]}
+
+    def where(r):
+        return _record_connection(r, openings, seen)
+
     lg = {}
     for r in _jsonl(cell / "lg.jsonl"):
-        conn = _port_rank(r.get("conn_key", ""))
-        if conn is not None:
-            lg[conn[0], r["stream_id"]] = r["trace_id"]
+        at, rank = where(r), r.get("wire_rank") or r.get("stream_id")
+        if at is not None and rank:
+            lg[at[0][0], at[1], rank] = r["trace_id"]
     fu_truth = {}
     for r in _jsonl(cell / "fu.jsonl"):
-        conn = _port_rank(r.get("conn_key", ""))
-        if conn is not None and r.get("stream_offset") is not None:
-            fu_truth[conn[0], r["stream_offset"]] = r["trace_id"]
-    req_truth = {(r.conn, r.end): lg.get((r.conn[0], r.rank)) for r in full_requests}
+        at = where(r)
+        if at is not None and r.get("stream_offset") is not None:
+            fu_truth[at[0][0], at[1], r["stream_offset"]] = r["trace_id"]
+    req_truth = {(r.conn, r.end): lg.get((r.conn[0], r.incarnation, r.rank)) for r in full_requests}
     call_truth = {(x.conn, x.end): _call_tid(x, fu_truth) for x in full_calls}
     control = None
     if shift:  # K5: each call takes the truth of the next call on its connection
         control = "K5 call truth shifted by one rank"
         by_conn = defaultdict(list)
         for x in full_calls:
-            by_conn[x.conn].append(x)
+            by_conn[x.conn, x.incarnation].append(x)
         for xs in by_conn.values():
             xs.sort(key=lambda x: x.rank)
             for x, y in zip(xs, [*xs[1:], None], strict=True):
                 call_truth[x.conn, x.end] = None if y is None else call_truth.get((y.conn, y.end))
-    most = _max_stream_ids(cell, hop)
-    per_conn = Counter(r.conn[0] for r in full_requests)
-    mismatched = sum(1 for p, n in per_conn.items() if n - most.get(p, 0) not in (0, 1))
+    most = _max_ranks(cell, hop, openings, seen)
+    per_conn = Counter((r.conn[0], r.incarnation) for r in full_requests)
+    mismatched = sum(1 for k, n in per_conn.items() if n - most.get(k, 0) not in (0, 1))
 
     declared = _declared(rows)
     if drop is not None:
