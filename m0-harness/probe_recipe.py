@@ -98,8 +98,10 @@ from itertools import pairwise
 from pathlib import Path
 
 from reconcileflow.correlation.recipe import (
+    Lattice,
     Recipe,
     Sizes,
+    learn_lattice,
     learn_recipe,
     learn_window,
     recipe_links,
@@ -491,6 +493,8 @@ def judge(
     size_shift: int = 0,
     locate: bool = False,
     window: tuple[int, int] | None = None,
+    signature: tuple[int, int, int] | None = None,
+    lattice_shift: bool = False,
 ) -> dict:
     meta = json.loads((cell / "cell.json").read_text())
     hop, fu = meta["hop_ports"][0], meta["fake_upstream_port"]
@@ -599,10 +603,10 @@ def judge(
         "recipe": None if chosen is None else list(chosen.calls),
     }
     counts, refused = Counter(), Counter()
-    given, window = window, None
+    given, window, lattice = window, None, None
     if chosen is not None and chosen.calls == (HOP_NAME,):
         result = recipe_links(req, {HOP_NAME: call}, chosen, lossy)
-        if sizes == "learned":  # spec 8.17: from the links timings alone hold, no truth
+        if sizes in ("learned", "lattice"):  # spec 8.17, 8.22: from the links timings alone hold
             answers_in = {
                 ("req", i): r.answer for i, r in enumerate(requests) if i not in damaged_requests
             }
@@ -611,23 +615,35 @@ def judge(
             }
             if given is not None:  # the relay's, learnt where nothing was lost (8.18.10)
                 window = given
+                if sizes == "lattice" and signature is not None:
+                    lattice = Lattice(*signature)
             else:
                 # Learnt on the timings alone without the losses (8.18.8): a wrong
                 # link among these can only widen the window or remove it.
                 free = result if not lossy else recipe_links(req, {HOP_NAME: call}, chosen)
-                window = learn_window(
-                    [(x.upstream, x.downstream) for x in free.links], answers_in, answers_out
-                )
+                pairs = [(x.upstream, x.downstream) for x in free.links]
+                window = learn_window(pairs, answers_in, answers_out)
+                if sizes == "lattice":  # spec 8.22: the window kept to the step
+                    lattice = learn_lattice(pairs, answers_in, answers_out)
             if window is not None:
                 if size_shift:
                     control = f"K6 window shifted by {size_shift} bytes"
                     window = (window[0] + size_shift, window[1] + size_shift)
+                    if lattice is not None:
+                        lattice = Lattice(
+                            lattice.low + size_shift, lattice.high + size_shift, lattice.step
+                        )
+                if lattice is not None and lattice_shift:
+                    control = "K7 signature shifted by half a step"
+                    half = lattice.step // 2
+                    lattice = Lattice(lattice.low + half, lattice.high + half, lattice.step)
+                rule = window if lattice is None else lattice
                 result = recipe_links(
                     req,
                     {HOP_NAME: call},
                     chosen,
                     lossy,
-                    Sizes(answers_in, {HOP_NAME: answers_out}, {HOP_NAME: window}),
+                    Sizes(answers_in, {HOP_NAME: answers_out}, {HOP_NAME: rule}),
                 )
         linked = {x.upstream[1]: x.downstream[1] for x in result.links}
         status = {u.observation[1]: u.status.name for u in result.undecided if u.side == "inbound"}
@@ -648,6 +664,10 @@ def judge(
     judged = counts["judged"]
     report["control"] = control
     report["size_window"] = None if window is None else list(window)
+    if sizes == "lattice":
+        report["size_signature"] = (
+            None if lattice is None else [lattice.low, lattice.high, lattice.step]
+        )
     report |= located
     report |= {
         "judged": judged,
@@ -693,6 +713,8 @@ def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
             faults.append(f"K2c {k2c_wrong} wrong")
         if c.get("k6", {}).get("wrong"):  # spec 8.17: a wrong window links nothing
             faults.append(f"K6 {c['k6']['wrong']} wrong")
+        if (c.get("k7") or {}).get("wrong"):  # spec 8.22: a wrong signature links nothing
+            faults.append(f"K7 {c['k7']['wrong']} wrong")
         linked = c["k5"]["wrong"] + c["k5"]["right"]
         seen = c["k5"]["wrong"] / linked if linked else 0.0
         if seen < K5_MIN:
@@ -708,7 +730,7 @@ def verdict(cells: list[dict]) -> tuple[bool | None, list[str]]:
     return held, lines
 
 
-def judge_series(listing: Path) -> tuple[bool | None, list[str]]:
+def judge_series(listing: Path, sizes: str = "learned") -> tuple[bool | None, list[str]]:
     """Every run of a series list ("<run-dir> <agent> <c> <load>" lines):
     declared recipe with the window learnt from it (spec 8.17), losses
     located (8.18), K2b (50 permille) and K2c (1 permille) seeds 1-3, K5,
@@ -720,32 +742,37 @@ def judge_series(listing: Path) -> tuple[bool | None, list[str]]:
             continue
         run, agent, c, load = line.split()[:4]
         cell = Path(run) / "n1"
-        main = judge(cell, "declared", sizes="learned", locate=True)
-        # The controls keep the window learnt where nothing was lost (8.18.10).
+        main = judge(cell, "declared", sizes=sizes, locate=True)
+        # The controls keep the window learnt where nothing was lost (8.18.10),
+        # and the signature (8.22).
         window = None if main["size_window"] is None else tuple(main["size_window"])
-        kept = {"recipe": "declared", "sizes": "learned", "locate": True, "window": window}
-        cells.append(
-            {
-                "name": f"{agent}-c{c}-load{load} ({Path(run).name})",
-                "main": main,
-                "k2b": [judge(cell, drop=50, seed=s, **kept) for s in (1, 2, 3)],
-                "k2c": [judge(cell, drop=1, seed=s, **kept) for s in (1, 2, 3)],
-                "k5": judge(cell, shift=True, **kept),
-                "k6": judge(cell, size_shift=1000, **kept),
-            }
-        )
+        kept = {"recipe": "declared", "sizes": sizes, "locate": True, "window": window}
+        if sizes == "lattice":
+            sig = main.get("size_signature")
+            kept["signature"] = None if sig is None else tuple(sig)
+        entry = {
+            "name": f"{agent}-c{c}-load{load} ({Path(run).name})",
+            "main": main,
+            "k2b": [judge(cell, drop=50, seed=s, **kept) for s in (1, 2, 3)],
+            "k2c": [judge(cell, drop=1, seed=s, **kept) for s in (1, 2, 3)],
+            "k5": judge(cell, shift=True, **kept),
+            "k6": judge(cell, size_shift=1000, **kept),
+        }
+        if sizes == "lattice":  # without a signature there is nothing to shift
+            entry["k7"] = judge(cell, lattice_shift=True, **kept) if kept["signature"] else None
+        cells.append(entry)
     return verdict(cells)
 
 
 def main(argv: list[str]) -> None:
     if argv[1] == "--series":
-        held, lines = judge_series(Path(argv[2]))
+        held, lines = judge_series(Path(argv[2]), "lattice" if "--lattice" in argv else "learned")
         print("\n".join(lines))
         sys.exit(0 if held else 1)
     drop = int(argv[argv.index("--drop") + 1]) if "--drop" in argv else None
     seed = int(argv[argv.index("--seed") + 1]) if "--seed" in argv else 0
     recipe = "declared" if "--declared" in argv else "learned"
-    sizes = "learned" if "--sizes" in argv else "none"
+    sizes = "lattice" if "--lattice" in argv else "learned" if "--sizes" in argv else "none"
     size_shift = int(argv[argv.index("--size-shift") + 1]) if "--size-shift" in argv else 0
     report = judge(
         Path(argv[1]), recipe, drop, seed, "--shift" in argv, sizes, size_shift, "--locate" in argv

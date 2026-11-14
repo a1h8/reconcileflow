@@ -6,7 +6,15 @@ import random
 import time
 
 from reconcileflow.correlation.assignment import Status
-from reconcileflow.correlation.recipe import Recipe, Sizes, learn_recipe, learn_window, recipe_links
+from reconcileflow.correlation.recipe import (
+    Lattice,
+    Recipe,
+    Sizes,
+    learn_lattice,
+    learn_recipe,
+    learn_window,
+    recipe_links,
+)
 from reconcileflow.correlation.timing import Timed
 
 BACK, SIDE = "hop -> back", "hop -> side"
@@ -382,3 +390,114 @@ def test_the_same_contradiction_without_a_loss_refuses_the_time_group():
     assert linked(result) == {(BACK, ("in", i)): (BACK, i) for i in range(4)}
     assert set(statuses(result)) == {(BACK, ("in", 4)), (BACK, ("in", 5)), (BACK, (BACK, 5))}
     assert set(statuses(result).values()) == {Status.SIZE_MISMATCH}
+
+
+# -- the size signature of a point (phase 4 spec 8.22) ---------------------------
+
+
+def gap_links(gaps):
+    """Links whose answers differ by `gaps`, one per link."""
+    links = [(("in", k), (BACK, k)) for k in range(len(gaps))]
+    s_in = {("in", k): 1000 + k + g for k, g in enumerate(gaps)}
+    s_out = {(BACK, k): 1000 + k for k in range(len(gaps))}
+    return links, s_in, s_out
+
+
+def test_the_signature_is_the_step_of_the_gaps_with_one_step_each_side():
+    gaps = [0, 22, 44] * 100
+    assert learn_lattice(*gap_links(gaps)) == Lattice(-22, 66, 22)
+
+
+def test_no_signature_from_one_value_a_small_step_too_few_links_or_a_wide_spread():
+    assert learn_lattice(*gap_links([22] * 300)) is None
+    assert learn_lattice(*gap_links([0, 4] * 150)) is None  # step below 8
+    assert learn_lattice(*gap_links([0, 22, 44] * 66)) is None  # 198 links
+    assert learn_lattice(*gap_links([0, 22] * 150 + [300])) is None  # spread over 256
+
+
+def members(lattice):
+    return set(range(lattice.low, lattice.high + 1, lattice.step))
+
+
+def test_a_wrong_link_among_the_learnt_ones_only_widens_the_signature():
+    right = learn_lattice(*gap_links([0, 22, 44] * 100))
+    rng = random.Random(29)
+    for wrong in [11, -5, 90, 7, -40, 1] + [rng.randint(-300, 300) for _ in range(300)]:
+        got = learn_lattice(*gap_links([0, 22, 44] * 100 + [wrong]))
+        assert got is None or members(right) <= members(got), wrong
+
+
+def lattice_sizes(inbound, outbound, lattice):
+    return Sizes(
+        {("in", k): v for k, v in inbound.items()},
+        {BACK: {(BACK, k): v for k, v in outbound.items()}},
+        {BACK: lattice},
+    )
+
+
+def test_the_signature_settles_what_the_window_leaves_open():
+    # Gaps 0 (own call) and +-11 (the other): both inside a window, only the
+    # own one on the signature's step.
+    requests, calls = twins()
+    s_in, s_out = {0: 1000, 1: 1011}, {0: 1000, 1: 1011}
+    window = recipe_links(requests, calls, ONE, sizes=sizes(s_in, s_out, -32, 76))
+    assert window.links == ()
+    result = recipe_links(
+        requests, calls, ONE, sizes=lattice_sizes(s_in, s_out, Lattice(-22, 66, 22))
+    )
+    assert linked(result) == {(BACK, ("in", 0)): (BACK, 0), (BACK, ("in", 1)): (BACK, 1)}
+    assert result.undecided == ()
+
+
+def test_a_gap_off_the_signature_that_empties_a_request_refuses_its_group():
+    requests, calls = twins()
+    s_in, s_out = {0: 1000, 1: 1005}, {0: 1000, 1: 1022}  # request 1 fits no call
+    result = recipe_links(
+        requests, calls, ONE, sizes=lattice_sizes(s_in, s_out, Lattice(-22, 66, 22))
+    )
+    assert result.links == ()
+    assert set(statuses(result).values()) == {Status.SIZE_MISMATCH}
+
+
+def test_links_with_a_signature_are_held_by_every_assignment_that_fits_it():
+    rng = random.Random(23)
+    lattice = Lattice(-22, 66, 22)
+    for _ in range(300):
+        n = rng.randint(1, 5)
+        requests, calls, s_in, s_out = [], {BACK: []}, {}, {}
+        for i in range(n):
+            s = rng.randint(0, 60)
+            requests.append(req(i, s, s + rng.randint(40, 90)))
+            c = rng.randint(s, s + 30)
+            calls[BACK].append(call(BACK, i, c, c + rng.randint(1, 10)))
+            s_out[i] = rng.choice((1000, 1011, 1022, 1033))
+            s_in[i] = (
+                s_out[i] + rng.choice((0, 22, 44))
+                if rng.random() < 0.85
+                else rng.choice((1000, 1050))
+            )
+        result = recipe_links(requests, calls, ONE, sizes=lattice_sizes(s_in, s_out, lattice))
+
+        def fits(r, c, s_in=s_in, s_out=s_out):
+            g = s_in[r.seq] - s_out[c.seq]
+            return lattice.low <= g <= lattice.high and (g - lattice.low) % lattice.step == 0
+
+        options = {
+            r: [
+                c
+                for c in calls[BACK]
+                if r.start_us <= c.start_us and c.end_us <= r.end_us and fits(r, c)
+            ]
+            for r in requests
+        }
+        common = None
+        for choice in itertools.product(*(options[r] for r in requests)):
+            if len(set(choice)) != len(choice):
+                continue
+            links = {
+                (BACK, ("in", r.seq)): (BACK, c.seq) for r, c in zip(requests, choice, strict=True)
+            }
+            common = links if common is None else {k: v for k, v in common.items() if links[k] == v}
+        if common is None:
+            continue
+        assert all(common.get(k) == v for k, v in linked(result).items())

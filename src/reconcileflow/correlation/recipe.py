@@ -39,6 +39,17 @@ with no option, it is contradicted there: the whole group is refused
 Open risk: a point that rewrites one answer, where another call falls in
 the window by chance, trips nothing and could force a wrong link.
 
+Size signature (spec 8.22): where the point's answers differ from its
+calls' by whole records (TLS 1.3 adds 22 bytes to each), the gaps of the
+links the timings alone hold share a step, their greatest common divisor.
+``learn_lattice`` keeps the learnt window to the gaps on that step
+(``Lattice``), which ``Sizes`` takes in place of the window. The margin
+stays in bytes: a wrong link among the learnt ones can only divide the step
+or widen the window, so the signature only grows or goes. Learnt per point,
+never declared for all: the step comes from the point's software (how it
+writes, its TLS). Open risk, shown by a test: a wrong signature that drops
+each request's own call and keeps another trips nothing and links it.
+
 The result does not depend on the order of the input: observations are
 sorted by time and identity before anything is decided.
 
@@ -56,6 +67,7 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from math import gcd
 
 from reconcileflow.correlation.assignment import Status
 from reconcileflow.correlation.timing import DerivedLink, Result, Timed, Undecided
@@ -82,7 +94,29 @@ class Sizes:
 
     inbound: Mapping[Identity, int]  # request -> bytes the point answered
     outbound: Mapping[str, Mapping[Identity, int]]  # hop -> call -> bytes it got back
-    windows: Mapping[str, tuple[int, int]]
+    windows: Mapping[str, tuple[int, int] | Lattice]
+
+
+@dataclass(frozen=True, slots=True)
+class Lattice:
+    """The size signature of a hop (spec 8.22): the gaps from ``low`` to
+    ``high`` by ``step`` bytes, as a point whose answers differ from its
+    calls' by whole TLS records. Used in ``Sizes.windows`` in place of a
+    window: a gap off it removes the call, as one outside a window does."""
+
+    low: int
+    high: int
+    step: int
+
+    def __contains__(self, gap: int) -> bool:
+        return self.low <= gap <= self.high and (gap - self.low) % self.step == 0
+
+
+def _fits(rule, gap: int) -> bool:
+    if isinstance(rule, Lattice):
+        return gap in rule
+    low, high = rule
+    return low <= gap <= high
 
 
 WINDOW_MINIMUM = 200  # links needed to learn a window
@@ -106,6 +140,41 @@ def learn_window(
     if len(gaps) < minimum or max(gaps) - min(gaps) > span:
         return None
     return (min(gaps) - margin, max(gaps) + margin)
+
+
+LATTICE_MIN_STEP = 8  # a smaller step is no signature: the window serves
+
+
+def learn_lattice(
+    links: Iterable[tuple[Identity, Identity]],
+    inbound: Mapping[Identity, int],
+    outbound: Mapping[Identity, int],
+    minimum: int = WINDOW_MINIMUM,
+    margin: int = WINDOW_MARGIN,
+    span: int = WINDOW_SPAN,
+    min_step: int = LATTICE_MIN_STEP,
+) -> Lattice | None:
+    """The size signature of one hop from links already held without sizes
+    (no truth, spec 8.22): the window ``learn_window`` gives, kept to the
+    gaps on the step of those links, the greatest common divisor of the
+    differences between their gaps. None where there is no window, with a
+    single gap, or a step below ``min_step``. A wrong link among them adds a
+    gap: the window can only widen and the step only divide, so the
+    signature only grows, or goes; it never shrinks. (A margin counted in
+    steps would shrink with the step: spec 8.22.)"""
+    window = learn_window(links, inbound, outbound, minimum, margin, span)
+    if window is None:
+        return None
+    gaps = {inbound[r] - outbound[c] for r, c in links if r in inbound and c in outbound}
+    base = min(gaps)
+    step = 0
+    for g in gaps:
+        step = gcd(step, g - base)
+    if step < min_step:
+        return None
+    low = window[0] + (base - window[0]) % step  # the first gap on the step in the window
+    high = window[1] - (window[1] - base) % step
+    return Lattice(low, high, step)
 
 
 def learn_recipe(
@@ -215,13 +284,13 @@ def recipe_links(
         # time group with none, it is contradicted there: the group is refused.
         sized = {}
         for (r, h), o in domain.items():
-            low, high = sizes.windows.get(h, (None, None))
+            rule = sizes.windows.get(h)
             mine = sizes.inbound.get(r)
             theirs = sizes.outbound.get(h, {})
-            if low is None or mine is None:
+            if rule is None or mine is None:
                 sized[r, h] = o
             else:
-                sized[r, h] = [c for c in o if c not in theirs or low <= mine - theirs[c] <= high]
+                sized[r, h] = [c for c in o if c not in theirs or _fits(rule, mine - theirs[c])]
         still = {(h, c) for (_, h), o in sized.items() for c in o}
         life = {_id(r): (r.start_us, r.end_us) for r in requests}
         life |= {(h, _id(c)): (c.start_us, c.end_us) for h in recipe.calls for c in calls[h]}

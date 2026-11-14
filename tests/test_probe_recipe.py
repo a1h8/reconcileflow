@@ -657,3 +657,111 @@ def test_the_truth_of_a_reused_port_goes_to_the_connection_open_at_its_time(tmp_
     assert report["ranks_ok"]
     assert report["wrong"] == 0 and report["causality_violations"] == 0
     assert report["right"] == report["judged"] > 0
+
+
+# -- the size signature of the relay (spec 8.22) ---------------------------------
+
+
+def with_steps(seed=7, solo=300, pairs=40, apart=13):
+    """As with_twins, but the proxy adds 0, 22 or 44 bytes (TLS records), and
+    each pair's sizes are `apart` bytes apart: inside the window, off the
+    step. The last pair's are 22 apart: on the step, left open."""
+    import random
+
+    rng = random.Random(seed)
+    c = Cell()
+    for i in range(2):
+        c.open(50_000 + i, HOP, T0 + i)
+        c.open(60_000 + i, FU, T0 + 10 + i)
+    t, k = T0 + 10_000, 0
+    for _ in range(solo):
+        i = k % 2
+        c.request(
+            k, 50_000 + i, 60_000 + i, t, size=rng.randint(50, 5000), extra=rng.choice((0, 22, 44))
+        )
+        t, k = t + 200, k + 1
+    for p in range(pairs + 1):
+        a = rng.randint(50, 2000)
+        for i, size in enumerate((a, a + (22 if p == pairs else apart))):
+            c.request(k, 50_000 + i, 60_000 + i, t, size=size)
+            k += 1
+        t += 200
+    return c
+
+
+def test_the_signature_settles_what_the_window_leaves_open(tmp_path):
+    cell = with_steps().write(tmp_path)
+    window = pr.judge(cell, recipe="declared", sizes="learned")
+    assert window["wrong"] == 0 and window["refused_by_status"].get("AMBIGUOUS", 0) > 2
+    report = pr.judge(cell, recipe="declared", sizes="lattice")
+    assert report["size_signature"] == [-22, 66, 22]
+    assert report["wrong"] == 0
+    assert report["refused_by_status"] == {"AMBIGUOUS": 2}  # the last pair, on the step
+    assert report["right"] == report["judged"] - 2
+
+
+def test_without_a_signature_the_window_serves(tmp_path):
+    cell = with_twins().write(tmp_path)  # 22 bytes always: one value, no step
+    report = pr.judge(cell, recipe="declared", sizes="lattice")
+    assert report["size_signature"] is None
+    assert report["size_window"] == [22 - 32, 22 + 32]
+    assert report == pr.judge(cell, recipe="declared", sizes="learned") | {"size_signature": None}
+
+
+def test_k7_a_signature_off_by_half_a_step_is_refused_not_linked(tmp_path):
+    cell = with_steps().write(tmp_path)
+    report = pr.judge(cell, recipe="declared", sizes="lattice", lattice_shift=True)
+    assert report["control"] == "K7 signature shifted by half a step"
+    assert report["size_signature"] == [-11, 77, 22]
+    assert report["wrong"] == 0
+    assert report["refused_by_status"].get("SIZE_MISMATCH", 0) > 0
+
+
+def test_the_open_risk_a_wrong_signature_that_fits_the_other_call_links_it(tmp_path):
+    # Spec 8.22, risk written down: pairs exactly half a step apart. Shifted
+    # by half a step, the signature takes each request's own call out and
+    # keeps the other: no request is left empty, the net does not trip, the
+    # pairs are linked crossed. K7 measures this on real cells; here it must
+    # show, and fail the verdict.
+    cell = with_steps(apart=11).write(tmp_path)
+    report = pr.judge(cell, recipe="declared", sizes="lattice", lattice_shift=True)
+    assert report["wrong"] > 0
+    c = globals()["cell"]()
+    c["k7"] = {"wrong": report["wrong"]}
+    assert pr.verdict([c])[0] is False
+
+
+def test_a_signature_given_is_used_not_learnt(tmp_path):
+    cell = with_steps().write(tmp_path)
+    report = pr.judge(
+        cell, recipe="declared", sizes="lattice", window=(-32, 76), signature=(0, 44, 22)
+    )
+    assert report["size_signature"] == [0, 44, 22]
+    assert report["wrong"] == 0 and report["right"] > 0
+
+
+def test_one_wrong_link_under_k7_fails_the_verdict():
+    c = cell()
+    c["k7"] = {"wrong": 0}
+    assert pr.verdict([c])[0] is True
+    c["k7"] = {"wrong": 1}
+    held, lines = pr.verdict([c])
+    assert held is False and any("K7 1 wrong" in x for x in lines)
+
+
+def test_the_series_with_signatures_runs_k7_and_keeps_the_main_signature(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(cell, recipe="learned", **kw):
+        calls.append(kw)
+        return {"size_window": [1, 2], "size_signature": [-22, 66, 22], "wrong": 0, "right": 1}
+
+    monkeypatch.setattr(pr, "judge", fake)
+    monkeypatch.setattr(pr, "verdict", lambda cells: (True, [sorted(cells[0])]))
+    listing = tmp_path / "runs.txt"
+    listing.write_text(f"{tmp_path / 'run-a'} none 20 0\n")
+    _, (keys,) = pr.judge_series(listing, sizes="lattice")
+    assert keys == ["k2b", "k2c", "k5", "k6", "k7", "main", "name"]
+    assert calls[0]["sizes"] == "lattice"
+    assert all(kw["signature"] == (-22, 66, 22) and kw["window"] == (1, 2) for kw in calls[1:])
+    assert [kw for kw in calls if kw.get("lattice_shift")] != []
