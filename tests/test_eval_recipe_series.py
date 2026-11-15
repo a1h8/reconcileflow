@@ -3,6 +3,7 @@ root: the settings it refuses before running anything."""
 
 import os
 import shutil
+import signal
 import subprocess
 
 import pytest
@@ -48,3 +49,30 @@ def test_it_needs_the_kernel_headers(tmp_path):
         tmp_path, "evalr-x", BEYLA_BIN=exe, OBI_BIN=exe, TRAEFIK_BIN=exe, BPF_HEADERS=str(tmp_path)
     )
     assert "BPF_HEADERS needs vmlinux.h" in err
+
+
+def test_it_refuses_a_machine_with_an_ide_or_containers_running(tmp_path):
+    # Phase 4 spec 8.23.1: day L1 ran beside PyCharm, GoLand, k3s and dockerd,
+    # unchecked. The script now looks before anything runs.
+    exe = shutil.which("true")
+    headers = tmp_path / "bpf"
+    (headers / "vendor").mkdir(parents=True)
+    (headers / "vmlinux.h").touch()
+    fake = tmp_path / "dockerd"
+    fake.write_text("#!/bin/sh\nsleep 30\n")  # the kernel names the process after the file
+    fake.chmod(0o755)
+    noise = subprocess.Popen([str(fake)], start_new_session=True)
+    try:
+        err = refused(
+            tmp_path,
+            "evalr-x",
+            BEYLA_BIN=exe,
+            OBI_BIN=exe,
+            TRAEFIK_BIN=exe,
+            BPF_HEADERS=str(headers),
+        )
+    finally:
+        os.killpg(noise.pid, signal.SIGKILL)
+        noise.wait()
+    assert "stop them first" in err
+    assert "dockerd" in err

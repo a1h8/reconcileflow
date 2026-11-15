@@ -14,6 +14,7 @@
 # skipped, so the script can be started again after a stop.
 # The code judged is noted in <runs>/<prefix>-code.txt (commit, probe_recipe.py
 # hash); with a first day's list, the commit must be that day's (spec 8.19).
+# It stops if PyCharm, GoLand, k3s, dockerd or containerd runs (spec 8.23.1).
 # Appends "<run-dir> <agent> <c> <load>" to <runs>/<prefix>-runs.txt; then:
 #   python probe_recipe.py --series <runs>/<prefix>-runs.txt
 set -euo pipefail
@@ -26,6 +27,9 @@ PREFIX=$1 FIRST=${2:-}
 [[ -z $FIRST || -f $FIRST ]] || die "$FIRST: no such runs list"
 for v in BEYLA_BIN OBI_BIN TRAEFIK_BIN; do [[ -x ${!v:-} ]] || die "$v must point to an executable"; done
 [[ -f ${BPF_HEADERS:-}/vmlinux.h && -d ${BPF_HEADERS:-}/vendor ]] || die "BPF_HEADERS needs vmlinux.h and vendor/"
+# Nothing else heavy on the machine (spec 8.23.1): day L1 ran beside two IDEs and containers.
+noise=$(ps -eo comm= | awk '$1 ~ /^(pycharm|goland|k3s|dockerd|containerd)$/' | sort -u | tr '\n' ' ')
+[[ -z $noise ]] || die "running: ${noise}- stop them first"
 TOP=$(git rev-parse --show-toplevel)
 [[ -z $(git -C "$TOP" status --porcelain) ]] || die "local changes in the repository"
 
