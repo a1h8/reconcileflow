@@ -495,7 +495,11 @@ def judge(
     window: tuple[int, int] | None = None,
     signature: tuple[int, int, int] | None = None,
     lattice_shift: bool = False,
+    linker=None,
 ) -> dict:
+    """One cell judged. ``linker``: another method in place of the recipe
+    (spec 8.27, ``probe_compare``), on the same lives, truth and half;
+    without sizes or losses. None: the recipe, unchanged."""
     meta = json.loads((cell / "cell.json").read_text())
     hop, fu = meta["hop_ports"][0], meta["fake_upstream_port"]
     rows = list(_jsonl(cell / "probe.jsonl"))
@@ -604,7 +608,16 @@ def judge(
     }
     counts, refused = Counter(), Counter()
     given, window, lattice = window, None, None
-    if chosen is not None and chosen.calls == (HOP_NAME,):
+    report["method"] = "recipe" if linker is None else linker.name
+    if linker is not None:  # spec 8.27: same lives, truth and half
+        helped_req = {i for i, tid in enumerate(req_tid) if tid and len(calls_of.get(tid, [])) == 1}
+        helped_call = {calls_of[req_tid[i]][0] for i in helped_req}
+        linked = dict(linker(req, call, (helped_req, helped_call)))
+        skips = getattr(linker, "skips", frozenset())  # the method says: no call
+        status = {
+            i: "SKIP" if i in skips else "NOT_GIVEN" for i in range(len(req)) if i not in linked
+        }
+    elif chosen is not None and chosen.calls == (HOP_NAME,):
         result = recipe_links(req, {HOP_NAME: call}, chosen, lossy)
         if sizes in ("learned", "lattice"):  # spec 8.17, 8.22: from the links timings alone hold
             answers_in = {
@@ -647,6 +660,7 @@ def judge(
                 )
         linked = {x.upstream[1]: x.downstream[1] for x in result.links}
         status = {u.observation[1]: u.status.name for u in result.undecided if u.side == "inbound"}
+    if linker is not None or (chosen is not None and chosen.calls == (HOP_NAME,)):
         for i, tid in enumerate(req_tid):
             if requests[i].start < cut or not tid:
                 continue
