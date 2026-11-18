@@ -47,6 +47,35 @@
 #   WARM_REQUESTS  requests load-gen sends first, at the measured concurrency and
 #             through the same connections, before the measured ones (default
 #             10 x CONCURRENCY; logged to warmup-inproc.jsonl, never scored)
+#   LG_HTTP1  1: load-gen sends HTTP/1.1 on keep-alive connections, at most
+#             CONCURRENCY of them (load-gen -http1; phase 4, 4a). Default 0: HTTP/2
+#   LG_CONNS  HTTP/2 connections load-gen spreads its requests over, in turn
+#             (load-gen -conns; phase 4, 4b). Default 1, as before phase 4
+#   HOP_UPSTREAM_PROTO  h2 (default) or h1: the protocol Traefik hops use towards
+#             the next hop (a serversTransport with disableHTTP2); Traefik only
+#   HOP_MAX_IDLE  with h1, idle connections a Traefik hop keeps per upstream
+#             (maxIdleConnsPerHost; default CONCURRENCY): fewer, and HTTP/1.1
+#             connections close and reopen, so four-tuples churn
+#   BPF_STATS 1: kernel eBPF statistics on while the measured requests run
+#             (kernel.bpf_stats_enabled, restored after), bpftool prog show -j
+#             written before and after them: bpf-before.json, bpf-after.json
+#             (phase 4, gate G4a). Default 0
+#   PROBE_TCP_SEQ  1: run stream-probe on fake-upstream's port while the cell runs
+#             (journal/, decoded into probe.jsonl once it stops: the TCP sequence
+#             number of each message, both ends);
+#             needs HOP_UPSTREAM_PROTO=h1, clang, and root even with NO_AGENT=1
+#             (phase 4, 4c). Default 0
+#   PROBE_BOTH  1: with PROBE_TCP_SEQ=1, the probe also watches the hop's own
+#             port and keeps both directions (requests read and responses sent
+#             by the hop, its calls and their answers): the recipe on the
+#             probe's events (phase 4 spec 8.13). Needs HOPS=1. Default 0
+#   FU_STREAM_OFFSETS  1: fake-upstream logs each request's position in the raw
+#             stream (-stream-offsets), the truth the probe's offsets are judged
+#             against; needs HOP_UPSTREAM_PROTO=h1. It hides fake-upstream's
+#             connection from an agent's Go instrumentation (server spans
+#             without address): for cells without an agent. Default 0
+#   BPF_HEADERS  directory with vmlinux.h and libbpf's vendor/ headers for
+#             building the probe (default cmd/strong-tier-probe/bpf; see README)
 #   NO_AGENT  1: run the chain without any agent (control cells); needs no
 #             root, so phase 2 runs as your user and AGENT_BIN is not needed
 #   RUN_BASE  where run directories go (default: runs/ next to the repository)
@@ -54,7 +83,7 @@
 set -euo pipefail
 
 # shellcheck source=agent.sh
-source "$(dirname "$0")/agent.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/agent.sh"
 
 HOPS=${HOPS:-1 2 3 5}
 REQUESTS=${REQUESTS:-5000}
@@ -73,11 +102,69 @@ LG_MASK=${LG_MASK:-0}
 CPU_SAMPLE=${CPU_SAMPLE:-0}
 LOAD_CORES=${LOAD_CORES:-0}
 WARM_REQUESTS=${WARM_REQUESTS:-$((10 * CONCURRENCY))}
+LG_HTTP1=${LG_HTTP1:-0}
+LG_CONNS=${LG_CONNS:-1}
+HOP_UPSTREAM_PROTO=${HOP_UPSTREAM_PROTO:-h2}
+HOP_MAX_IDLE=${HOP_MAX_IDLE:-$CONCURRENCY}
+BPF_STATS=${BPF_STATS:-0}
+PROBE_TCP_SEQ=${PROBE_TCP_SEQ:-0}
+FU_STREAM_OFFSETS=${FU_STREAM_OFFSETS:-0}
+PROBE_BOTH=${PROBE_BOTH:-0}
+BPF_HEADERS=${BPF_HEADERS:-cmd/strong-tier-probe/bpf}
+
+# fake-upstream logs stream positions only when asked (4c, truth for the probe).
+FU_FLAGS=()
+if [[ $FU_STREAM_OFFSETS == 1 ]]; then FU_FLAGS=(-stream-offsets); fi
+
+# probe_args <cell-dir> <bin-dir> <fake-upstream-port> [<hop-port>]: stream-probe's
+# flags, in PROBE_ARGS. Under load the probe only copies into its journal (raw
+# segments); decoding is done once it has stopped (decode_args), so writing
+# never slows reading. With PROBE_BOTH=1, the hop's port too, both directions.
+probe_args() {
+	if ((PROBE_BOTH)); then
+		PROBE_ARGS=(-obj "$2/probe.o" -ports "$4,$3" -both-directions -journal "$1/journal")
+	else
+		PROBE_ARGS=(-obj "$2/probe.o" -port "$3" -journal "$1/journal")
+	fi
+}
+
+# decode_args <cell-dir> <fake-upstream-port> [<hop-port>]: the journal into
+# probe.jsonl, in DECODE_ARGS.
+decode_args() {
+	if ((PROBE_BOTH)); then
+		DECODE_ARGS=(-decode -journal "$1/journal" -ports "$3,$2" -out "$1/probe.jsonl")
+	else
+		DECODE_ARGS=(-decode -journal "$1/journal" -port "$2" -out "$1/probe.jsonl")
+	fi
+}
 
 die() { echo "error: $*" >&2; exit 1; }
 
 build() {
 	[[ $(id -u) -ne 0 ]] || die "run phase 1 as your normal user (it calls sudo itself)"
+	[[ $BPF_STATS == [01] ]] || die "BPF_STATS must be 0 or 1"
+	! ((BPF_STATS && NO_AGENT)) || die "BPF_STATS=1 measures the agent's programs: it needs an agent"
+	! ((BPF_STATS)) || command -v bpftool >/dev/null || die "BPF_STATS=1 needs bpftool"
+	[[ $LG_HTTP1 == [01] && $LG_CONNS =~ ^[1-9][0-9]*$ && $HOP_UPSTREAM_PROTO =~ ^h[12]$ ]] ||
+		die "LG_HTTP1 must be 0 or 1, LG_CONNS a positive integer, HOP_UPSTREAM_PROTO h1 or h2"
+	[[ $HOP_MAX_IDLE =~ ^[1-9][0-9]*$ ]] || die "HOP_MAX_IDLE must be a positive integer"
+	! ((LG_HTTP1 && LG_CONNS > 1)) || die "LG_CONNS > 1 is for HTTP/2; with LG_HTTP1=1 load-gen opens up to CONCURRENCY connections"
+	[[ $HOP_UPSTREAM_PROTO == h2 || ($HOP_KIND == traefik && -z $HOP_KINDS) ]] ||
+		die "HOP_UPSTREAM_PROTO=h1 needs Traefik hops only (a relay has no such setting)"
+	[[ $PROBE_TCP_SEQ == [01] ]] || die "PROBE_TCP_SEQ must be 0 or 1"
+	if ((PROBE_TCP_SEQ)); then
+		[[ $HOP_UPSTREAM_PROTO == h1 ]] ||
+			die "PROBE_TCP_SEQ=1 needs HOP_UPSTREAM_PROTO=h1 (fake-upstream counts positions in HTTP/1.1 only)"
+		[[ -f $BPF_HEADERS/vmlinux.h && -d $BPF_HEADERS/vendor ]] ||
+			die "PROBE_TCP_SEQ=1 needs BPF_HEADERS with vmlinux.h and vendor/ (see README), got '$BPF_HEADERS'"
+		command -v clang >/dev/null || die "PROBE_TCP_SEQ=1 needs clang to build the probe"
+	fi
+	[[ $FU_STREAM_OFFSETS == [01] ]] || die "FU_STREAM_OFFSETS must be 0 or 1"
+	[[ $PROBE_BOTH == [01] ]] || die "PROBE_BOTH must be 0 or 1"
+	[[ $PROBE_BOTH == 0 || $PROBE_TCP_SEQ == 1 ]] || die "PROBE_BOTH=1 needs PROBE_TCP_SEQ=1"
+	[[ $PROBE_BOTH == 0 || $HOPS == 1 ]] || die "PROBE_BOTH=1 needs HOPS=1 (the hop's port is chosen before the probe starts)"
+	[[ $FU_STREAM_OFFSETS == 0 || $HOP_UPSTREAM_PROTO == h1 ]] ||
+		die "FU_STREAM_OFFSETS=1 needs HOP_UPSTREAM_PROTO=h1 (fake-upstream counts positions in HTTP/1.1 only)"
 	[[ -f go.mod && -d cmd/load-gen ]] || die "run from m0-harness/"
 	local kind
 	for kind in $HOP_KIND $HOP_KINDS; do
@@ -102,6 +189,11 @@ build() {
 	for cmd in fake-upstream load-gen relay cpu-load; do
 		go build -o "$RUN_DIR/bin/$cmd" "./cmd/$cmd"
 	done
+	if ((PROBE_TCP_SEQ)); then
+		go build -o "$RUN_DIR/bin/stream-probe" ./cmd/stream-probe
+		clang -target bpf -D__TARGET_ARCH_x86 -I"$BPF_HEADERS" -I"$BPF_HEADERS/vendor" -g -O2 \
+			-c cmd/stream-probe/bpf/probe.c -o "$RUN_DIR/bin/probe.o"
+	fi
 	((NO_AGENT)) || cp "$AGENT_BIN" "$RUN_DIR/bin/agent"
 	[[ " $HOP_KIND $HOP_KINDS " != *" traefik "* ]] || cp "$TRAEFIK_BIN" "$RUN_DIR/bin/traefik"
 
@@ -119,7 +211,8 @@ build() {
 		echo "commit: $(git rev-parse HEAD)$([[ -z $(git status --porcelain -- .) ]] || echo ' (dirty)')"
 		echo "HOPS=$HOPS REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY WARM_REQUESTS=$WARM_REQUESTS STRIP_N=$STRIP_N TAIL=$TAIL" \
 			"HOP_KIND=$HOP_KIND BAGGAGE=$BAGGAGE NO_AGENT=$NO_AGENT" \
-			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}"
+			"CONTEXT_PROPAGATION=${CONTEXT_PROPAGATION:-agent-default}" \
+			"LG_HTTP1=$LG_HTTP1 LG_CONNS=$LG_CONNS HOP_UPSTREAM_PROTO=$HOP_UPSTREAM_PROTO HOP_MAX_IDLE=$HOP_MAX_IDLE BPF_STATS=$BPF_STATS PROBE_TCP_SEQ=$PROBE_TCP_SEQ FU_STREAM_OFFSETS=$FU_STREAM_OFFSETS PROBE_BOTH=$PROBE_BOTH"
 		(cd "$RUN_DIR/bin" && sha256sum ./*)
 	} >"$RUN_DIR/manifest.txt"
 
@@ -128,8 +221,11 @@ build() {
 		HOP_KIND="$HOP_KIND" BAGGAGE="$BAGGAGE" NO_AGENT="$NO_AGENT"
 		CONTEXT_PROPAGATION="$CONTEXT_PROPAGATION" HOP_KINDS="$HOP_KINDS" STRIP_HOP="$STRIP_HOP"
 		FRESH_HOP="$FRESH_HOP" UNINSTRUMENTED_HOPS="$UNINSTRUMENTED_HOPS" LG_MASK="$LG_MASK"
-		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS")
-	if ((NO_AGENT)); then
+		CPU_SAMPLE="$CPU_SAMPLE" LOAD_CORES="$LOAD_CORES" WARM_REQUESTS="$WARM_REQUESTS"
+		LG_HTTP1="$LG_HTTP1" LG_CONNS="$LG_CONNS" HOP_UPSTREAM_PROTO="$HOP_UPSTREAM_PROTO"
+		HOP_MAX_IDLE="$HOP_MAX_IDLE" BPF_STATS="$BPF_STATS" PROBE_TCP_SEQ="$PROBE_TCP_SEQ"
+		FU_STREAM_OFFSETS="$FU_STREAM_OFFSETS" PROBE_BOTH="$PROBE_BOTH")
+	if ((NO_AGENT && !PROBE_TCP_SEQ)); then
 		echo "built into $RUN_DIR; no agent, phase 2 runs as your user"
 		exec env "${env_args[@]}" "$0" --measure "$RUN_DIR"
 	fi
@@ -173,8 +269,17 @@ hop_config() {
 		echo "  services:"
 		echo "    next:"
 		echo "      loadBalancer:"
+		[[ $HOP_UPSTREAM_PROTO == h1 ]] && echo "        serversTransport: h1"
 		echo "        servers:"
 		echo "          - url: $next"
+		if [[ $HOP_UPSTREAM_PROTO == h1 ]]; then
+			# A named transport does not inherit the static one: skip-verify again.
+			echo "  serversTransports:"
+			echo "    h1:"
+			echo "      insecureSkipVerify: true"
+			echo "      disableHTTP2: true"
+			echo "      maxIdleConnsPerHost: $HOP_MAX_IDLE"
+		fi
 	} >"$file"
 }
 
@@ -194,14 +299,24 @@ cell() {
 	local pids=()
 
 	local fu_port; fu_port=$(free_port)
-	"$bin/fake-upstream" -addr "127.0.0.1:$fu_port" -out "$dir/fu.jsonl" 2>"$dir/fu.log" &
+	"$bin/fake-upstream" -addr "127.0.0.1:$fu_port" -out "$dir/fu.jsonl" "${FU_FLAGS[@]}" 2>"$dir/fu.log" &
 	pids+=($!)
 	wait_for 10 listening "$fu_port" || die "$name: fake-upstream did not listen"
+	local probe="" hop1_port=""
+	((PROBE_BOTH)) && hop1_port=$(free_port) # watched before the hop starts
+	if ((PROBE_TCP_SEQ)); then
+		# Attached before the first connection, so every connection's base is seen.
+		probe_args "$dir" "$bin" "$fu_port" "$hop1_port"
+		"$bin/stream-probe" "${PROBE_ARGS[@]}" 2>"$dir/probe.log" &
+		probe=$!
+		wait_for 15 grep -q "stream-probe attached" "$dir/probe.log" || die "$name: stream-probe did not attach"
+	fi
 
 	# Build the chain from the far end: hop-n forwards to fake-upstream.
 	local next="https://127.0.0.1:$fu_port" ports=("$fu_port") hop_ports=() kinds=() k
 	for ((k = n; k >= 1; k--)); do
 		local port; port=$(free_port)
+		((k == 1)) && [[ -n $hop1_port ]] && port=$hop1_port
 		local kind; kind=$(kind_of "$k")
 		kinds=("$kind" "${kinds[@]}")
 		if [[ $kind == relay ]]; then
@@ -226,10 +341,11 @@ cell() {
 	done
 	local entry=$next
 	local uninstrumented_json; uninstrumented_json=$(printf '%s,' $UNINSTRUMENTED_HOPS)
-	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s"}\n' \
+	printf '{"hops": %d, "strip_hop": %d, "fake_upstream_port": %d, "hop_ports": [%s], "hop_kind": "%s", "hop_kinds": [%s], "fresh_hop": %d, "uninstrumented_hops": [%s], "lg_mask": %d, "baggage": %d, "agent": "%s", "context_propagation": "%s", "lg_http1": %d, "lg_conns": %d, "hop_upstream_proto": "%s", "hop_max_idle": %d, "bpf_stats": %d, "probe_tcp_seq": %d, "fu_stream_offsets": %d}\n' \
 		"$n" "$strip_hop" "$fu_port" "$(IFS=,; echo "${hop_ports[*]}")" "$HOP_KIND" \
 		"$(printf '"%s",' "${kinds[@]}" | sed 's/,$//')" "$FRESH_HOP" "${uninstrumented_json%,}" "$LG_MASK" \
-		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" >"$dir/cell.json"
+		"$BAGGAGE" "$AGENT_KIND" "${CONTEXT_PROPAGATION:-agent-default}" \
+		"$LG_HTTP1" "$LG_CONNS" "$HOP_UPSTREAM_PROTO" "$HOP_MAX_IDLE" "$BPF_STATS" "$PROBE_TCP_SEQ" "$FU_STREAM_OFFSETS" >"$dir/cell.json"
 	local first_instrumented=1
 	while ! instrumented "$first_instrumented" && ((first_instrumented <= n)); do
 		first_instrumented=$((first_instrumented + 1))
@@ -237,6 +353,8 @@ cell() {
 
 	local lg_flags=(-truth-in-path)
 	((BAGGAGE)) && lg_flags+=(-baggage)
+	((LG_HTTP1)) && lg_flags+=(-http1)
+	((LG_CONNS > 1)) && lg_flags+=(-conns "$LG_CONNS")
 
 	local agent=""
 	if ((!NO_AGENT)); then
@@ -283,7 +401,12 @@ cell() {
 		LC_ALL=C pidstat -u -h 1 >"$dir/cpu-procs.txt" 2>&1 &
 		samplers+=($!)
 	fi
-	local lg_exit=0
+	local lg_exit=0 stats_was=""
+	if ((BPF_STATS)); then
+		stats_was=$(cat /proc/sys/kernel/bpf_stats_enabled)
+		echo 1 >/proc/sys/kernel/bpf_stats_enabled
+		bpftool -j prog show >"$dir/bpf-before.json"
+	fi
 	# The measured run starts with WARM_REQUESTS at the measured concurrency, through
 	# the same client, to their own log: without it every request held in the first
 	# ~100 ms was load-gen opening its connections, not the chain's steady state.
@@ -291,6 +414,10 @@ cell() {
 	"$bin/load-gen" -target "$entry" -out "$dir/lg.jsonl" "${measured_flags[@]}" \
 		-warmup "$WARM_REQUESTS" -warmup-out "$dir/warmup-inproc.jsonl" \
 		-requests "$REQUESTS" -concurrency "$CONCURRENCY" 2>"$dir/lg.log" || lg_exit=$?
+	if ((BPF_STATS)); then
+		bpftool -j prog show >"$dir/bpf-after.json"
+		echo "$stats_was" >/proc/sys/kernel/bpf_stats_enabled
+	fi
 	"$bin/load-gen" -target "$entry" -out "$dir/tail.jsonl" "${measured_flags[@]}" \
 		-requests "$TAIL" -concurrency 1 2>"$dir/tail.log" || true
 	((${#samplers[@]})) && { kill "${samplers[@]}" 2>/dev/null; wait "${samplers[@]}" 2>/dev/null || true; }
@@ -298,15 +425,23 @@ cell() {
 
 	if [[ -n $agent ]]; then kill -TERM "$agent"; wait "$agent" || true; fi
 	kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null || true
+	# The probe stops last: it sees the connections close, then writes its last drop count.
+	if [[ -n $probe ]]; then
+		kill -INT "$probe"
+		wait "$probe" || true
+		decode_args "$dir" "$fu_port" "$hop1_port"
+		"$bin/stream-probe" "${DECODE_ARGS[@]}" 2>>"$dir/probe.log" || die "$name: could not decode the probe's journal"
+	fi
 	echo "$name: hops=$n kind=$HOP_KIND strip_hop=$strip_hop baggage=$BAGGAGE agent=$AGENT_KIND" \
 		"propagation=${CONTEXT_PROPAGATION:-agent-default}" \
-		"requests=$REQUESTS c=$CONCURRENCY load=$LOAD_CORES load-gen exit=$lg_exit" |
+		"requests=$REQUESTS c=$CONCURRENCY load=$LOAD_CORES http1=$LG_HTTP1 conns=$LG_CONNS upstream=$HOP_UPSTREAM_PROTO max_idle=$HOP_MAX_IDLE" \
+		"probe_tcp_seq=$PROBE_TCP_SEQ fu_stream_offsets=$FU_STREAM_OFFSETS load-gen exit=$lg_exit" |
 		tee -a "$RUN_DIR/cells.txt"
 }
 
 measure() {
 	RUN_DIR=$1
-	((NO_AGENT)) || [[ $(id -u) -eq 0 ]] || die "phase 2 must run as root"
+	((NO_AGENT && !PROBE_TCP_SEQ)) || [[ $(id -u) -eq 0 ]] || die "phase 2 must run as root"
 	local n
 	for n in $HOPS; do
 		cell "n$n" "$n" "$STRIP_HOP"
@@ -314,11 +449,14 @@ measure() {
 			cell "n$n-strip" "$n" 2
 		fi
 	done
-	((NO_AGENT)) || chown -R "${SUDO_UID:-0}:${SUDO_GID:-0}" "$RUN_DIR"
+	((NO_AGENT && !PROBE_TCP_SEQ)) || chown -R "${SUDO_UID:-0}:${SUDO_GID:-0}" "$RUN_DIR"
 	echo
 	echo "analyse (as your user, from the repo root):"
 	echo "  .venv/bin/python m0-harness/hn_analyze.py $RUN_DIR"
 }
+
+# Sourced (tests): define the functions only.
+[[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
 
 if [[ ${1:-} == --measure ]]; then
 	measure "$2"

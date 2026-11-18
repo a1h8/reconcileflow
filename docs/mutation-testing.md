@@ -35,8 +35,9 @@ This spec makes a run reproducible and its result checkable.
 
 `rules.py`, `engine.py`, `m0/attribution.py`, `m0/stability.py`,
 `correlation/assignment.py`, `correlation/topology.py`, `correlation/exact.py`,
-`correlation/timing.py`, `correlation/flow.py`, `stream.py`, `observation.py`: the code that
-decides matches, verdicts, evidence ceilings, exact and timing-derived links, whether a
+`correlation/timing.py`, `correlation/flow.py`, `correlation/flow_timed.py`,
+`correlation/connection.py`, `stream.py`, `observation.py`: the code that decides matches,
+verdicts, evidence ceilings, exact, timing-derived and connection-derived links, whether a
 decision or a link is provisional or final, and whether a rate dropped. Adapters,
 provenance and `m0/latency.py` may be added later; each addition starts with a full
 triage of its survivors.

@@ -148,6 +148,12 @@ type run struct {
 // returns both logs once the server has been stopped.
 func pipeline(t *testing.T, loadGenArgs ...string) run {
 	t.Helper()
+	return pipelineWith(t, nil, loadGenArgs...)
+}
+
+// pipelineWith is pipeline with extra fake-upstream flags.
+func pipelineWith(t *testing.T, serverArgs []string, loadGenArgs ...string) run {
+	t.Helper()
 	dir := t.TempDir()
 	fu := buildBinary(t, dir, "fake-upstream", ".")
 	lg := buildBinary(t, dir, "load-gen", "../load-gen")
@@ -158,7 +164,7 @@ func pipeline(t *testing.T, loadGenArgs ...string) run {
 		bin:         dir,
 	}
 
-	server := exec.Command(fu, "-addr", addr, "-out", r.fuPath)
+	server := exec.Command(fu, append([]string{"-addr", addr, "-out", r.fuPath}, serverArgs...)...)
 	if err := server.Start(); err != nil {
 		t.Fatal(err)
 	}

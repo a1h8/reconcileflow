@@ -17,6 +17,10 @@
 // simulates OBI's direct-propagation failure mode by withholding the traceparent header,
 // while still logging the true trace_id as ground truth — a correlator calibrated on this
 // is judged against the oracle, never against its own guesses.
+//
+// Phase 4 (docs/target/correlation-phase4-spec.md §3) adds two connection modes:
+// -http1 sends HTTP/1.1 on keep-alive connections (one request at a time per
+// connection), -conns k spreads HTTP/2 requests over k connections in turn.
 package main
 
 import (
@@ -61,6 +65,9 @@ func main() {
 	warmup := flag.Int("warmup", 0, "requests sent first, at the same concurrency and through the same "+
 		"client, to -warmup-out: the measured requests then start on open connections")
 	warmupOut := flag.String("warmup-out", "", "JSONL output of the -warmup requests (required with -warmup)")
+	http1 := flag.Bool("http1", false, "send HTTP/1.1 on keep-alive connections (ALPN http/1.1 only); a request "+
+		"that negotiates anything else is a failure, and -require-http2 no longer applies")
+	conns := flag.Int("conns", 1, "HTTP/2 connections the requests are spread over, in turn (one client each)")
 	flag.Parse()
 	if *warmup < 0 || (*warmup > 0) == (*warmupOut == "") {
 		log.Fatal("-warmup must be >= 0, and -warmup-out given exactly when -warmup > 0")
@@ -68,15 +75,32 @@ func main() {
 	if *concurrency <= 0 || *total <= 0 || *timeout <= 0 {
 		log.Fatal("concurrency, requests and timeout must be positive")
 	}
+	if *conns < 1 || (*conns > 1 && (*http1 || !*pool)) || (*http1 && !*pool) {
+		log.Fatal("-conns must be >= 1, and above 1 only with pooled HTTP/2; -http1 needs -pool")
+	}
 	if *seed != "variable" {
 		log.Fatal("only seed-policy=variable is supported; fixed replay is not implemented")
 	}
 
+	want := wantAny
+	switch {
+	case *http1:
+		want = wantH1
+	case *requireHTTP2:
+		want = wantH2
+	}
 	tracker := newConnTracker()
-	client := newClient(*pool, *timeout)
-	defer client.CloseIdleConnections()
+	clients := make([]*http.Client, *conns)
+	for i := range clients {
+		if *http1 {
+			clients[i] = newHTTP1Client(*timeout, *concurrency)
+		} else {
+			clients[i] = newClient(*pool, *timeout)
+		}
+		defer clients[i].CloseIdleConnections()
+	}
 	send := func(n int, path string) (succeeded, failed, writeFailures int64) {
-		return run(client, tracker, path, n, *concurrency, *target, *control, *mask, *truthInPath, *baggage, *requireHTTP2)
+		return run(clients, tracker, path, n, *concurrency, *target, *control, *mask, *truthInPath, *baggage, want)
 	}
 
 	if *warmup > 0 {
@@ -84,17 +108,17 @@ func main() {
 		log.Printf("warm-up: attempted=%d succeeded=%d failed=%d write_failures=%d", *warmup, ok, bad, wf)
 	}
 	succeeded, failed, writeFailures := send(*total, *outPath)
-	log.Printf("done: attempted=%d succeeded=%d failed=%d write_failures=%d control=%q pool=%v mask=%v truthInPath=%v baggage=%v",
-		*total, succeeded, failed, writeFailures, *control, *pool, *mask, *truthInPath, *baggage)
+	log.Printf("done: attempted=%d succeeded=%d failed=%d write_failures=%d control=%q pool=%v mask=%v truthInPath=%v baggage=%v http1=%v conns=%d",
+		*total, succeeded, failed, writeFailures, *control, *pool, *mask, *truthInPath, *baggage, *http1, *conns)
 	if failed != 0 || writeFailures != 0 {
 		os.Exit(1)
 	}
 }
 
-// run sends n requests, at most concurrency in flight, and writes one record
-// per attempt to outPath.
-func run(client *http.Client, tracker *connTracker, outPath string, n, concurrency int,
-	target, control string, mask, truthInPath, baggage, requireHTTP2 bool) (int64, int64, int64) {
+// run sends n requests, at most concurrency in flight, request i through
+// clients[i % len(clients)], and writes one record per attempt to outPath.
+func run(clients []*http.Client, tracker *connTracker, outPath string, n, concurrency int,
+	target, control string, mask, truthInPath, baggage bool, want wantProto) (int64, int64, int64) {
 	w, err := oracle.NewWriter(outPath)
 	if err != nil {
 		log.Fatalf("open output: %v", err)
@@ -106,6 +130,7 @@ func run(client *http.Client, tracker *connTracker, outPath string, n, concurren
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		sem <- struct{}{}
+		client := clients[i%len(clients)]
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -122,7 +147,7 @@ func run(client *http.Client, tracker *connTracker, outPath string, n, concurren
 			if baggage {
 				bag = "exchange_id=" + randHex(16)
 			}
-			record := performRequest(client, tracker, target+path, traceID, traceparent, bag, control, mask, requireHTTP2)
+			record := performRequest(client, tracker, target+path, traceID, traceparent, bag, control, mask, want)
 			if err := w.Write(record); err != nil {
 				writeFailures.Add(1)
 				log.Printf("write record: %v", err)
@@ -142,6 +167,32 @@ func run(client *http.Client, tracker *connTracker, outPath string, n, concurren
 	return succeeded.Load(), failed.Load(), writeFailures.Load()
 }
 
+// wantProto is the protocol a response must have been served in.
+type wantProto int
+
+const (
+	wantAny wantProto = iota
+	wantH2
+	wantH1
+)
+
+// newHTTP1Client opens at most idle connections and keeps them open between
+// requests, so a run at concurrency c uses at most c connections instead of
+// opening and closing more (a reopened connection may reuse a port, which
+// phase 4 must tell apart by time).
+func newHTTP1Client(timeout time.Duration, idle int) *http.Client {
+	return &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: &http.Transport{
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}}, // lab self-signed cert only
+			TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},                  // non-nil and empty: no HTTP/2
+			MaxIdleConnsPerHost: idle,
+			MaxConnsPerHost:     idle, // a request waits for a free connection instead of opening one more
+		},
+	}
+}
+
 func newClient(pool bool, timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:       timeout,
@@ -156,7 +207,7 @@ func newClient(pool bool, timeout time.Duration) *http.Client {
 
 // One record for every attempted request, including build, transport and body failures.
 // StreamID remains a local completion ordinal, NEVER a protocol stream ID.
-func performRequest(client *http.Client, tracker *connTracker, target, traceID, traceparent, baggage, control string, mask, requireHTTP2 bool) (record oracle.Record) {
+func performRequest(client *http.Client, tracker *connTracker, target, traceID, traceparent, baggage, control string, mask bool, want wantProto) (record oracle.Record) {
 	started := time.Now()
 	record = oracle.Record{
 		SchemaVersion: 2, Side: "load-gen", TraceID: traceID, Control: control, Baggage: baggage,
@@ -164,7 +215,10 @@ func performRequest(client *http.Client, tracker *connTracker, target, traceID, 
 	}
 	defer func() { record.DurationNS = time.Since(started).Nanoseconds() }()
 	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) { record.ConnKey = tracker.identify(info.Conn) },
+		GotConn: func(info httptrace.GotConnInfo) {
+			record.ConnKey = tracker.identify(info.Conn)
+			record.WireRank = tracker.handOut(record.ConnKey)
+		},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -198,8 +252,10 @@ func performRequest(client *http.Client, tracker *connTracker, target, traceID, 
 		record.Error = "body: " + err.Error()
 	case closeErr != nil:
 		record.Error = "close body: " + closeErr.Error()
-	case requireHTTP2 && resp.ProtoMajor != 2:
+	case want == wantH2 && resp.ProtoMajor != 2:
 		record.Error = "protocol: expected HTTP/2, got " + resp.Proto
+	case want == wantH1 && (resp.ProtoMajor != 1 || record.NegotiatedProtocol != "http/1.1"):
+		record.Error = "protocol: expected HTTP/1.1, got " + resp.Proto + " (ALPN " + record.NegotiatedProtocol + ")"
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		record.Error = fmt.Sprintf("status: %d", resp.StatusCode)
 	}
@@ -221,8 +277,9 @@ func randHex(n int) string {
 type connTracker struct {
 	mu         sync.Mutex
 	generation map[string]int
-	keyByConn  map[net.Conn]string // actual connection identity; tuple reuse is a new generation
-	streamSeq  map[string]*atomic.Int64
+	keyByConn  map[net.Conn]string      // actual connection identity; tuple reuse is a new generation
+	streamSeq  map[string]*atomic.Int64 // completion ordinal
+	wireSeq    map[string]*atomic.Int64 // hand-out order: the wire, in HTTP/1.1
 }
 
 func newConnTracker() *connTracker {
@@ -230,6 +287,7 @@ func newConnTracker() *connTracker {
 		generation: map[string]int{},
 		keyByConn:  map[net.Conn]string{},
 		streamSeq:  map[string]*atomic.Int64{},
+		wireSeq:    map[string]*atomic.Int64{},
 	}
 }
 
@@ -247,8 +305,21 @@ func (t *connTracker) identify(c net.Conn) string {
 		key = oracle.ConnKey(fiveTuple, gen)
 		t.keyByConn[c] = key
 		t.streamSeq[key] = &atomic.Int64{}
+		t.wireSeq[key] = &atomic.Int64{}
 	}
 	return key
+}
+
+// handOut counts a request handed the connection: its rank on the wire in
+// HTTP/1.1 (phase 4 spec 8.20). -1 for a connection never identified.
+func (t *connTracker) handOut(connKey string) int {
+	t.mu.Lock()
+	seq, ok := t.wireSeq[connKey]
+	t.mu.Unlock()
+	if !ok {
+		return -1
+	}
+	return int(seq.Add(1))
 }
 
 func (t *connTracker) nextStream(connKey string) int {

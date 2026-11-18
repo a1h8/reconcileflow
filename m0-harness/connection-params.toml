@@ -1,0 +1,194 @@
+# Timing-path parameters, from calibration runs (calibrate_timing.py).
+load_cores = 0  # cores kept busy by cpu-load during calibration
+
+[obi.c1."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T043428/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T050625/n1"]
+sha256 = ["86b597b140f632cecbde1840ca236557ea31b0b2b91b7bf45c7264a1366381fb", "c6c0189e5c9ccfc10be3947c73450c693f61d1137d2d1f6bdcd2efca25f06081"]
+receiver_start = "start"
+margin_us = 202
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.021
+feasible = true
+signals = [{ name = "end", offset_us = 71, window_us = 1066 }, { name = "start", offset_us = 319, window_us = 1114 }]
+
+[obi.c1."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T043428/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T050625/n1"]
+sha256 = ["86b597b140f632cecbde1840ca236557ea31b0b2b91b7bf45c7264a1366381fb", "c6c0189e5c9ccfc10be3947c73450c693f61d1137d2d1f6bdcd2efca25f06081"]
+receiver_start = "start"
+margin_us = 203
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.024
+feasible = true
+signals = [{ name = "start", offset_us = 263, window_us = 1198 }, { name = "end", offset_us = 66, window_us = 1036 }]
+
+[beyla.c1."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T041749/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T044318/n1"]
+sha256 = ["0e33524468672f6e9a4f32cb52a17bc64eb7e67d57584cc8c8ddbd9e49860688", "b41b325527009f8c2388c113e3f50d0e9ac70b37049f2a3a1687536b63a6851b"]
+receiver_start = "start"
+margin_us = 252
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.015
+feasible = true
+signals = [{ name = "start", offset_us = 323, window_us = 769 }, { name = "duration", offset_us = 396, window_us = 2758 }]
+
+[beyla.c1."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T041749/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T044318/n1"]
+sha256 = ["0e33524468672f6e9a4f32cb52a17bc64eb7e67d57584cc8c8ddbd9e49860688", "b41b325527009f8c2388c113e3f50d0e9ac70b37049f2a3a1687536b63a6851b"]
+receiver_start = "start"
+margin_us = 187
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.025
+feasible = true
+signals = [{ name = "end", offset_us = 67, window_us = 1269 }, { name = "start", offset_us = 257, window_us = 1630 }]
+
+[obi.c5."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T051512/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052234/n1"]
+sha256 = ["e27ba5b3b40941439da7c735bb10dd23a9be4e7abdf172b9c66c53c2f0d4516d", "b26528616ddaef0fbd1a4293bbbd18c6be1617d0e53e6db006306f3e5fcaafe2"]
+receiver_start = "start"
+margin_us = 217
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.094
+feasible = true
+signals = [{ name = "start", offset_us = 315, window_us = 940 }, { name = "end", offset_us = 66, window_us = 1989 }]
+
+[obi.c5."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T051512/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052234/n1"]
+sha256 = ["e27ba5b3b40941439da7c735bb10dd23a9be4e7abdf172b9c66c53c2f0d4516d", "b26528616ddaef0fbd1a4293bbbd18c6be1617d0e53e6db006306f3e5fcaafe2"]
+receiver_start = "start"
+margin_us = 185
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.088
+feasible = true
+signals = [{ name = "end", offset_us = 62, window_us = 884 }, { name = "start", offset_us = 253, window_us = 2340 }]
+
+[beyla.c5."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T051717/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052442/n1"]
+sha256 = ["192ce48f67c12342a14c12188eac6bc097459cbe6a61ce789852a6fa53982298", "b96b0ce962b5c9781735447380d8e73bd64994be32f2de6b9eec96a02d8dd49d"]
+receiver_start = "start"
+margin_us = 212
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.128
+feasible = true
+signals = [{ name = "start", offset_us = 316, window_us = 1335 }, { name = "end", offset_us = 66, window_us = 1507 }]
+
+[beyla.c5."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T051717/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052442/n1"]
+sha256 = ["192ce48f67c12342a14c12188eac6bc097459cbe6a61ce789852a6fa53982298", "b96b0ce962b5c9781735447380d8e73bd64994be32f2de6b9eec96a02d8dd49d"]
+receiver_start = "start"
+margin_us = 211
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.089
+feasible = true
+signals = [{ name = "end", offset_us = 61, window_us = 923 }, { name = "start", offset_us = 252, window_us = 1069 }]
+
+[obi.c20."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T051931/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052651/n1"]
+sha256 = ["d2b657db0c7a1490a434904e8cbdc2a7df3b2e991eebe0b47ce79ffcceeff169", "3aa23fbfe6edf9b037a414e3b233d302f9e796704adec1a1eadeb9443db7b6b6"]
+receiver_start = "handlerStart"
+margin_us = 355
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 1.076
+feasible = false
+signals = [{ name = "start", offset_us = 319, window_us = 2955 }, { name = "end", offset_us = 55, window_us = 2633 }]
+
+[obi.c20."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T051931/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052651/n1"]
+sha256 = ["d2b657db0c7a1490a434904e8cbdc2a7df3b2e991eebe0b47ce79ffcceeff169", "3aa23fbfe6edf9b037a414e3b233d302f9e796704adec1a1eadeb9443db7b6b6"]
+receiver_start = "start"
+margin_us = 364
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.502
+feasible = true
+signals = [{ name = "end", offset_us = 48, window_us = 1377 }, { name = "start", offset_us = 230, window_us = 2013 }]
+
+[beyla.c20."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T052024/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052743/n1"]
+sha256 = ["f0a9b80c2a852c02224070a7c07debaac0370fe97b207073f84bf88d4cec8305", "0e7013fb8d9b106cb2dd4048dd99008687854603b17ed6e65beff721f723b17c"]
+receiver_start = "start"
+margin_us = 354
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.775
+feasible = true
+signals = [{ name = "start", offset_us = 295, window_us = 2096 }, { name = "end", offset_us = 56, window_us = 2778 }]
+
+[beyla.c20."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T052024/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052743/n1"]
+sha256 = ["f0a9b80c2a852c02224070a7c07debaac0370fe97b207073f84bf88d4cec8305", "0e7013fb8d9b106cb2dd4048dd99008687854603b17ed6e65beff721f723b17c"]
+receiver_start = "start"
+margin_us = 262
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 0.408
+feasible = true
+signals = [{ name = "end", offset_us = 49, window_us = 1104 }, { name = "start", offset_us = 222, window_us = 1695 }]
+
+[obi.c100."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T052840/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T053133/n1"]
+sha256 = ["4b4a66595ebbab8f6093c41bdd65361a2087e0328c3f7d2230d957f3f6852ba5", "8326a3a31fa7c11ea91ca1400700de87f545344a785eb078a70eb63737360485"]
+receiver_start = "start"
+margin_us = 1005
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 3.309
+feasible = false
+signals = [{ name = "end", offset_us = 55, window_us = 2827 }, { name = "start", offset_us = 290, window_us = 2794 }]
+
+[obi.c100."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T052840/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T053133/n1"]
+sha256 = ["4b4a66595ebbab8f6093c41bdd65361a2087e0328c3f7d2230d957f3f6852ba5", "8326a3a31fa7c11ea91ca1400700de87f545344a785eb078a70eb63737360485"]
+receiver_start = "start"
+margin_us = 3047
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 8.689
+feasible = false
+signals = [{ name = "start", offset_us = 220, window_us = 7423 }, { name = "end", offset_us = 48, window_us = 9826 }]
+
+[beyla.c100."hop-1 -> fake-upstream"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T052157/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052918/n1"]
+sha256 = ["9dc39eff3fef54485280a7a52bf7a1cc047b9f1519d10da0e9910175eb660c22", "cc2fe6da81a9a9a360e4d8d453e866f4b05e29b3a7cf1362a646e9db90b927ee"]
+receiver_start = "start"
+margin_us = 991
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 8.45
+feasible = false
+signals = [{ name = "end", offset_us = 52, window_us = 7470 }, { name = "start", offset_us = 281, window_us = 7302 }]
+
+[beyla.c100."load-gen -> hop-1"]
+calibration = ["/data/workspace/reconcileflow/runs/hn-propagation-20261107T052157/n1", "/data/workspace/reconcileflow/runs/hn-propagation-20261107T052918/n1"]
+sha256 = ["9dc39eff3fef54485280a7a52bf7a1cc047b9f1519d10da0e9910175eb660c22", "cc2fe6da81a9a9a360e4d8d453e866f4b05e29b3a7cf1362a646e9db90b927ee"]
+receiver_start = "handlerStart"
+margin_us = 4148
+local_span_us = 20000
+local_limit_permille = 400
+max_component = 32
+density = 8.58
+feasible = false
+signals = [{ name = "start", offset_us = 235, window_us = 7585 }, { name = "end", offset_us = 44, window_us = 15523 }]
